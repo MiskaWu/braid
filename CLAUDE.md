@@ -47,6 +47,10 @@ tests/                            工具的測試（Node＋classic-level 造資�
 
 - **commit 前跑 `make test`**：工具兩個平台、LevelDB 邊界、WSL 啟動腳本、mod 的 validate 與 plugin test。
   Windows 版的測試要在 WSL 裡跑（叫得到 `powershell.exe`）。
+- **CI**（GitHub Actions，Ubuntu）跑同一條 `make test`，Windows 那段自動略過。改到測試腳本時先在本機模擬：
+  PATH 拿掉 `/mnt/` 底下的路徑，**再把 `wslpath`、`cmd.exe` 頂替成「找不到」**（WSL 自己的 `wslpath` 在
+  `/usr/bin`，只拿掉 `/mnt/` 抓不到；2026-10-16 就漏在這裡，CI 紅一次）。不要頂替 `powershell.exe`，
+  否則「有沒有 PowerShell」的判斷會以為有。
 - 工具測試用同一份假資料（`tests/fixture.mjs`）、同一支驗證程式（`tests/verify.mjs`）驗兩個平台：
   改了一邊的流程，另一邊要跟著改，測試會抓到不一致。
 - **真實資料重演**（改到讀寫邏輯時做一次）：把桌面 app 資料的備份解到暫存的 `app/`，用
