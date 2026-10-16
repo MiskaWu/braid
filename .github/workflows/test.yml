@@ -1,0 +1,19 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # plugin validate／test 不需要登入：只載入 mod、對它的 hooks 跑測試，不呼叫模型。
+      # Windows 版遷移工具的測試要 powershell.exe，只在本機（WSL）跑；這裡跑 macOS 版核心與 mod。
+      - run: npm install --global @anthropic-ai/claude-code
+      - run: claude --version
+      - run: make test

@@ -49,11 +49,13 @@ Claude 桌面 app 換帳號登入後，Code 分頁側欄的舊對話和「已儲
    "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"
    ```
 
-2. 加入 marketplace 並安裝（`<repo>` 換成這個 repo 的 git 網址）：
+2. 加入 marketplace 並安裝：
 
    ```bash
-   claude plugin marketplace add <repo> && claude plugin install braid@braid
+   claude plugin marketplace add MiskaWu/braid && claude plugin install braid@braid
    ```
+
+   或在終端機裡的 Claude Code 輸入 `/plugin marketplace add MiskaWu/braid`、`/plugin install braid@braid`。
 
 之後在任何對話打 `/braid migrate`，會另外開一個視窗跑遷移工具；`/braid migrate 試跑` 只列計畫。
 只打 `/braid` 會列出所有動作。
