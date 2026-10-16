@@ -58,14 +58,31 @@ cat > "$T/bin/claude-setup" <<'EOF'
 [ "$1" = setup-token ] && echo "（假的 setup-token：這裡會顯示憑證）"
 EOF
 chmod +x "$T/bin/claude-setup"
+# 假的 curl：記下參數與從標準輸入收到的標頭，回一份帳號資料（不會真的連 Claude）
+cat > "$T/bin/curl" <<FAKE
+#!/bin/bash
+printf '%s\n' "\$@" > "$T/curl-args"
+cat > "$T/curl-stdin"
+out=; while [ \$# -gt 0 ]; do [ "\$1" = -o ] && out=\$2; shift; done
+[ -n "\${FAKE_CURL_FAIL:-}" ] && exit 22
+printf '{"account":{"uuid":"u-9","email":"me@gmail.example"},"organization":{"uuid":"o-9"}}' > "\$out"
+FAKE
+chmod +x "$T/bin/curl"
 res="$T/add.json"
-out=$(printf '\n  %s  \n' "$TOKEN" | bash "$CLI/add-account.sh" tok-7 "$res" "$T/bin/claude-setup" 2>&1)
-[ "$(cat "$res")" = '{"ok":true,"backend":"file"}' ] && ok "成功：結果檔只寫存在哪裡" || ng "結果檔不對：$(cat "$res" 2>&1) / $out"
-grep -q sk-ant "$res" && ng "結果檔裡有憑證" || ok "結果檔裡沒有憑證"
+out=$(printf '\n  %s  \n' "$TOKEN" | PATH="$T/bin:$PATH" BRAID_PROFILE_URL=https://evil.example/steal bash "$CLI/add-account.sh" tok-7 "$res" "$T/bin/claude-setup" 2>&1)
+[ "$(cat "$res")" = '{"ok":true,"backend":"file","profile":true}' ] && ok "成功：結果檔只寫存在哪裡、有沒有查到是誰" || ng "結果檔不對：$(cat "$res" 2>&1) / $out"
+grep -q sk-ant "$res" "$res.profile.json" && ng "結果檔裡有憑證" || ok "結果檔與帳號資料檔裡都沒有憑證"
+[ "$(stat -c %a "$res")" = 600 ] && [ "$(stat -c %a "$res.profile.json")" = 600 ] && ok "結果檔與帳號資料檔只有自己讀得到" || ng "權限不對：$(stat -c %a "$res" "$res.profile.json")"
+grep -q '"uuid":"u-9"' "$res.profile.json" && ok "查到的帳號資料存下來給面板判斷是誰" || ng "沒有帳號資料：$(cat "$res.profile.json" 2>&1)"
+grep -qx "Authorization: Bearer $TOKEN" "$T/curl-stdin" && ! grep -q sk-ant "$T/curl-args" && ok "憑證經由標準輸入交給 curl，不在參數裡" || ng "憑證出現在 curl 參數，或沒送出：$(cat "$T/curl-args")"
+[ "$(tail -1 "$T/curl-args")" = https://api.anthropic.com/api/oauth/profile ] && ok "只問 api.anthropic.com；測試用的網址變數只接受本機檔案" || ng "網址不對：$(tail -1 "$T/curl-args")"
+rm -f "$res" "$res.profile.json"
+printf '\n%s\n\n' "$TOKEN" | PATH="$T/bin:$PATH" FAKE_CURL_FAIL=1 bash "$CLI/add-account.sh" tok-6 "$res" "$T/bin/claude-setup" >/dev/null 2>&1
+[ "$(cat "$res")" = '{"ok":true,"backend":"file","profile":false}' ] && [ ! -e "$res.profile.json" ] && ok "查不到是誰（連不上）：照樣存好，標成沒查到" || ng "查不到時的結果不對：$(cat "$res" 2>&1)"
 [ "$("$CLI/secret.sh" get tok-7)" = "$TOKEN" ] && ok "貼上的憑證（前後空白去掉）存好了" || ng "存的憑證不對"
 echo "$out" | grep -q '假的 setup-token' && ok "先跑 claude setup-token" || ng "沒跑 setup-token：$out"
 rm -f "$res"
-printf '\nnope\n\n' | bash "$CLI/add-account.sh" tok-8 "$res" "$T/bin/claude-setup" >/dev/null 2>&1
+printf '\nnope\n\n' | PATH="$T/bin:$PATH" bash "$CLI/add-account.sh" tok-8 "$res" "$T/bin/claude-setup" >/dev/null 2>&1
 [ "$(cat "$res")" = '{"ok":false,"reason":"canceled"}' ] && ! "$CLI/secret.sh" get tok-8 >/dev/null 2>&1 && ok "貼錯再按 Enter：取消，什麼都沒存" || ng "取消時的結果不對：$(cat "$res" 2>&1)"
 
 echo "######## open-linux.sh"

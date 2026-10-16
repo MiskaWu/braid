@@ -88,7 +88,11 @@ tests/                            工具的測試（Node＋classic-level 造資�
 - **接著做用 `--fork-session`**：複製一份新的對話，原本的不動，兩個行程不會寫同一份紀錄。
   憑證在 macOS／Linux／WSL 經由 `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` 交出去（Claude Code 讀完會刪變數，
   管道也讀空，對話裡執行的指令拿不到）；Windows 沒有這個機制，只能放那個視窗的 `CLAUDE_CODE_OAUTH_TOKEN`。
-- **不繞過公司政策**：policy 設了 `forceLoginOrgUUID` 就不讓新增帳號（查不出憑證屬於哪個組織）。
+- **新增帳號要查是誰**：add-account 存好憑證後用它打 `GET https://api.anthropic.com/api/oauth/profile`
+  （Claude Code 自己的做法，未公開文件；憑證經標準輸入交給 curl，Windows 用 Invoke-WebRequest），回應另存
+  `<結果檔>.profile.json`（600）。面板用 `model.ts` 的 `classifyWho` 判斷：是目前帳號就拒絕並刪憑證、認得的就更新它的憑證、
+  新的照查到的 uuid／信箱／組織存。回應格式不對或連不上就當查不到，退回由使用者說明。`BRAID_PROFILE_URL` 只接受 file://（測試用）。
+- **不繞過公司政策**：policy 設了 `forceLoginOrgUUID` 就不讓新增帳號（新增前沒辦法知道會登入哪個組織）。
   組織不明的帳號在「只換同組織」的資料夾一律不算同組織。
 - **測試碰不到真的工具**：會真的啟動 Windows 程式的測試（`launch-wsl.sh` 的實跑那段），先刪掉複製出去的真工具、
   用字面字串替換路徑、執行前斷言指令只指向 dump。2026-10-16 這裡的 bash 樣式替換遇到反斜線靜默失敗，
@@ -108,6 +112,9 @@ tests/                            工具的測試（Node＋classic-level 造資�
 - **PowerShell 在同一個行程裡呼叫另一支 .ps1**，成功時不會設 `$LASTEXITCODE`（還是 `$null`，`$null -ne 0` 成立），
   要看輸出內容判斷。**標準輸入被導向時 `Read-Host` 不讀它**，會一直等：要讓腳本能自動測試，
   在 `[Console]::IsInputRedirected` 時改讀 `[Console]::In`（見 `add-account.ps1` 的 `Read-Line`）。
+- **修改腳本不要用巢狀 heredoc**：外層 `<<'EOF'` 裡的字串若有一行 `EOF`（例如測試裡的假程式），外層會在那裡提早結束，
+  剩下的行被 shell 當指令跑（2026-10-16 發生過，變數是空的，`$T/bin/curl` 變成 `/bin/curl`，因為沒有權限才沒寫進去）。
+  長的修改腳本先用 Write 寫成檔案再執行，內層 heredoc 用不同的結束字。
 - **這台開發機的 `find` 是 bfs**：不吃 `-newermt '-20 minutes'`，報錯時沒有輸出，接 `wc -l` 會得到 0，
   看起來像「沒有檔案被改」。要看修改時間用 `stat -c '%y'` 排序。
 

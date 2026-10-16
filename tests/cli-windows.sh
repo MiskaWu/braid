@@ -55,14 +55,19 @@ if "%1"=="setup-token" echo (fake setup-token)
 EOF
 sed -i 's/$/\r/' "$W/claude-setup.cmd"
 res="$W/add.json"
-printf '\r\n  %s  \r\n\r\n' "$TOKEN" | BRAID_ACCOUNT="$ID-add" BRAID_RESULT="$(wslpath -w "$res")" BRAID_CLAUDE="$(wslpath -w "$W/claude-setup.cmd")" \
-  WSLENV="BRAID_ACCOUNT:BRAID_RESULT:BRAID_CLAUDE${WSLENV:+:$WSLENV}" ps -File "$(wslpath -w ../mod/tool/windows/add-account.ps1)" >/dev/null 2>&1
-[ "$(cat "$res" 2>&1)" = '{"ok":true,"backend":"credman"}' ] && ok "成功：結果檔只寫存在哪裡" || ng "結果檔不對：$(cat "$res" 2>&1)"
+# 帳號資料用本機檔案代替（BRAID_PROFILE_URL 只接受 file://），不會拿假憑證去連 Claude
+printf '{"account":{"uuid":"u-9","email":"me@gmail.example"},"organization":{"uuid":"o-9"}}' > "$W/profile.json"
+PROFILE_URL="file:///$(wslpath -w "$W/profile.json" | tr '\\' /)"
+printf '\r\n  %s  \r\n\r\n' "$TOKEN" | BRAID_ACCOUNT="$ID-add" BRAID_RESULT="$(wslpath -w "$res")" BRAID_CLAUDE="$(wslpath -w "$W/claude-setup.cmd")" BRAID_PROFILE_URL="$PROFILE_URL" \
+  WSLENV="BRAID_ACCOUNT:BRAID_RESULT:BRAID_CLAUDE:BRAID_PROFILE_URL${WSLENV:+:$WSLENV}" ps -File "$(wslpath -w ../mod/tool/windows/add-account.ps1)" >/dev/null 2>&1
+[ "$(cat "$res" 2>&1)" = '{"ok":true,"backend":"credman","profile":true}' ] && ok "成功：結果檔只寫存在哪裡、有沒有查到是誰" || ng "結果檔不對：$(cat "$res" 2>&1)"
+grep -q '"uuid":"u-9"' "$res.profile.json" && ok "查到的帳號資料存下來給面板判斷是誰" || ng "沒有帳號資料：$(cat "$res.profile.json" 2>&1)"
+grep -q sk-ant "$res.profile.json" && ng "帳號資料檔裡有憑證" || ok "帳號資料檔裡沒有憑證"
 grep -q sk-ant "$res" && ng "結果檔裡有憑證" || ok "結果檔裡沒有憑證"
 [ "$(ps -File "$SECRET" get "$ID-add")" = "$TOKEN" ] && ok "貼上的憑證（前後空白去掉）存進認證管理員" || ng "憑證沒存好"
 rm -f "$res"
-printf '\r\nnope\r\n\r\n' | BRAID_ACCOUNT="$ID-add2" BRAID_RESULT="$(wslpath -w "$res")" BRAID_CLAUDE="$(wslpath -w "$W/claude-setup.cmd")" \
-  WSLENV="BRAID_ACCOUNT:BRAID_RESULT:BRAID_CLAUDE${WSLENV:+:$WSLENV}" ps -File "$(wslpath -w ../mod/tool/windows/add-account.ps1)" >/dev/null 2>&1
+printf '\r\nnope\r\n\r\n' | BRAID_ACCOUNT="$ID-add2" BRAID_RESULT="$(wslpath -w "$res")" BRAID_CLAUDE="$(wslpath -w "$W/claude-setup.cmd")" BRAID_PROFILE_URL="$PROFILE_URL" \
+  WSLENV="BRAID_ACCOUNT:BRAID_RESULT:BRAID_CLAUDE:BRAID_PROFILE_URL${WSLENV:+:$WSLENV}" ps -File "$(wslpath -w ../mod/tool/windows/add-account.ps1)" >/dev/null 2>&1
 [ "$(cat "$res" 2>&1)" = '{"ok":false,"reason":"canceled"}' ] && ok "貼錯再按 Enter：取消" || ng "取消時的結果不對：$(cat "$res" 2>&1)"
 ps -File "$SECRET" get "$ID-add2" >/dev/null 2>&1 && ng "取消了卻存了憑證" || ok "取消時什麼都沒存"
 

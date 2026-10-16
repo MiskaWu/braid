@@ -8,6 +8,7 @@ import type {
   BraidSync,
   BraidUsage,
   BraidUses,
+  BraidWho,
   BraidWindow,
 } from '../types'
 
@@ -143,6 +144,39 @@ export function upsertSeen(accounts: Record<string, BraidAccount>, seen: Seen, n
     usage: null,
     lastSeen: now,
   }
+}
+
+// ── 新增帳號：這組憑證是誰 ──
+
+/** /api/oauth/profile 的回應 → 帳號與組織；格式不對就是 null（不猜）。 */
+export function parseProfile(text: string): BraidWho | null {
+  try {
+    const d = JSON.parse(text.replace(/^\uFEFF/, '')) as { account?: unknown; organization?: unknown }
+    if (!isObj(d.account) || !isObj(d.organization)) return null
+    const uuid = str(d.account.uuid)
+    const email = str(d.account.email)
+    const orgId = str(d.organization.uuid)
+    if (!uuid || !email || !orgId) return null
+    return { uuid, email, orgId, orgName: str(d.organization.name) }
+  } catch {
+    return null
+  }
+}
+
+export type WhoVerdict = { kind: 'current' } | { kind: 'known'; account: BraidAccount } | { kind: 'new' }
+
+/**
+ * 新增的憑證跟清單裡的帳號是什麼關係：就是目前這個帳號（不能拿來接手）、已經認得的帳號（更新它的憑證）、或新的。
+ * 認得＝帳號 uuid 相同；braid 早期新增、還不知道 uuid 的帳號（tok-…）則比信箱。
+ */
+export function classifyWho(accounts: Record<string, BraidAccount>, current: string | null, who: BraidWho): WhoVerdict {
+  if (current && (who.uuid === current || accounts[current]?.id === who.uuid)) return { kind: 'current' }
+  const byId = accounts[who.uuid]
+  if (byId) return { kind: 'known', account: byId }
+  const email = who.email.toLowerCase()
+  const byEmail = Object.values(accounts).find(a => a.id.startsWith('tok-') && a.email?.toLowerCase() === email)
+  if (byEmail) return byEmail.id === current ? { kind: 'current' } : { kind: 'known', account: byEmail }
+  return { kind: 'new' }
 }
 
 // ── 用量 ──
