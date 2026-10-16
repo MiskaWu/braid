@@ -41,6 +41,8 @@ describe('/braid migrate 依平台開獨立視窗', () => {
     expect(runs[0]?.[1]).toMatch(/\/tool\/launch-from-wsl\.sh$/)
     expect(runs[0]?.[2]).toBe('-DryRun')
     expect(text).toContain('試跑')
+    expect(text).toContain('Claude 不用結束')
+    expect(text).not.toContain('系統匣')
   })
 
   test('Windows 原生：用 Start-Process 開 migrate.cmd，不經過 uname', async ($, on) => {

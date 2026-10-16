@@ -78,16 +78,20 @@ var CDM = (function () {
     return dst;
   }
 
-  function readLogRecords(data) {
+  // tolerateTail：app 開著時尾端可能正寫到一半，試跑時就當讀到這裡為止；要寫入時不容忍
+  function readLogRecords(data, tolerateTail) {
     var recs = [], cur = null, pos = 0;
     while (pos < data.length) {
       var left = BLOCK - (pos % BLOCK);
       if (left < HEADER) { pos += left; continue; }
-      if (pos + HEADER > data.length) throw new Error('truncated log header');
+      if (pos + HEADER > data.length) { if (tolerateTail) break; throw new Error('truncated log header'); }
       var stored = u32(data, pos), len = data[pos + 4] | (data[pos + 5] << 8), type = data[pos + 6];
       if (type === 0 && len === 0) { pos += left; continue; }
-      if (pos + HEADER + len > data.length) throw new Error('truncated log record');
-      if (mask(crc32c(data, pos + 6, 1 + len)) !== stored) throw new Error('log checksum mismatch');
+      if (pos + HEADER + len > data.length) { if (tolerateTail) break; throw new Error('truncated log record'); }
+      if (mask(crc32c(data, pos + 6, 1 + len)) !== stored) {
+        if (tolerateTail && pos + HEADER + len >= data.length) break;
+        throw new Error('log checksum mismatch');
+      }
       var payload = data.subarray(pos + HEADER, pos + HEADER + len);
       if (type === 1) recs.push(payload);
       else if (type === 2) cur = [payload];
@@ -96,7 +100,7 @@ var CDM = (function () {
       else throw new Error('unknown log record type ' + type);
       pos += HEADER + len;
     }
-    if (cur) throw new Error('log ends inside a fragmented record');
+    if (cur && !tolerateTail) throw new Error('log ends inside a fragmented record');
     return recs;
   }
 
@@ -167,7 +171,7 @@ var CDM = (function () {
     return false;
   }
 
-  function lsRead(io, dir, needle) {
+  function lsRead(io, dir, needle, tolerateTail) {
     var nb = needle == null ? null : latin1Bytes(needle);
     var st = { entries: {}, maxSeq: 0, activeLog: null };
     function consider(key, seq, deleted, val) {
@@ -180,7 +184,7 @@ var CDM = (function () {
     var current = io.readText(io.join(dir, 'CURRENT')).trim();
     if (current.indexOf('MANIFEST-') !== 0) throw new Error('unexpected CURRENT: ' + current);
     var logNumber = 0, prevLog = 0, live = {};
-    readLogRecords(io.readBytes(io.join(dir, current))).forEach(function (rec) {
+    readLogRecords(io.readBytes(io.join(dir, current)), tolerateTail).forEach(function (rec) {
       var pos = { p: 0 };
       while (pos.p < rec.length) {
         var tag = varint(rec, pos);
@@ -213,7 +217,7 @@ var CDM = (function () {
       .filter(function (x) { return x.n >= logNumber || x.n === prevLog; })
       .sort(function (a, b) { return a.n - b.n; });
     logs.forEach(function (x) {
-      readLogRecords(io.readBytes(io.join(dir, x.f))).forEach(function (rec) {
+      readLogRecords(io.readBytes(io.join(dir, x.f)), tolerateTail).forEach(function (rec) {
         if (rec.length < 12) throw new Error('write batch too short');
         var seq = u64(rec, 0), count = u32(rec, 8), pos = { p: 12 };
         for (var i = 0; i < count; i++) {
@@ -408,7 +412,9 @@ var CDM = (function () {
       ui.say('只複製、不搬移；寫入前會先備份。不需要系統管理員權限。');
       ui.say('');
       if (!io.isDir(opts.appDataRoot)) throw new Error('找不到 Claude 桌面 app 的資料夾：' + opts.appDataRoot);
-      waitAppClosed(io, ui, opts);
+      // 試跑只讀不寫，app 開著也能看；正式寫入才要等 app 結束（它開著時會把寫入蓋回去）
+      if (opts.dryRun) ui.say('試跑：只讀不寫，Claude 開著也沒關係。', 'gray');
+      else waitAppClosed(io, ui, opts);
 
       // --- 找帳號 ---
       var sessRoot = io.join(opts.appDataRoot, spec.sessions.dir);
@@ -506,7 +512,7 @@ var CDM = (function () {
       var presetPlans = [], lsDir = io.join.apply(null, [opts.appDataRoot].concat(spec.presets.localStorageDir.split('/')));
       if (io.isDir(lsDir)) {
         try {
-          var state = lsRead(io, lsDir, spec.presets.keyPrefix), byName = {}, kp = spec.presets.keyPrefix;
+          var state = lsRead(io, lsDir, spec.presets.keyPrefix, !!opts.dryRun), byName = {}, kp = spec.presets.keyPrefix;
           Object.keys(state.entries).forEach(function (k) {
             var en = state.entries[k];
             if (en.deleted) return;
@@ -580,7 +586,7 @@ var CDM = (function () {
 
       var mergeScopes = presetPlans.filter(function (p) { return p.status === 'merge'; });
       if (!copy.length && !addArchived.length && !mergeScopes.length) { ui.say('沒有需要搬的東西，結束。', 'green'); return 0; }
-      if (opts.dryRun) { ui.say('試跑模式：沒有寫入任何東西。', 'cyan'); return 0; }
+      if (opts.dryRun) { ui.say('試跑模式：沒有寫入任何東西。要正式搬，不加 --dry-run 再跑一次（會請你先結束 Claude）。', 'cyan'); return 0; }
       if (ui.ask('開始寫入？[Y/N]（直接按 Enter＝Y）', ['Y', 'N'], 'Y', 'Y') !== 'Y') throw new Error('CANCEL');
 
       // --- 備份 ---

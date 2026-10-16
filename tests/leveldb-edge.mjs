@@ -61,7 +61,52 @@ async function scenario(impl, label, fillTo, valueLen) {
   fs.rmSync(local, { recursive: true, force: true })
 }
 
+// 日誌尾端寫到一半（app 開著時讀到的樣子）：試跑讀到那裡為止；要寫入時拒絕
+async function tailScenario(impl) {
+  const label = `[${impl}] 日誌尾端寫到一半`
+  const local = `/tmp/cdm-tail-${process.pid}`
+  fs.rmSync(local, { recursive: true, force: true })
+  const db = openDb(local, true)
+  await db.open()
+  await db.put(Buffer.from('old'), Buffer.from('keep-me'))
+  await db.close()
+  const log = fs.readdirSync(local).filter((f) => f.endsWith('.log')).map((f) => path.join(local, f))[0]
+  fs.appendFileSync(log, Buffer.from([1, 2, 3, 4, 100, 0, 1, 9, 9, 9]))   // 標頭說長 100，只寫了 3 個位元組
+  if (impl === 'ps') {
+    const win = path.join(winTemp, `cdm-tail-${process.pid}`)
+    copyDir(local, win)
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1, toWin(win), 'x', 'x', '-Mode', 'tail']).toString()
+    eq(out.trim().split(/\r?\n/), ['tolerant-ok found=1', 'strict-refused', 'append-refused'], `${label}：試跑照讀、嚴格讀與寫入都拒絕`)
+    fs.rmSync(win, { recursive: true, force: true })
+  } else {
+    let tolerant = 'tolerant-failed'
+    try { tolerant = `tolerant-ok found=${Object.keys(CDM.leveldb.read(fsIo, local, 'old', true).entries).length}` } catch {}
+    let strict = 'strict-ok'
+    try { CDM.leveldb.read(fsIo, local, 'old', false) } catch { strict = 'strict-refused' }
+    let append = 'append-ok'
+    try { CDM.leveldb.append(fsIo, local, new Uint8Array([1, 2]), new Uint8Array([3])) } catch { append = 'append-refused' }
+    eq([tolerant, strict, append], ['tolerant-ok found=1', 'strict-refused', 'append-refused'], `${label}：試跑照讀、嚴格讀與寫入都拒絕`)
+  }
+  fs.rmSync(local, { recursive: true, force: true })
+}
+
+// app 開著時檔案被以「允許別人讀寫」開著（Windows 才有這種鎖）：要讀得到，寫入要被拒絕
+async function heldScenario() {
+  const local = `/tmp/cdm-held-${process.pid}`, win = path.join(winTemp, `cdm-held-${process.pid}`)
+  fs.rmSync(local, { recursive: true, force: true })
+  const db = openDb(local, true)
+  await db.open()
+  await db.put(Buffer.from('old'), Buffer.from('keep-me'))
+  await db.close()
+  copyDir(local, win)
+  const out = execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1, toWin(win), 'x', 'x', '-Mode', 'held']).toString()
+  eq(out.trim().split(/\r?\n/), ['read-ok found=1', 'append-refused'], '[ps] 另一個程式開著檔案在寫：讀得到、寫入被拒絕')
+  fs.rmSync(win, { recursive: true, force: true }); fs.rmSync(local, { recursive: true, force: true })
+}
+
 for (const impl of impls) {
+  await tailScenario(impl)
+  if (impl === 'ps') await heldScenario()
   await scenario(impl, '一般', null, 3000)
   await scenario(impl, '剩 3 位元組要補零', BLOCK - 3, 3000)
   await scenario(impl, '剩剛好 7 位元組', BLOCK - 7, 3000)

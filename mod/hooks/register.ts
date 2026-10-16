@@ -57,9 +57,12 @@ async function migrate($: EngineInterface, rest: string): Promise<string> {
       return `開不了遷移視窗（${why || `結束碼 ${result.exitCode}`}）。\n也可以直接雙擊：${manualPath(platform, $.plugin.root)}`
     }
   }
+  if (dryRun) {
+    return '已在另一個視窗開啟遷移工具（試跑：只列計畫、不寫入，Claude 不用結束）。\n看完計畫按任意鍵關閉那個視窗；要正式搬就打 /braid migrate。'
+  }
   const quit = platform === 'mac' ? '選單列 Claude →「結束 Claude」（⌘Q）' : '右下角系統匣的 Claude 圖示按右鍵 →「結束」'
   return [
-    dryRun ? '已在另一個視窗開啟遷移工具（試跑：只列出計畫，不會寫入）。' : '已在另一個視窗開啟遷移工具。',
+    '已在另一個視窗開啟遷移工具。',
     `接下來照那個視窗的指示：先${quit}，只關掉視窗不夠。這個對話會跟著中斷，沒關係。`,
     '工具會先備份再搬，最後問你要不要重新開啟 Claude；重開後在側欄找回這個對話即可。',
   ].join('\n')

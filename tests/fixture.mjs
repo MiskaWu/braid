@@ -15,6 +15,7 @@ export const U = '33333333-3333-4333-8333-333333333333', UO = '33333333-3333-433
 const uuid = (c) => `aaaaaaaa-0000-4000-8000-00000000000${c}`
 const cli = (c) => `cccccccc-0000-4000-8000-00000000000${c}`
 
+const DISTRO = process.env.WSL_DISTRO_NAME || 'dev'   // 跑測試這台的 WSL 發行版，對話紀錄要從這裡找得到
 const app = path.join(root, 'app')
 const home = path.join(root, 'claude-home')
 fs.rmSync(root, { recursive: true, force: true })
@@ -62,8 +63,8 @@ put(S, SO, session('c'))                                                        
 put(S, SO, session('d'))                                                          // 目標已有 → 略過
 put(S, SO, session('e'))                                                          // 目標刪除過 → 略過
 transcript(path.join(wslDir, 'projects', 'p', cli('f') + '.jsonl'))
-put(S, SO, session('f', { wsl: 'dev', transcript: path.join(wslDir, 'projects', 'p', cli('f') + '.jsonl') })) // WSL，在 → 複製
-put(S, SO, session('g', { wsl: 'dev', transcript: path.join(wslDir, 'projects', 'p', cli('g') + '.jsonl') })) // WSL，不在 → 略過
+put(S, SO, session('f', { wsl: DISTRO, transcript: path.join(wslDir, 'projects', 'p', cli('f') + '.jsonl') })) // WSL，在 → 複製
+put(S, SO, session('g', { wsl: DISTRO, transcript: path.join(wslDir, 'projects', 'p', cli('g') + '.jsonl') })) // WSL，不在 → 略過
 put(S, SO, session('h', { drop: ['cwd'] }))                                       // 格式不符 → 略過
 put(S, SO, session('i', { transcript: '/home/remote/.claude/projects/x/' + cli('i') + '.jsonl' })) // SSH 遠端 → 問、預設複製
 fs.writeFileSync(path.join(app, 'claude-code-sessions', S, SO, 'local_broken.json'), '{not json')

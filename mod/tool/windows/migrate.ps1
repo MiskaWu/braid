@@ -279,7 +279,8 @@ function Main {
         $lsAvailable = $false
     }
 
-    Wait-AppClosed
+    # 試跑只讀不寫，app 開著也能看；正式寫入才要等 app 結束（它開著時會把寫入蓋回去）
+    if ($DryRun) { Say '試跑：只讀不寫，Claude 開著也沒關係。' DarkGray } else { Wait-AppClosed }
 
     # --- 找帳號 ---
     $sessRoot = Join-Path $AppDataRoot $spec.sessions.dir
@@ -392,7 +393,7 @@ function Main {
     $lsDir = Join-Path $AppDataRoot ($spec.presets.localStorageDir -replace '/', '\')
     if ($lsAvailable -and (Test-Path -LiteralPath $lsDir)) {
         try {
-            $state = [CdmLevelDb]::Read($lsDir, $spec.presets.keyPrefix)
+            $state = [CdmLevelDb]::Read($lsDir, $spec.presets.keyPrefix, [bool]$DryRun)
             $byName = @{}
             foreach ($kv in $state.Entries.GetEnumerator()) {
                 $en = $kv.Value
@@ -480,7 +481,7 @@ function Main {
 
     $mergeScopes = @($presetPlans | Where-Object { $_.Status -eq 'merge' })
     if ($copy.Count -eq 0 -and $addArchived.Count -eq 0 -and $mergeScopes.Count -eq 0) { Say '沒有需要搬的東西，結束。' Green; return }
-    if ($DryRun) { Say '試跑模式：沒有寫入任何東西。' Cyan; return }
+    if ($DryRun) { Say '試跑模式：沒有寫入任何東西。要正式搬，不加 -DryRun 再跑一次（會請你先結束 Claude）。' Cyan; return }
     $go = Ask '開始寫入？[Y/N]（直接按 Enter＝Y）' @('Y', 'N') 'Y' 'Y'
     if ($go -ne 'Y') { throw 'CANCEL' }
 

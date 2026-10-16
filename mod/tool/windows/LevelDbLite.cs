@@ -129,9 +129,29 @@ public static class CdmLevelDb
         return dst;
     }
 
-    // ---------- 日誌（MANIFEST 與 *.log 共用這個格式） ----------
+    // app 開著時 Chromium 以「允許別人讀、自己在寫」開著這些檔；一般的整檔讀取要求別人不能寫，會被拒絕。
+    // 讀取一律用共用模式；寫入（Append）仍然獨佔開檔，app 開著就失敗。
+    static byte[] ReadShared(string path)
+    {
+        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        {
+            byte[] buf = new byte[fs.Length];
+            int off = 0;
+            while (off < buf.Length)
+            {
+                int n = fs.Read(buf, off, buf.Length - off);
+                if (n <= 0) break;
+                off += n;
+            }
+            return off == buf.Length ? buf : Slice(buf, 0, off);
+        }
+    }
 
-    static List<byte[]> ReadLogRecords(byte[] data)
+    // ---------- 日誌（MANIFEST 與 *.log 共用這個格式） ----------
+    // tolerateTail：app 開著時尾端可能正寫到一半，試跑時就當讀到這裡為止（LevelDB 自己也這樣做）；
+    // 要寫入時不容忍，殘缺的尾巴後面不接著寫。
+
+    static List<byte[]> ReadLogRecords(byte[] data, bool tolerateTail)
     {
         List<byte[]> recs = new List<byte[]>();
         List<byte> cur = null;
@@ -140,13 +160,17 @@ public static class CdmLevelDb
         {
             int left = BlockSize - (pos % BlockSize);
             if (left < HeaderSize) { pos += left; continue; }
-            if (pos + HeaderSize > data.Length) throw new InvalidDataException("truncated log header");
+            if (pos + HeaderSize > data.Length) { if (tolerateTail) break; throw new InvalidDataException("truncated log header"); }
             uint stored = BitConverter.ToUInt32(data, pos);
             int len = data[pos + 4] | (data[pos + 5] << 8);
             byte type = data[pos + 6];
             if (type == 0 && len == 0) { pos += left; continue; } // 預先配置的空白，跳到下一個區塊
-            if (pos + HeaderSize + len > data.Length) throw new InvalidDataException("truncated log record");
-            if (Mask(Crc32c(data, pos + 6, 1 + len)) != stored) throw new InvalidDataException("log checksum mismatch");
+            if (pos + HeaderSize + len > data.Length) { if (tolerateTail) break; throw new InvalidDataException("truncated log record"); }
+            if (Mask(Crc32c(data, pos + 6, 1 + len)) != stored)
+            {
+                if (tolerateTail && pos + HeaderSize + len >= data.Length) break; // 最後一筆寫到一半
+                throw new InvalidDataException("log checksum mismatch");
+            }
             byte[] payload = Slice(data, pos + HeaderSize, len);
             switch (type)
             {
@@ -158,7 +182,7 @@ public static class CdmLevelDb
             }
             pos += HeaderSize + len;
         }
-        if (cur != null) throw new InvalidDataException("log ends inside a fragmented record");
+        if (cur != null && !tolerateTail) throw new InvalidDataException("log ends inside a fragmented record");
         return recs;
     }
 
@@ -204,7 +228,7 @@ public static class CdmLevelDb
 
     static void ReadTable(string path, Action<byte[], byte[]> cb)
     {
-        byte[] b = File.ReadAllBytes(path);
+        byte[] b = ReadShared(path);
         if (b.Length < 48) throw new InvalidDataException("table too small: " + path);
         if (BitConverter.ToUInt64(b, b.Length - 8) != TableMagic) throw new InvalidDataException("not a leveldb table: " + path);
         int p = b.Length - 48;
@@ -245,16 +269,18 @@ public static class CdmLevelDb
         st.Entries[k] = e;
     }
 
-    public static CdmDbState Read(string dir, string needle)
+    public static CdmDbState Read(string dir, string needle) { return Read(dir, needle, false); }
+
+    public static CdmDbState Read(string dir, string needle, bool tolerateTail)
     {
         byte[] nb = needle == null ? null : Latin1.GetBytes(needle);
         CdmDbState st = new CdmDbState();
-        string current = File.ReadAllText(Path.Combine(dir, "CURRENT")).Trim();
+        string current = Encoding.ASCII.GetString(ReadShared(Path.Combine(dir, "CURRENT"))).Trim();
         if (!current.StartsWith("MANIFEST-")) throw new InvalidDataException("unexpected CURRENT: " + current);
 
         ulong logNumber = 0, prevLog = 0;
         HashSet<ulong> live = new HashSet<ulong>();
-        foreach (byte[] rec in ReadLogRecords(File.ReadAllBytes(Path.Combine(dir, current))))
+        foreach (byte[] rec in ReadLogRecords(ReadShared(Path.Combine(dir, current)), tolerateTail))
         {
             int p = 0;
             while (p < rec.Length)
@@ -308,7 +334,7 @@ public static class CdmLevelDb
         logs.Sort((a, b) => a.Key.CompareTo(b.Key));
         foreach (KeyValuePair<ulong, string> log in logs)
         {
-            foreach (byte[] rec in ReadLogRecords(File.ReadAllBytes(log.Value)))
+            foreach (byte[] rec in ReadLogRecords(ReadShared(log.Value), tolerateTail))
             {
                 if (rec.Length < 12) throw new InvalidDataException("write batch too short");
                 ulong seq = BitConverter.ToUInt64(rec, 0);

@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 [ -d node_modules ] || npm install --no-audit --no-fund >/dev/null
-W=/tmp/cdm-core-test; WSLDIR=/tmp/cdm-core-wsl
+W=/tmp/cdm-core-test-$$; WSLDIR=/tmp/cdm-core-wsl-$$   # 每次執行各用各的，同時跑也不互相干擾
 run() { node run-core.mjs --yes --from 11111111 --app-data-root "$W/app" --claude-home "$W/claude-home" --backup-root "$W/backups" "$@"; }
 
 node fixture.mjs "$W" "$WSLDIR" >/dev/null

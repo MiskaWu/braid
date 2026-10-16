@@ -6,9 +6,9 @@ cd "$(dirname "$0")"
 [ -d node_modules ] || npm install --no-audit --no-fund >/dev/null
 
 WINTEMP=$(wslpath -u "$(cd /mnt/c && cmd.exe /c 'echo %TEMP%' | tr -d '\r')")
-W="$WINTEMP/cdm-test"                 # Windows 看得到的位置
-LOCAL=/tmp/cdm-fixture                # 造資料用（LevelDB 在 /mnt/c 上開鎖檔不穩）
-WSLDIR=/tmp/cdm-test-wsl              # 假的 WSL 端對話紀錄
+W="$WINTEMP/cdm-test-$$"               # Windows 看得到的位置
+LOCAL=/tmp/cdm-fixture-$$              # 造資料用（LevelDB 在 /mnt/c 上開鎖檔不穩）
+WSLDIR=/tmp/cdm-test-wsl-$$            # 假的 WSL 端對話紀錄
 PS1=$(wslpath -w ../mod/tool/windows/migrate.ps1)
 
 run_ps() {

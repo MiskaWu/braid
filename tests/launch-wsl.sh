@@ -3,8 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 REAL_TEMP=$(cd /mnt/c && cmd.exe /c 'echo %TEMP%' | tr -d '\r')
-FAKE=/tmp/cdm-fake-bin; rm -rf "$FAKE"; mkdir -p "$FAKE"
-TEST_TEMP="$REAL_TEMP\\cdm-launch-test"
+FAKE=/tmp/cdm-fake-bin-$$; rm -rf "$FAKE"; mkdir -p "$FAKE"
+TEST_TEMP="$REAL_TEMP\\cdm-launch-test-$$"
 printf '#!/bin/bash\necho "%s"\n' "$TEST_TEMP" > "$FAKE/cmd.exe"
 printf '#!/bin/bash\nprintf "%%s\\n" "$@" > %s/args\n' "$FAKE" > "$FAKE/powershell.exe"
 chmod +x "$FAKE"/*.exe
