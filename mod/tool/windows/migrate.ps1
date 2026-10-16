@@ -16,6 +16,10 @@
   只列出會做什麼，不寫入。
 
 .EXAMPLE
+  powershell -ExecutionPolicy Bypass -File migrate.ps1 -Projects "/home/me/work-a,/home/me/work-b" -Presets none
+  不跳出勾選清單，直接指定要搬的專案資料夾與環境（逗號分隔；all＝全部，none＝都不要）。
+
+.EXAMPLE
   powershell -ExecutionPolicy Bypass -File migrate.ps1 -Restore "C:\Users\me\braid-backups\20261016-150000"
   用備份還原到遷移前的狀態。
 #>
@@ -30,7 +34,9 @@ param(
     [string]$BackupRoot = (Join-Path $env:USERPROFILE 'braid-backups'),
     [switch]$SkipAppCheck,
     [switch]$NoRelaunch,
-    [string]$PlanJson
+    [string]$PlanJson,
+    [string]$Projects,
+    [string]$Presets
 )
 
 $ErrorActionPreference = 'Stop'
@@ -204,25 +210,45 @@ function Get-PlaceKey($Target) {
     return ('{0}|{1}|{2}' -f $Target.kind, $Target.cwd, $Target.wslDistro)
 }
 
-# 把來源狀態 $A 併進目標狀態 $B（就地修改 $B）。目標已有同資料夾的環境就保留目標的。
-function Merge-PresetState($A, $B) {
+# 來源有、目標沒有（同資料夾、同 id 都算有）的環境＝可以搬的候選；目標已有的列為略過
+function Get-PresetCandidates($A, $B) {
     $have = @{}; $ids = @{}
-    $list = New-Object System.Collections.ArrayList
-    foreach ($p in (As-Array $B.presets)) { [void]$list.Add($p); $have[(Get-PlaceKey $p.target)] = $true; $ids[[string]$p.id] = $true }
-    $added = New-Object System.Collections.ArrayList
+    foreach ($p in (As-Array $B.presets)) { $have[(Get-PlaceKey $p.target)] = $true; $ids[[string]$p.id] = $true }
+    $cand = New-Object System.Collections.ArrayList
     $skipped = New-Object System.Collections.ArrayList
     foreach ($p in (As-Array $A.presets)) {
         $k = Get-PlaceKey $p.target
         if ($have.ContainsKey($k) -or $ids.ContainsKey([string]$p.id)) { [void]$skipped.Add([string]$p.name); continue }
-        [void]$list.Add($p); [void]$added.Add([string]$p.name); $have[$k] = $true
+        [void]$cand.Add($p); $have[$k] = $true
+    }
+    return [pscustomobject]@{ Candidates = @($cand); Skipped = @($skipped) }
+}
+
+# placeDefaults 的鍵是「種類:發行版:資料夾」，資料夾本身可能含冒號（C:\...）
+function Get-DefaultsFolder([string]$Key) { $parts = $Key.Split(':', 3); if ($parts.Count -eq 3) { return $parts[2] } return $Key }
+
+# 把來源狀態 $A 併進目標狀態 $B（就地修改 $B）。目標已有同資料夾的環境就保留目標的。
+# $OnlyIds：只搬這些環境（$null＝候選全部）；$Folders：資料夾設定只搬這些資料夾的（$null＝全部）。
+function Merge-PresetState($A, $B, $OnlyIds, $Folders) {
+    $c = Get-PresetCandidates $A $B
+    $list = New-Object System.Collections.ArrayList
+    foreach ($p in (As-Array $B.presets)) { [void]$list.Add($p) }
+    $added = New-Object System.Collections.ArrayList
+    $newIds = @{}
+    foreach ($p in $c.Candidates) {
+        if ($null -ne $OnlyIds -and -not $OnlyIds.ContainsKey([string]$p.id)) { continue }
+        [void]$list.Add($p); [void]$added.Add([string]$p.name); $newIds[[string]$p.id] = $true
     }
     Set-Prop $B 'presets' @($list)
+    $extra = 0
 
     if (Has $A 'placeDefaults') {
         if (-not (Has $B 'placeDefaults') -or $null -eq $B.placeDefaults) { Set-Prop $B 'placeDefaults' ([pscustomobject]@{}) }
         foreach ($prop in $A.placeDefaults.PSObject.Properties) {
+            if ($null -ne $Folders -and -not $Folders.ContainsKey((Get-DefaultsFolder $prop.Name))) { continue }
             if ($null -eq $B.placeDefaults.PSObject.Properties[$prop.Name]) {
                 $B.placeDefaults | Add-Member -NotePropertyName $prop.Name -NotePropertyValue $prop.Value
+                $extra++
             }
         }
     }
@@ -230,15 +256,142 @@ function Merge-PresetState($A, $B) {
         $places = New-Object System.Collections.ArrayList
         $seen = @{}
         foreach ($p in (As-Array $B.startedPlaces)) { [void]$places.Add($p); $seen[(Get-PlaceKey $p.target)] = $true }
-        foreach ($p in (As-Array $A.startedPlaces)) { if (-not $seen.ContainsKey((Get-PlaceKey $p.target))) { [void]$places.Add($p) } }
+        foreach ($p in (As-Array $A.startedPlaces)) {
+            if ($null -ne $Folders -and -not ($p.target -and $Folders.ContainsKey([string]$p.target.cwd))) { continue }
+            if (-not $seen.ContainsKey((Get-PlaceKey $p.target))) { [void]$places.Add($p); $newIds[[string]$p.id] = $true; $extra++ }
+        }
         Set-Prop $B 'startedPlaces' @($places)
     }
     if (Has $A 'startedFrom') {
         $from = New-Object System.Collections.ArrayList
-        foreach ($x in @((As-Array $B.startedFrom) + (As-Array $A.startedFrom))) { if (-not $from.Contains($x)) { [void]$from.Add($x) } }
+        foreach ($x in (As-Array $B.startedFrom)) { if (-not $from.Contains($x)) { [void]$from.Add($x) } }
+        foreach ($x in (As-Array $A.startedFrom)) {
+            # 全搬時照舊取聯集；有選擇時只帶跟著搬過去的環境與位置
+            if (($null -eq $OnlyIds -and $null -eq $Folders) -or $newIds.ContainsKey([string]$x)) { if (-not $from.Contains($x)) { [void]$from.Add($x) } }
+        }
         Set-Prop $B 'startedFrom' @($from)
     }
-    return [pscustomobject]@{ Added = @($added); Skipped = @($skipped) }
+    return [pscustomobject]@{ Added = @($added); Skipped = @($c.Skipped); Extra = $extra }
+}
+
+# ---------- 選擇要搬什麼 ----------
+
+function Get-ProjectKey($E) {
+    if ((Has $E 'originCwd') -and $E.originCwd) { return [string]$E.originCwd }
+    return [string]$E.cwd
+}
+
+# 「1,3,5-7」→ 1、3、5、6、7；a＝全部。看不懂回 $null。
+function Parse-Picks([string]$Text, [int]$Max) {
+    $t = $Text.Trim().ToLower()
+    if ($t -eq 'a') { return , @(1..$Max) }
+    if ($t -eq '') { return $null }
+    $out = New-Object System.Collections.ArrayList
+    foreach ($part in $t.Split(',')) {
+        $q = $part.Trim()
+        if ($q -match '^(\d+)-(\d+)$') { $lo = [int]$Matches[1]; $hi = [int]$Matches[2] }
+        elseif ($q -match '^\d+$') { $lo = [int]$q; $hi = $lo }
+        else { return $null }
+        if ($lo -lt 1 -or $hi -gt $Max -or $lo -gt $hi) { return $null }
+        foreach ($i in $lo..$hi) { if (-not $out.Contains($i)) { [void]$out.Add($i) } }
+    }
+    return , @($out)
+}
+
+# 讓人從清單勾選，回傳選到的列。順序：測試替身 → 跳出的勾選視窗 → 終端機輸入編號。
+$script:TestPicks = $null
+if ($env:BRAID_TEST_PICKS) { $script:TestPicks = New-Object System.Collections.Queue(, [object[]]$env:BRAID_TEST_PICKS.Split(';')) }
+function Select-Rows([string]$Title, $Rows) {
+    if ($null -ne $script:TestPicks) {
+        $text = if ($script:TestPicks.Count) { $script:TestPicks.Dequeue() } else { '' }
+        $idx = Parse-Picks $text $Rows.Count
+        return , @($Rows | Where-Object { $idx -contains $_.'編號' })
+    }
+    if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
+        try { return , @($Rows | Out-GridView -Title $Title -PassThru) } catch { Say "  打不開勾選視窗（$($_.Exception.Message)），改在這裡輸入編號。" Yellow }
+    }
+    Say $Title Cyan
+    foreach ($r in $Rows) { Say ('  {0,3}. {1}  {2}' -f $r.'編號', $r.'類型', $r.'名稱') }
+    while ($true) {
+        $idx = Parse-Picks (Read-Host '輸入要搬的編號（例如 1,3,5-7；a＝全部）') $Rows.Count
+        if ($null -ne $idx) { return , @($Rows | Where-Object { $idx -contains $_.'編號' }) }
+        Say '  看不懂，請再輸入一次。' Yellow
+    }
+}
+
+# 決定要搬哪些。回傳三個集合（$null＝不限）：專案資料夾、對話檔名、環境 id。
+function Select-Migration($Copy, $PresetCands, [string]$TargetName) {
+    $result = [pscustomobject]@{ Projects = $null; Sessions = $null; PresetIds = $null }
+    $listed = @{ 'all' = $true; '' = $true }
+    if ($Projects -or $Presets) {
+        # 參數直接指定：all＝全部、none＝都不要、其他＝逗號分隔的資料夾或環境名稱
+        if ($Projects -and -not $listed.ContainsKey($Projects.Trim().ToLower())) {
+            $result.Projects = @{}
+            if ($Projects.Trim().ToLower() -ne 'none') { foreach ($f in $Projects.Split(',')) { $result.Projects[$f.Trim()] = $true } }
+        }
+        if ($Presets -and -not $listed.ContainsKey($Presets.Trim().ToLower())) {
+            $result.PresetIds = @{}
+            if ($Presets.Trim().ToLower() -ne 'none') {
+                $names = @{}; foreach ($n in $Presets.Split(',')) { $names[$n.Trim()] = $true }
+                foreach ($p in $PresetCands) { if ($names.ContainsKey([string]$p.name)) { $result.PresetIds[[string]$p.id] = $true } }
+            }
+        }
+        return $result
+    }
+    if ($null -eq $script:TestPicks -and ($Yes -or -not $Interactive)) { return $result }
+
+    # 第一步：專案（依最近活動排）＋環境
+    $groups = [ordered]@{}
+    foreach ($x in @($Copy | Sort-Object { if (Has $_.Data 'lastActivityAt') { $_.Data.lastActivityAt } else { 0 } } -Descending)) {
+        $k = Get-ProjectKey $x.Data
+        if (-not $groups.Contains($k)) { $groups[$k] = New-Object System.Collections.ArrayList }
+        [void]$groups[$k].Add($x)
+    }
+    if ($groups.Count + @($PresetCands).Count -eq 0) { return $result }
+    $rows = New-Object System.Collections.ArrayList
+    $n = 0
+    foreach ($k in $groups.Keys) {
+        $n++; $first = $groups[$k][0].Data
+        [void]$rows.Add([pscustomobject]@{ '編號' = $n; '類型' = '專案'; '名稱' = $k; '對話數' = $groups[$k].Count; '最近的對話' = $(if (Has $first 'title') { $first.title } else { '' }); '最後活動' = (Format-Time $first.lastActivityAt) })
+    }
+    foreach ($p in $PresetCands) {
+        $n++
+        [void]$rows.Add([pscustomobject]@{ '編號' = $n; '類型' = '環境'; '名稱' = [string]$p.name; '對話數' = ''; '最近的對話' = [string]$p.target.cwd; '最後活動' = '' })
+    }
+    while ($true) {
+        $picked = Select-Rows "勾選要搬到 $TargetName 的專案與環境（Ctrl+A 全選；Ctrl＋點擊可多選），按「確定」" $rows
+        if ($picked.Count) { break }
+        $a = Ask '沒有勾任何項目。[R] 重新選  [A] 全部都搬  [C] 取消' @('R', 'A', 'C') '' 'C'
+        if ($a -eq 'A') { return $result }
+        if ($a -eq 'C') { throw 'CANCEL' }
+    }
+    $result.Projects = @{}; $result.PresetIds = @{}
+    foreach ($r in $picked) {
+        if ($r.'類型' -eq '專案') { $result.Projects[[string]$r.'名稱'] = $true }
+        else { foreach ($p in $PresetCands) { if ([string]$p.name -eq $r.'名稱') { $result.PresetIds[[string]$p.id] = $true } } }
+    }
+
+    # 第二步（可選）：在選到的專案裡逐筆挑對話
+    if ($result.Projects.Count) {
+        $expand = 'N'
+        if ($null -ne $script:TestPicks) { if ($script:TestPicks.Count -and $script:TestPicks.Peek()) { $expand = 'Y' } }
+        else { $expand = Ask '要在這些專案裡逐筆挑選對話嗎？[Y/N]（直接按 Enter＝N，整個專案都搬）' @('Y', 'N') 'N' 'N' }
+        if ($expand -eq 'Y') {
+            $srows = New-Object System.Collections.ArrayList
+            $n = 0
+            foreach ($k in $groups.Keys) {
+                if (-not $result.Projects.ContainsKey($k)) { continue }
+                foreach ($x in $groups[$k]) {
+                    $n++
+                    [void]$srows.Add([pscustomobject]@{ '編號' = $n; '類型' = '對話'; '名稱' = $(if (Has $x.Data 'title') { $x.Data.title } else { '（無標題）' }); '專案' = $k; '最後活動' = (Format-Time $x.Data.lastActivityAt); '檔名' = $x.File.Name })
+                }
+            }
+            $spicked = Select-Rows '勾選要搬的對話（Ctrl+A 全選後，Ctrl＋點擊取消不要的），按「確定」' $srows
+            $result.Sessions = @{}
+            foreach ($r in $spicked) { $result.Sessions[[string]$r.'檔名'] = $true }
+        }
+    }
+    return $result
 }
 
 # ---------- 還原 ----------
@@ -447,12 +600,12 @@ function Main {
                 if (-not $byName.ContainsKey($s.Dst)) { $plan.Status = 'skip'; $plan.Reason = 'target-missing'; continue }
                 $b = $byName[$s.Dst].Json | ConvertFrom-Json
                 if ($b.version -ne $a.version -or -not (Has $b 'state')) { $plan.Status = 'skip'; $plan.Reason = "version-mismatch:$($a.version)/$($b.version)"; continue }
-                $m = Merge-PresetState $a.state $b.state
-                $plan.Added = $m.Added; $plan.Skipped = $m.Skipped
-                if ($m.Added.Count -eq 0) { $plan.Status = 'nothing-new'; continue }
-                $plan.Status = 'merge'; $plan.Origin = $byName[$s.Dst].Origin
-                $plan.NewJson = ConvertTo-Json -InputObject $b -Depth 100 -Compress
-                $plan.Presets = $b.state.presets
+                $c = Get-PresetCandidates $a.state $b.state
+                $plan.Skipped = $c.Skipped
+                $plan.Status = 'pending'; $plan.Origin = $byName[$s.Dst].Origin
+                $plan | Add-Member -NotePropertyName A -NotePropertyValue $a.state
+                $plan | Add-Member -NotePropertyName B -NotePropertyValue $b
+                $plan | Add-Member -NotePropertyName Candidates -NotePropertyValue $c.Candidates
             }
         } catch {
             Say "讀不了環境資料：$($_.Exception.Message)" Yellow
@@ -463,22 +616,64 @@ function Main {
         }
     }
 
+    # --- 選擇要搬什麼，再依選擇合併環境 ---
+    $acctCands = @($presetPlans | Where-Object { $_.Scope -eq 'account' -and $_.Status -eq 'pending' } | ForEach-Object { $_.Candidates })
+    $sel = Select-Migration $copy $acctCands $targetName
+    if ($null -ne $sel.Projects -or $null -ne $sel.Sessions) {
+        $kept = New-Object System.Collections.ArrayList
+        foreach ($x in $copy) {
+            $ok = ($null -eq $sel.Projects -or $sel.Projects.ContainsKey((Get-ProjectKey $x.Data))) -and ($null -eq $sel.Sessions -or $sel.Sessions.ContainsKey($x.File.Name))
+            if ($ok) { [void]$kept.Add($x) }
+            else { [void]$skip.Add([pscustomobject]@{ File = $x.File.Name; Title = $(if (Has $x.Data 'title') { $x.Data.title } else { '（無標題）' }); Reason = 'not-selected' }) }
+        }
+        $copy = $kept
+        $present = @{}
+        foreach ($n in $tgtNames.Keys) { $present[$n.Substring(0, $n.Length - 5)] = $true }
+        foreach ($x in $copy) { $present[$x.File.BaseName] = $true }
+        $addArchived = New-Object System.Collections.ArrayList
+        if (Test-Path -LiteralPath $idxSrc) {
+            foreach ($id in (As-Array (Read-JsonFile $idxSrc).archived)) {
+                if ($present.ContainsKey($id) -and -not ((As-Array $dstIdx.archived) -contains $id)) { [void]$addArchived.Add($id) }
+            }
+        }
+    }
+    # 資料夾設定（預設模型、最近位置）只跟著選到的專案與環境走，個人專案不會被帶進公司帳號
+    $folders = $null
+    if ($null -ne $sel.Projects -or $null -ne $sel.PresetIds) {
+        $folders = @{}
+        if ($null -ne $sel.Projects) { foreach ($k in $sel.Projects.Keys) { $folders[$k] = $true } } else { foreach ($x in $copy) { $folders[(Get-ProjectKey $x.Data)] = $true } }
+        foreach ($p in $acctCands) { if ($null -eq $sel.PresetIds -or $sel.PresetIds.ContainsKey([string]$p.id)) { $folders[[string]$p.target.cwd] = $true } }
+    }
+    foreach ($plan in @($presetPlans | Where-Object { $_.Status -eq 'pending' })) {
+        $m = Merge-PresetState $plan.A $plan.B.state $sel.PresetIds $folders
+        $plan.Added = $m.Added
+        if ($m.Added.Count -eq 0 -and $m.Extra -eq 0) { $plan.Status = 'nothing-new'; continue }
+        $plan.Status = 'merge'
+        $plan.NewJson = ConvertTo-Json -InputObject $plan.B -Depth 100 -Compress
+        $plan.Presets = $plan.B.state.presets
+    }
+
     # --- 列出計畫 ---
     $reasonText = @{
         'exists' = '新帳號已經有了'; 'tombstone' = '曾在新帳號刪除過'; 'invalid' = '檔案格式不符'
-        'missing-transcript' = '找不到對話紀錄檔'; 'unverifiable-declined' = '你選擇不複製'
+        'missing-transcript' = '找不到對話紀錄檔'; 'unverifiable-declined' = '你選擇不複製'; 'not-selected' = '沒有勾選'
     }
     Say '== 遷移計畫 ==' Cyan
     Say "側欄 session：複製 $($copy.Count) 筆，略過 $($skip.Count) 筆；封存狀態補 $($addArchived.Count) 筆"
     foreach ($x in $copy) { Say "  + $(if (Has $x.Data 'title') { $x.Data.title } else { '（無標題）' })" Green }
-    foreach ($s in ($skip | Where-Object { $_.Reason -ne 'exists' })) { Say "  - $($s.Title)（$($reasonText[$s.Reason])）" DarkGray }
+    foreach ($s in ($skip | Where-Object { $_.Reason -ne 'exists' -and $_.Reason -ne 'not-selected' })) { Say "  - $($s.Title)（$($reasonText[$s.Reason])）" DarkGray }
+    $notSel = @($skip | Where-Object { $_.Reason -eq 'not-selected' }).Count
+    if ($notSel -gt 0) { Say "  （另有 $notSel 筆沒有勾選，留在原帳號）" DarkGray }
     $existsCount = @($skip | Where-Object { $_.Reason -eq 'exists' }).Count
     if ($existsCount -gt 0) { Say "  （另有 $existsCount 筆新帳號已經有了）" DarkGray }
     Say '已儲存的環境：'
     if ($presetPlans.Count -eq 0) { Say '  這台電腦沒有環境資料，略過。' DarkGray }
     foreach ($p in $presetPlans) {
         switch ($p.Status) {
-            'merge' { Say "  $($p.Label)：加入 $($p.Added -join '、')" Green; if ($p.Skipped.Count) { Say "    略過（新帳號已有同一個資料夾）：$($p.Skipped -join '、')" DarkGray } }
+            'merge' {
+                if ($p.Added.Count) { Say "  $($p.Label)：加入 $($p.Added -join '、')" Green } else { Say "  $($p.Label)：補上選到的資料夾的預設設定" Green }
+                if ($p.Skipped.Count) { Say "    略過（新帳號已有同一個資料夾）：$($p.Skipped -join '、')" DarkGray }
+            }
             'nothing-new' { Say "  $($p.Label)：都已經有了" DarkGray }
             'skip' {
                 $why = switch -Wildcard ($p.Reason) {
@@ -517,6 +712,8 @@ function Main {
     # --- 備份 ---
     $mirrorPath = Join-Path $AppDataRoot $spec.presets.mirrorFile
     $script:BackupDir = Join-Path $BackupRoot (Get-Date -Format 'yyyyMMdd-HHmmss')
+    $base = $script:BackupDir; $i = 2
+    while (Test-Path -LiteralPath $script:BackupDir) { $script:BackupDir = "$base-$i"; $i++ }   # 同一秒跑兩次也不會疊進同一個資料夾
     Invoke-Step '備份' {
         New-Item -ItemType Directory -Path $script:BackupDir -Force | Out-Null
         $manifest = [ordered]@{ createdAt = (Get-Date).ToString('o'); sessionsDir = $target.Dir }

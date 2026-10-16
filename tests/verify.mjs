@@ -52,6 +52,49 @@ if (mode === 'restored') {
   finish()
 }
 
+// 有選擇的兩個情境：只搬選到的，資料夾設定也只跟著選到的專案與環境走
+async function checkSelection(label, exp) {
+  console.log(`== ${label} ==`)
+  const plan = readJson(path.join(root, 'plan.json'))
+  const f = (c) => `local_${uuid(c)}.json`
+  eq(plan.sessions.copy, exp.copy.map(f), '只複製選到的對話')
+  eq(plan.sessions.skip.filter((s) => s.reason === 'not-selected').map((s) => s.file), exp.notSelected.map(f), '沒選到的列為「沒有勾選」')
+  eq(plan.archived, exp.archived.map((c) => `local_${uuid(c)}`), '封存清單只補選到的')
+  eq(plan.presets.map((p) => [p.scope, p.status, p.add, p.skip]), exp.presets, '環境只加選到的')
+  eq(fs.readdirSync(tgt(app)).filter((n) => n.startsWith('local_')).sort(), [...exp.copy, 'd', 't'].map(f).sort(), '目標帳號的 session 檔')
+  eq(treeHash(src(app)), treeHash(src(app0)), '來源帳號一個檔都沒動')
+  const lsDir = lsCopy(app, label)
+  const st = await readPresets(lsDir, PREFIX + T)
+  eq(st.state.presets.map((p) => p.name), exp.presetNames, '目標環境')
+  eq(st.state.placeDefaults, exp.placeDefaults, '資料夾預設值只補選到的資料夾')
+  eq(st.state.startedPlaces.map((p) => p.id), exp.startedPlaces, '最近使用位置只補選到的資料夾')
+  eq(st.state.startedFrom, exp.startedFrom, 'startedFrom 只帶跟著搬的')
+  const after = await dump(lsDir)
+  const changed = Object.keys({ ...after, ...lsBefore }).filter((k) => after[k] !== lsBefore[k])
+  eq(changed.length, 1, 'Local Storage 只有目標帳號那一個鍵變了')
+  eq(readJson(path.join(app, 'ccd-session-presets.json')).byAccount[T].presets.map((p) => p.name), exp.presetNames, '環境清單檔與正本一致')
+  finish()
+}
+const ATLAS = { 'local:dev:/p/atlas': { modelId: 'NEW' } }
+if (mode === 'selected') {   // --projects "/p/a,/p/c" --presets garden
+  await checkSelection('依參數選擇', {
+    copy: ['a', 'c'], notSelected: ['f', 'i'], archived: ['c'],
+    presets: [['account', 'merge', ['garden'], ['atlas']], ['org', 'none', [], []]],
+    presetNames: ['atlas', 'garden'],
+    placeDefaults: { ...ATLAS, 'local:dev:/p/garden': { modelId: 'm', effort: 'xhigh' }, 'local:dev:/p/a': { modelId: 'A' } },
+    startedPlaces: ['sp9', 'sp1'], startedFrom: ['p-atlas-new', 'x1', 'p-garden'],
+  })
+}
+if (mode === 'picked') {     // BRAID_TEST_PICKS="2,4,6;1"：專案 f、a＋環境 notebook，展開後只留 f
+  await checkSelection('勾選視窗（測試替身）', {
+    copy: ['f'], notSelected: ['a', 'c', 'i'], archived: [],
+    presets: [['account', 'merge', ['notebook'], ['atlas']], ['org', 'none', [], []]],
+    presetNames: ['atlas', 'notebook'],
+    placeDefaults: { ...ATLAS, 'local:dev:/p/a': { modelId: 'A' } },
+    startedPlaces: ['sp9'], startedFrom: ['p-atlas-new', 'x1'],
+  })
+}
+
 console.log('== 計畫 ==')
 const plan = readJson(path.join(root, 'plan.json'))
 eq(plan.source, { account: S, org: SO }, '來源帳號＝-From 指定的那個')
@@ -87,7 +130,7 @@ const st = (await readPresets(lsAfterDir, PREFIX + T))
 eq(st.version, 4, '版本號保留')
 eq(st.state.presets.map((p) => p.name), ['atlas', 'garden', 'notebook', '中文環境'], '目標環境＝原有＋舊帳號補進來的')
 eq(st.state.presets[0].settings, { worktree: true }, '同資料夾的 atlas 保留目標帳號那筆')
-eq(st.state.placeDefaults, { 'local:dev:/p/atlas': { modelId: 'NEW' }, 'local:dev:/p/garden': { modelId: 'm', effort: 'xhigh' } }, '資料夾預設值：目標的優先、補上缺的')
+eq(st.state.placeDefaults, { 'local:dev:/p/atlas': { modelId: 'NEW' }, 'local:dev:/p/garden': { modelId: 'm', effort: 'xhigh' }, 'local:dev:/p/a': { modelId: 'A' }, 'local:dev:/p/i': { modelId: 'I' } }, '資料夾預設值：目標的優先、補上缺的')
 eq(st.state.startedPlaces.map((p) => p.id), ['sp9', 'sp1'], '最近使用位置：補上目標沒有的資料夾')
 eq(st.state.startedFrom, ['p-atlas-new', 'x1', 'p-garden'], 'startedFrom 取聯集')
 const after = await dump(lsAfterDir)

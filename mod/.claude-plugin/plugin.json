@@ -1,6 +1,6 @@
 {
   "name": "braid",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Claude 桌面 app 的帳號工具：換帳號時把舊帳號 Code 分頁的側欄對話與已儲存的環境搬到新帳號（/desktop-migrate）。",
   "author": {
     "name": "MiskaWu",

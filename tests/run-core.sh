@@ -4,14 +4,29 @@ set -euo pipefail
 cd "$(dirname "$0")"
 [ -d node_modules ] || npm install --no-audit --no-fund >/dev/null
 W=/tmp/cdm-core-test-$$; WSLDIR=/tmp/cdm-core-wsl-$$   # 每次執行各用各的，同時跑也不互相干擾
-run() { node run-core.mjs --yes --from 11111111 --app-data-root "$W/app" --claude-home "$W/claude-home" --backup-root "$W/backups" "$@"; }
+run() { node run-core.mjs --yes --from 11111111 --app-data-root "$W/app" --claude-home "$W/claude-home" --backup-root "${BK:-$W/backups}" "$@"; }
+restore() { node run-core.mjs --restore "$(ls -d "$1"/*/ | head -1)" >/dev/null; node verify.mjs restored "$W" "$W.before"; }
 
 node fixture.mjs "$W" "$WSLDIR" >/dev/null
 rm -rf "$W.before" && cp -r "$W" "$W.before"
 echo "######## 試跑";  run --dry-run --plan-json "$W/plan.json" >/dev/null; node verify.mjs dryrun "$W" "$W.before"
 echo "######## 寫入";  run --plan-json "$W/plan.json" >/dev/null;           node verify.mjs apply "$W" "$W.before"
 echo "######## 重跑";  run | grep -q '沒有需要搬的東西' && echo "  ok  重跑無事可做" || { echo "  NG  重跑還想寫東西"; exit 1; }
-echo "######## 還原";  node run-core.mjs --restore "$(ls -d "$W"/backups/*/ | head -1)" >/dev/null; node verify.mjs restored "$W" "$W.before"
+echo "######## 還原";  restore "$W/backups"
+echo "######## 依參數選擇（專案 /p/a、/p/c＋環境 garden）"
+BK="$W/backups-sel" run --projects "/p/a,/p/c" --presets garden --plan-json "$W/plan.json" >/dev/null; node verify.mjs selected "$W" "$W.before"
+restore "$W/backups-sel"
+echo "######## 勾選視窗（測試替身：專案 f、a＋環境 notebook，展開只留 f）"
+BRAID_TEST_PICKS='2,4,6;1' BK="$W/backups-pick" run --plan-json "$W/plan.json" >/dev/null; node verify.mjs picked "$W" "$W.before"
+restore "$W/backups-pick"
+echo "######## 備份資料夾同一秒不撞名"
+# 先把接下來 10 秒會用到的時間名稱（本地時間與 UTC 都建）佔掉：工具要改用 -2，不能寫進已存在的資料夾
+mkdir -p "$W/backups-col"; for i in $(seq 0 10); do mkdir -p "$W/backups-col/$(date -d "+$i sec" +%Y%m%d-%H%M%S)" "$W/backups-col/$(date -u -d "+$i sec" +%Y%m%d-%H%M%S)"; done
+BK="$W/backups-col" run --projects "/p/a" --presets none >/dev/null
+made=$(find "$W/backups-col" -name manifest.json | xargs -r dirname)
+[ "$(echo "$made" | grep -c -- '-2$')" = 1 ] && [ "$(find "$W/backups-col" -mindepth 2 | grep -vc "^$made")" = 0 ] \
+  && echo "  ok  改用 -2，佔住的資料夾都沒被寫入" || { echo "  NG  備份資料夾撞名處理不對"; find "$W/backups-col" -maxdepth 2; exit 1; }
+node run-core.mjs --restore "$made" >/dev/null; node verify.mjs restored "$W" "$W.before"
 echo "######## 目前帳號說法不一致"
 # 兩處紀錄對目前帳號說法不一致（config.json 指向舊帳號、Local Storage 確認的是新帳號）：要停下來、不寫任何東西
 node -e 'const fs=require("fs"),f=process.argv[1],c=JSON.parse(fs.readFileSync(f));c.lastKnownAccountUuid="11111111-1111-4111-8111-111111111111";fs.writeFileSync(f,JSON.stringify(c))' "$W/app/config.json"

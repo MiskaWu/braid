@@ -305,32 +305,166 @@ var CDM = (function () {
   function placeKey(t) { return t ? [t.kind, t.cwd, t.wslDistro].map(function (x) { return x == null ? '' : x; }).join('|') : '||'; }
   function byLastDesc(a, b) { return (b.data.lastActivityAt || 0) - (a.data.lastActivityAt || 0); }
 
-  function mergePresetState(a, b) {
-    var have = {}, ids = {}, added = [], skipped = [];
-    var list = arr(b.presets).slice();
-    list.forEach(function (p) { have[placeKey(p.target)] = true; ids[String(p.id)] = true; });
+  // 來源有、目標沒有（同資料夾、同 id 都算有）的環境＝可以搬的候選；目標已有的列為略過
+  function presetCandidates(a, b) {
+    var have = {}, ids = {}, cand = [], skipped = [];
+    arr(b.presets).forEach(function (p) { have[placeKey(p.target)] = true; ids[String(p.id)] = true; });
     arr(a.presets).forEach(function (p) {
       var k = placeKey(p.target);
       if (have[k] || ids[String(p.id)]) { skipped.push(String(p.name)); return; }
-      list.push(p); added.push(String(p.name)); have[k] = true;
+      cand.push(p); have[k] = true;
+    });
+    return { candidates: cand, skipped: skipped };
+  }
+
+  // placeDefaults 的鍵是「種類:發行版:資料夾」，資料夾本身可能含冒號
+  function defaultsFolder(key) { var i = key.indexOf(':'), j = i < 0 ? -1 : key.indexOf(':', i + 1); return j < 0 ? key : key.slice(j + 1); }
+
+  // 把來源狀態 a 併進目標狀態 b（就地修改 b）。目標已有同資料夾的環境就保留目標的。
+  // onlyIds：只搬這些環境（null＝候選全部）；folders：資料夾設定只搬這些資料夾的（null＝全部）。
+  function mergePresetState(a, b, onlyIds, folders) {
+    var c = presetCandidates(a, b), list = arr(b.presets).slice(), added = [], newIds = {}, extra = 0;
+    c.candidates.forEach(function (p) {
+      if (onlyIds && !onlyIds[String(p.id)]) return;
+      list.push(p); added.push(String(p.name)); newIds[String(p.id)] = true;
     });
     b.presets = list;
     if (has(a, 'placeDefaults')) {
       if (!b.placeDefaults) b.placeDefaults = {};
-      Object.keys(a.placeDefaults || {}).forEach(function (k) { if (!has(b.placeDefaults, k)) b.placeDefaults[k] = a.placeDefaults[k]; });
+      Object.keys(a.placeDefaults || {}).forEach(function (k) {
+        if (folders && !folders[defaultsFolder(k)]) return;
+        if (!has(b.placeDefaults, k)) { b.placeDefaults[k] = a.placeDefaults[k]; extra++; }
+      });
     }
     if (has(a, 'startedPlaces')) {
       var places = arr(b.startedPlaces).slice(), seen = {};
       places.forEach(function (p) { seen[placeKey(p.target)] = true; });
-      arr(a.startedPlaces).forEach(function (p) { if (!seen[placeKey(p.target)]) places.push(p); });
+      arr(a.startedPlaces).forEach(function (p) {
+        if (folders && !(p.target && folders[String(p.target.cwd)])) return;
+        if (!seen[placeKey(p.target)]) { places.push(p); newIds[String(p.id)] = true; extra++; }
+      });
       b.startedPlaces = places;
     }
     if (has(a, 'startedFrom')) {
       var from = [];
-      arr(b.startedFrom).concat(arr(a.startedFrom)).forEach(function (x) { if (from.indexOf(x) < 0) from.push(x); });
+      arr(b.startedFrom).forEach(function (x) { if (from.indexOf(x) < 0) from.push(x); });
+      arr(a.startedFrom).forEach(function (x) {
+        // 全搬時照舊取聯集；有選擇時只帶跟著搬過去的環境與位置
+        if ((!onlyIds && !folders) || newIds[String(x)]) { if (from.indexOf(x) < 0) from.push(x); }
+      });
       b.startedFrom = from;
     }
-    return { added: added, skipped: skipped };
+    return { added: added, skipped: c.skipped, extra: extra };
+  }
+
+  // ---------- 選擇要搬什麼 ----------
+
+  function projectKey(e) { return String(e.originCwd ? e.originCwd : e.cwd); }
+
+  // 「1,3,5-7」→ [1,3,5,6,7]；a＝全部。看不懂回 null。
+  function parsePicks(text, max) {
+    var t = String(text || '').trim().toLowerCase(), out = [];
+    if (t === 'a') { for (var k = 1; k <= max; k++) out.push(k); return out; }
+    if (t === '') return null;
+    var parts = t.split(',');
+    for (var i = 0; i < parts.length; i++) {
+      var q = parts[i].trim(), m = /^(\d+)-(\d+)$/.exec(q), lo, hi;
+      if (m) { lo = +m[1]; hi = +m[2]; } else if (/^\d+$/.test(q)) { lo = hi = +q; } else return null;
+      if (lo < 1 || hi > max || lo > hi) return null;
+      for (var n = lo; n <= hi; n++) if (out.indexOf(n) < 0) out.push(n);
+    }
+    return out;
+  }
+
+  // 讓人從清單勾選，回傳選到的列。順序：測試替身 → 系統的勾選對話框 → 終端機輸入編號。
+  function selectRows(io, ui, opts, title, rows) {
+    var labels = rows.map(function (r) { return r.no + '. ' + r.label; });   // 加編號：標題重複時也能對回原列
+    if (opts.testPicks) {
+      var text = opts.testPicks.length ? opts.testPicks.shift() : '';
+      var idx = parsePicks(text, rows.length) || [];
+      return rows.filter(function (r) { return idx.indexOf(r.no) >= 0; });
+    }
+    if (io.chooseMany) {
+      try {
+        var chosen = io.chooseMany(title, labels);   // 回傳選到的列索引（從 0 起），取消回 null
+        if (chosen) return chosen.map(function (i) { return rows[i]; });
+        return [];
+      } catch (e) { ui.say('  打不開勾選視窗（' + e.message + '），改在這裡輸入編號。', 'yellow'); }
+    }
+    ui.say(title, 'cyan');
+    rows.forEach(function (r) { ui.say('  ' + (r.no < 10 ? '  ' : r.no < 100 ? ' ' : '') + r.no + '. ' + r.label); });
+    for (;;) {
+      var picked = parsePicks(io.readLine('輸入要搬的編號（例如 1,3,5-7；a＝全部）'), rows.length);
+      if (picked) return rows.filter(function (r) { return picked.indexOf(r.no) >= 0; });
+      ui.say('  看不懂，請再輸入一次。', 'yellow');
+    }
+  }
+
+  // 決定要搬哪些。回傳三個集合（null＝不限）：專案資料夾、對話檔名、環境 id。
+  function selectMigration(io, ui, opts, copy, presetCands, targetName) {
+    var result = { projects: null, sessions: null, presetIds: null };
+    function listed(v) { var t = String(v || '').trim().toLowerCase(); return t === '' || t === 'all'; }
+    if (opts.projects || opts.presets) {
+      // 參數直接指定：all＝全部、none＝都不要、其他＝逗號分隔的資料夾或環境名稱
+      if (opts.projects && !listed(opts.projects)) {
+        result.projects = {};
+        if (opts.projects.trim().toLowerCase() !== 'none') opts.projects.split(',').forEach(function (f) { result.projects[f.trim()] = true; });
+      }
+      if (opts.presets && !listed(opts.presets)) {
+        result.presetIds = {};
+        if (opts.presets.trim().toLowerCase() !== 'none') {
+          var names = {};
+          opts.presets.split(',').forEach(function (n) { names[n.trim()] = true; });
+          presetCands.forEach(function (p) { if (names[String(p.name)]) result.presetIds[String(p.id)] = true; });
+        }
+      }
+      return result;
+    }
+    if (!opts.testPicks && (opts.yes || !io.interactive)) return result;
+
+    // 第一步：專案（依最近活動排）＋環境
+    var groups = {}, order = [];
+    copy.slice().sort(byLastDesc).forEach(function (x) {
+      var k = projectKey(x.data);
+      if (!groups[k]) { groups[k] = []; order.push(k); }
+      groups[k].push(x);
+    });
+    if (!order.length && !presetCands.length) return result;
+    var rows = [], n = 0;
+    order.forEach(function (k) {
+      var first = groups[k][0].data;
+      rows.push({ no: ++n, kind: 'project', key: k, label: '專案  ' + k + '（' + groups[k].length + ' 筆，最近：' + titleOf(first) + '）' });
+    });
+    presetCands.forEach(function (p) {
+      rows.push({ no: ++n, kind: 'preset', key: String(p.id), label: '環境  ' + p.name + '（' + (p.target ? p.target.cwd : '') + '）' });
+    });
+    var picked;
+    for (;;) {
+      picked = selectRows(io, ui, opts, '勾選要搬到 ' + targetName + ' 的專案與環境', rows);
+      if (picked.length) break;
+      var a = ui.ask('沒有勾任何項目。[R] 重新選  [A] 全部都搬  [C] 取消', ['R', 'A', 'C'], '', 'C');
+      if (a === 'A') return result;
+      if (a === 'C') throw new Error('CANCEL');
+    }
+    result.projects = {}; result.presetIds = {};
+    picked.forEach(function (r) { if (r.kind === 'project') result.projects[r.key] = true; else result.presetIds[r.key] = true; });
+
+    // 第二步（可選）：在選到的專案裡逐筆挑對話
+    if (Object.keys(result.projects).length) {
+      var expand = 'N';
+      if (opts.testPicks) { if (opts.testPicks.length && opts.testPicks[0]) expand = 'Y'; }
+      else expand = ui.ask('要在這些專案裡逐筆挑選對話嗎？[Y/N]（直接按 Enter＝N，整個專案都搬）', ['Y', 'N'], 'N', 'N');
+      if (expand === 'Y') {
+        var srows = [], m = 0;
+        order.forEach(function (k) {
+          if (!result.projects[k]) return;
+          groups[k].forEach(function (x) { srows.push({ no: ++m, kind: 'session', key: x.name, label: titleOf(x.data) + '（' + k + '，' + fmtTime(x.data.lastActivityAt) + '）' }); });
+        });
+        result.sessions = {};
+        selectRows(io, ui, opts, '勾選要搬的對話', srows).forEach(function (r) { result.sessions[r.key] = true; });
+      }
+    }
+    return result;
   }
 
   function makeUi(io, opts) {
@@ -562,11 +696,9 @@ var CDM = (function () {
             if (!byName[s.dst]) { plan.status = 'skip'; plan.reason = 'target-missing'; return; }
             var b = JSON.parse(byName[s.dst].json);
             if (b.version !== a.version || !b.state) { plan.status = 'skip'; plan.reason = 'version-mismatch:' + a.version + '/' + b.version; return; }
-            var m = mergePresetState(a.state, b.state);
-            plan.added = m.added; plan.skipped = m.skipped;
-            if (!m.added.length) { plan.status = 'nothing-new'; return; }
-            plan.status = 'merge'; plan.origin = byName[s.dst].origin;
-            plan.newJson = JSON.stringify(b); plan.presets = b.state.presets;
+            var c = presetCandidates(a.state, b.state);
+            plan.skipped = c.skipped; plan.status = 'pending'; plan.origin = byName[s.dst].origin;
+            plan.a = a.state; plan.b = b; plan.candidates = c.candidates;
           });
         } catch (e) {
           ui.say('讀不了環境資料：' + e.message, 'yellow');
@@ -575,19 +707,58 @@ var CDM = (function () {
         }
       }
 
+      // --- 選擇要搬什麼，再依選擇合併環境 ---
+      var acctCands = [];
+      presetPlans.forEach(function (p) { if (p.scope === 'account' && p.status === 'pending') acctCands = acctCands.concat(p.candidates); });
+      var sel = selectMigration(io, ui, opts, copy, acctCands, targetName);
+      if (sel.projects || sel.sessions) {
+        var kept = [];
+        copy.forEach(function (x) {
+          var ok = (!sel.projects || sel.projects[projectKey(x.data)]) && (!sel.sessions || sel.sessions[x.name]);
+          if (ok) kept.push(x); else skip.push({ file: x.name, title: titleOf(x.data), reason: 'not-selected' });
+        });
+        copy = kept;
+        present = {};
+        Object.keys(tgtNames).forEach(function (n) { present[n.slice(0, -5)] = true; });
+        copy.forEach(function (x) { present[x.name.slice(0, -5)] = true; });
+        addArchived = [];
+        if (io.exists(idxSrc)) {
+          arr(JSON.parse(io.readText(idxSrc)).archived).forEach(function (id) {
+            if (present[id] && arr(dstIdx.archived).indexOf(id) < 0) addArchived.push(id);
+          });
+        }
+      }
+      // 資料夾設定（預設模型、最近位置）只跟著選到的專案與環境走，個人專案不會被帶進公司帳號
+      var folders = null;
+      if (sel.projects || sel.presetIds) {
+        folders = {};
+        if (sel.projects) Object.keys(sel.projects).forEach(function (k) { folders[k] = true; });
+        else copy.forEach(function (x) { folders[projectKey(x.data)] = true; });
+        acctCands.forEach(function (p) { if (!sel.presetIds || sel.presetIds[String(p.id)]) folders[String(p.target ? p.target.cwd : '')] = true; });
+      }
+      presetPlans.forEach(function (p) {
+        if (p.status !== 'pending') return;
+        var m = mergePresetState(p.a, p.b.state, sel.presetIds, folders);
+        p.added = m.added;
+        if (!m.added.length && !m.extra) { p.status = 'nothing-new'; return; }
+        p.status = 'merge'; p.newJson = JSON.stringify(p.b); p.presets = p.b.state.presets;
+      });
+
       // --- 列出計畫 ---
-      var reasonText = { exists: '新帳號已經有了', tombstone: '曾在新帳號刪除過', invalid: '檔案格式不符', 'missing-transcript': '找不到對話紀錄檔', 'unverifiable-declined': '你選擇不複製' };
+      var reasonText = { exists: '新帳號已經有了', tombstone: '曾在新帳號刪除過', invalid: '檔案格式不符', 'missing-transcript': '找不到對話紀錄檔', 'unverifiable-declined': '你選擇不複製', 'not-selected': '沒有勾選' };
       ui.say('== 遷移計畫 ==', 'cyan');
       ui.say('側欄 session：複製 ' + copy.length + ' 筆，略過 ' + skip.length + ' 筆；封存狀態補 ' + addArchived.length + ' 筆');
       copy.forEach(function (x) { ui.say('  + ' + titleOf(x.data), 'green'); });
-      skip.filter(function (s) { return s.reason !== 'exists'; }).forEach(function (s) { ui.say('  - ' + s.title + '（' + reasonText[s.reason] + '）', 'gray'); });
+      skip.filter(function (s) { return s.reason !== 'exists' && s.reason !== 'not-selected'; }).forEach(function (s) { ui.say('  - ' + s.title + '（' + reasonText[s.reason] + '）', 'gray'); });
+      var notSel = skip.filter(function (s) { return s.reason === 'not-selected'; }).length;
+      if (notSel) ui.say('  （另有 ' + notSel + ' 筆沒有勾選，留在原帳號）', 'gray');
       var existsCount = skip.filter(function (s) { return s.reason === 'exists'; }).length;
       if (existsCount) ui.say('  （另有 ' + existsCount + ' 筆新帳號已經有了）', 'gray');
       ui.say('已儲存的環境：');
       if (!presetPlans.length) ui.say('  這台電腦沒有環境資料，略過。', 'gray');
       presetPlans.forEach(function (p) {
         if (p.status === 'merge') {
-          ui.say('  ' + p.label + '：加入 ' + p.added.join('、'), 'green');
+          ui.say('  ' + p.label + (p.added.length ? '：加入 ' + p.added.join('、') : '：補上選到的資料夾的預設設定'), 'green');
           if (p.skipped.length) ui.say('    略過（新帳號已有同一個資料夾）：' + p.skipped.join('、'), 'gray');
         } else if (p.status === 'nothing-new') ui.say('  ' + p.label + '：都已經有了', 'gray');
         else if (p.status === 'skip') {
@@ -622,6 +793,7 @@ var CDM = (function () {
       // --- 備份 ---
       var mirrorPath = io.join(opts.appDataRoot, spec.presets.mirrorFile);
       backupDir = io.join(opts.backupRoot, io.timestamp());
+      for (var bi = 2, base = backupDir; io.exists(backupDir); bi++) backupDir = base + '-' + bi;   // 同一秒跑兩次也不會疊進同一個資料夾
       ui.step('備份', function () {
         io.mkdirp(backupDir);
         var manifest = { createdAt: new Date().toISOString(), sessionsDir: target.dir };

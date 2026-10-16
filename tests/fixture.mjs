@@ -93,7 +93,8 @@ const sState = {
       preset('p-atlas-old', 'atlas', '/p/atlas'),
     ],
     builtIns: {}, seededFromDraft: true,
-    placeDefaults: { 'local:dev:/p/garden': { modelId: 'm', effort: 'xhigh' }, 'local:dev:/p/atlas': { modelId: 'OLD' } },
+    // /p/a 是兩個選擇情境都會選的專案、/p/i 永遠不選：用來驗「資料夾設定只跟著選到的走」
+    placeDefaults: { 'local:dev:/p/garden': { modelId: 'm', effort: 'xhigh' }, 'local:dev:/p/atlas': { modelId: 'OLD' }, 'local:dev:/p/a': { modelId: 'A' }, 'local:dev:/p/i': { modelId: 'I' } },
     fileMirrored: true, seededFromHistory: 2,
     startedFrom: ['p-garden', 'x1'],
     startedPlaces: [{ id: 'sp1', target: { kind: 'local', cwd: '/p/garden', wslDistro: 'dev' }, at: 5 }, { id: 'sp2', target: { kind: 'local', cwd: '/p/atlas', wslDistro: 'dev' }, at: 6 }],

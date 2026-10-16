@@ -1,5 +1,6 @@
 // Claude desktop account migration - macOS entry point (JXA, built into every Mac).
 //   osascript -l JavaScript migrate.js [--dry-run] [--yes] [--from ID] [--restore DIR]
+//                                      [--projects all|none|DIR,DIR] [--presets all|none|NAME,NAME]
 // All logic and user-facing text live in core.js; this file only bridges files, the terminal
 // and the app process through ObjC. Keep this file ASCII-only: osascript may not read it as UTF-8.
 ObjC.import('Foundation');
@@ -40,6 +41,9 @@ function run(argv) {
     planJson: opt('--plan-json'),
     skipAppCheck: argv.indexOf('--skip-app-check') >= 0,
     noRelaunch: argv.indexOf('--no-relaunch') >= 0,
+    projects: opt('--projects'),
+    presets: opt('--presets'),
+    testPicks: envVar('BRAID_TEST_PICKS') ? envVar('BRAID_TEST_PICKS').split(';') : null,
   };
 
   var COLORS = { red: '31', green: '32', yellow: '33', cyan: '36', gray: '90' };
@@ -103,12 +107,25 @@ function run(argv) {
       app.doShellScript('open -b ' + bundleId);
     },
     sleep: function (s) { delay(s); },
+    // System checklist dialog (all items preselected). Returns 0-based indexes, or null when cancelled.
+    chooseMany: function (title, labels) {
+      var app = Application.currentApplication();
+      app.includeStandardAdditions = true;
+      var r = app.chooseFromList(labels, { withTitle: 'braid', withPrompt: title, multipleSelectionsAllowed: true, emptySelectionAllowed: true, defaultItems: labels });
+      if (r === false) return null;
+      return r.map(function (x) { return labels.indexOf(x); });
+    },
     wslRoot: function () { return null; },
     restoreCommand: function (dir) { return 'osascript -l JavaScript "' + join(here, 'migrate.js') + '" --restore "' + dir + '"'; },
   };
 
   var code = opt('--restore') ? CDM.restore(io, opts, opt('--restore')) : CDM.migrate(io, opts);
   $.exit(code);
+}
+
+function envVar(name) {
+  var v = $.NSProcessInfo.processInfo.environment.objectForKey(name);
+  return v.isNil() ? null : v.js;
 }
 
 function scriptDir(fm) {

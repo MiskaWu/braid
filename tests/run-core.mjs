@@ -1,5 +1,6 @@
 // 測試用：在 Node 上跑 macOS 版的核心（macos/core.js），檔案介面換成 fs。
-// 參數與 macOS 版相同：--dry-run --yes --from X --restore DIR --app-data-root --claude-home --backup-root --plan-json
+// 參數與 macOS 版相同：--dry-run --yes --from X --restore DIR --app-data-root --claude-home --backup-root --plan-json --projects --presets
+// 環境變數 BRAID_TEST_PICKS 代替勾選視窗（例如「2,4,6;1」）
 import fs from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
@@ -12,6 +13,8 @@ const opts = {
   spec, dryRun: args.includes('--dry-run'), yes: args.includes('--yes'), from: opt('--from'),
   appDataRoot: opt('--app-data-root'), claudeHome: opt('--claude-home'), backupRoot: opt('--backup-root'),
   planJson: opt('--plan-json'), skipAppCheck: true, noRelaunch: true,
+  projects: opt('--projects'), presets: opt('--presets'),
+  testPicks: process.env.BRAID_TEST_PICKS ? process.env.BRAID_TEST_PICKS.split(';') : null,
 }
 const io = {
   interactive: false,

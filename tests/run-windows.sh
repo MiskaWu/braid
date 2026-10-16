@@ -14,7 +14,12 @@ PS1=$(wslpath -w ../mod/tool/windows/migrate.ps1)
 run_ps() {
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1" \
     -AppDataRoot "$(wslpath -w "$W/app")" -ClaudeHome "$(wslpath -w "$W/claude-home")" \
-    -BackupRoot "$(wslpath -w "$W/backups")" -SkipAppCheck -NoRelaunch -Yes -From 11111111 "$@" | tr -d '\r'
+    -BackupRoot "$(wslpath -w "${BK:-$W/backups}")" -SkipAppCheck -NoRelaunch -Yes -From 11111111 "$@" | tr -d '\r'
+}
+restore_ps() {
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1" -AppDataRoot "$(wslpath -w "$W/app")" \
+    -SkipAppCheck -Yes -Restore "$(wslpath -w "$(ls -d "$1"/*/ | head -1)")" | tr -d '\r' >/dev/null
+  node verify.mjs restored "$W" "$W.before"
 }
 
 # 守門：Windows PowerShell 5.1 把沒有 BOM 的 UTF-8 當 Big5 讀，中文註解會吞掉下一行程式碼
@@ -41,9 +46,27 @@ echo "$out" | tail -3
 echo "$out" | grep -q '沒有需要搬的東西' && echo "  ok  重跑無事可做" || { echo "  NG  重跑還想寫東西"; exit 1; }
 
 echo; echo "######## 還原"
-B=$(ls -d "$W"/backups/*/ | head -1)
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1" -AppDataRoot "$(wslpath -w "$W/app")" \
-  -SkipAppCheck -Yes -Restore "$(wslpath -w "$B")" | tr -d '\r'
+restore_ps "$W/backups"
+
+echo; echo "######## 依參數選擇（專案 /p/a、/p/c＋環境 garden）"
+BK="$W/backups-sel" run_ps -Projects "/p/a,/p/c" -Presets garden -PlanJson "$(wslpath -w "$W/plan.json")" >/dev/null
+node verify.mjs selected "$W" "$W.before"
+restore_ps "$W/backups-sel"
+
+echo; echo "######## 勾選視窗（測試替身：專案 f、a＋環境 notebook，展開只留 f）"
+# 環境變數要傳進 Windows 的 powershell.exe：WSLENV 列出要帶過去的變數
+BRAID_TEST_PICKS='2,4,6;1' WSLENV="BRAID_TEST_PICKS${WSLENV:+:$WSLENV}" BK="$W/backups-pick" run_ps -PlanJson "$(wslpath -w "$W/plan.json")" >/dev/null
+node verify.mjs picked "$W" "$W.before"
+restore_ps "$W/backups-pick"
+
+echo; echo "######## 備份資料夾同一秒不撞名"
+# 先把接下來 10 秒會用到的時間名稱（本地時間與 UTC 都建）佔掉：工具要改用 -2，不能寫進已存在的資料夾
+mkdir -p "$W/backups-col"; for i in $(seq 0 10); do mkdir -p "$W/backups-col/$(date -d "+$i sec" +%Y%m%d-%H%M%S)" "$W/backups-col/$(date -u -d "+$i sec" +%Y%m%d-%H%M%S)"; done
+BK="$W/backups-col" run_ps -Projects "/p/a" -Presets none >/dev/null
+made=$(find "$W/backups-col" -name manifest.json | xargs -r dirname)
+[ "$(echo "$made" | grep -c -- '-2$')" = 1 ] && [ "$(find "$W/backups-col" -mindepth 2 | grep -vc "^$made")" = 0 ] \
+  && echo "  ok  改用 -2，佔住的資料夾都沒被寫入" || { echo "  NG  備份資料夾撞名處理不對"; find "$W/backups-col" -maxdepth 2; exit 1; }
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1" -AppDataRoot "$(wslpath -w "$W/app")" -SkipAppCheck -Yes -Restore "$(wslpath -w "$made")" | tr -d '\r' >/dev/null
 node verify.mjs restored "$W" "$W.before"
 
 echo; echo "######## 目前帳號說法不一致"
