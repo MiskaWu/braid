@@ -66,6 +66,22 @@ printf '\r\nnope\r\n\r\n' | BRAID_ACCOUNT="$ID-add2" BRAID_RESULT="$(wslpath -w 
 [ "$(cat "$res" 2>&1)" = '{"ok":false,"reason":"canceled"}' ] && ok "貼錯再按 Enter：取消" || ng "取消時的結果不對：$(cat "$res" 2>&1)"
 ps -File "$SECRET" get "$ID-add2" >/dev/null 2>&1 && ng "取消了卻存了憑證" || ok "取消時什麼都沒存"
 
+echo "######## open-wsl.sh"
+# 先用假的 powershell.exe 記下指令，再把同一條指令加上隱藏、等待，真的跑一次：
+# 開的是只會寫標記檔的無害腳本，驗 Start-Process → wsl.exe 回到同一個發行版、真的執行了腳本
+FAKE="$W/fakebin"; mkdir -p "$FAKE"
+printf '#!/bin/bash\nprintf "%%s\\n" "$@" > %s/args\n' "$FAKE" > "$FAKE/powershell.exe"; chmod +x "$FAKE/powershell.exe"
+MARK="/tmp/braid-open-wsl-$$.mark"; TARGET="/tmp/braid-open-wsl-$$.sh"
+printf '#!/bin/bash\necho "$WSL_DISTRO_NAME $PWD" > %s\n' "$MARK" > "$TARGET"
+PATH="$FAKE:$PATH" bash ../mod/tool/cli/open-wsl.sh "$TARGET"
+mapfile -t a < "$FAKE/args"
+want="Start-Process -FilePath 'wsl.exe' -ArgumentList '-d','$WSL_DISTRO_NAME','--cd','~','-e','bash','$TARGET'"
+[ "${a[0]}" = -NoProfile ] && [ "${a[1]}" = -Command ] && [ "${a[2]}" = "$want" ] && ok "組出 Start-Process wsl.exe：同一個發行版、腳本路徑原樣" || ng "指令不對：${a[*]}"
+(cd /mnt/c && timeout 60 powershell.exe -NoProfile -Command "${a[2]} -Wait -WindowStyle Hidden") >/dev/null 2>&1
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e "$MARK" ] && break; sleep 0.5; done
+[ "$(cat "$MARK" 2>/dev/null)" = "$WSL_DISTRO_NAME $HOME" ] && ok "真的開起來：在同一個 WSL、從家目錄執行了腳本" || ng "沒有執行到腳本：$(cat "$MARK" 2>&1)"
+rm -f "$MARK" "$TARGET"
+
 ps -File "$SECRET" delete "$ID" >/dev/null
 ps -File "$SECRET" get "$ID" >/dev/null 2>&1 && ng "刪不掉" || ok "刪掉後讀不到"
 cleanup
