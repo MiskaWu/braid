@@ -19,7 +19,9 @@ import {
   orderedIds,
   parseTz,
   partnerOf,
+  syncRequest,
   syncRows,
+  syncScopeText,
   upsertSeen,
   usageFrom,
 } from '../hooks/model'
@@ -66,7 +68,8 @@ describe('讀回儲存的資料', () => {
       folders: { '/a': 'any', '/b': 'same-org' },
       otherFolders: 'same-org',
     })
-    expect(normalizeSync({ on: true, pair: ['a', 'b', 'c'], folders: ['/x', ''], when: 'manual' })).toEqual({ on: true, pair: ['a', 'b'], folders: ['/x'], when: 'manual' })
+    expect(normalizeSync({ on: true, pair: ['a', 'b', 'c'], folders: ['/x', ''], when: 'manual' })).toEqual({ on: true, pair: ['a', 'b'], all: false, folders: ['/x'], when: 'manual' })
+    expect(normalizeSync({ all: true }).all).toBe(true)
     expect(normalizeAccount({ label: 'x' })).toBe(null)
     expect(normalizeAccount({ id: 'tok-1', credential: 'file', source: 'token' })?.credentialId).toBe('tok-1')
     expect(normalizeAccount({ id: 'a', credential: 'stolen' })?.credential).toBe(null)
@@ -195,8 +198,18 @@ describe('輸入框上方的提示', () => {
 })
 
 describe('同步', () => {
+  test('要工具做什麼：全部資料夾連環境全部；勾選的只帶那些資料夾，環境跟著資料夾；沒有範圍或沒有夥伴就不做', async () => {
+    const sync = { on: true, pair: ['a', 'b'], all: false, folders: ['/x', '/y'], when: 'on-switch' as const }
+    expect(syncRequest(sync, 'b')).toEqual({ from: 'b', projects: ['/x', '/y'], presets: 'folders' })
+    expect(syncRequest({ ...sync, all: true }, 'b')).toEqual({ from: 'b', projects: 'all', presets: 'all' })
+    expect(syncRequest({ ...sync, folders: [] }, 'b')).toBe(null)
+    expect(syncRequest({ ...sync, all: true, folders: [] }, 'b')?.projects).toBe('all')
+    expect(syncRequest(sync, null)).toBe(null)
+    expect([syncScopeText(sync), syncScopeText({ ...sync, all: true })]).toEqual(['同步的 2 個資料夾', '所有資料夾'])
+  })
+
   test('同步夥伴是一對帳號裡的另一個；目前帳號不在這一對裡就沒有', async () => {
-    const sync = { on: true, pair: ['a', 'b'], folders: [], when: 'on-switch' as const }
+    const sync = { on: true, pair: ['a', 'b'], all: false, folders: [], when: 'on-switch' as const }
     expect([partnerOf(sync, 'a'), partnerOf(sync, 'b'), partnerOf(sync, 'c'), partnerOf({ ...sync, pair: [] }, 'a')]).toEqual(['b', 'a', null, null])
   })
 
@@ -231,6 +244,7 @@ describe('遷移工具的參數', () => {
     expect(toolArgs('windows', { dryRun: true, from: 'x' })).toEqual(['-DryRun', '-From', 'x'])
     expect(toolArgs('windows', { restore: 'C:\\b\\1', dryRun: true })).toEqual(['-Restore', 'C:\\b\\1'])
     expect(toolArgs('mac', { projects: [] })).toEqual(['--projects', 'none'])
+    expect(toolArgs('wsl', { from: 'acct', projects: 'all', presets: 'all' })).toEqual(['-From', 'acct', '-Projects', 'all', '-Presets', 'all'])
   })
 
   test('沒辦法用參數表達的資料夾：拒絕，請使用者改用勾選清單', async () => {

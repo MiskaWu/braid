@@ -434,9 +434,46 @@ describe('同步', () => {
     expect(await shows(ui, /\/w\/server.*目前 1 · 個人 1/)).toBe(true)
     await ui.press({ key: 'sy-f-/w/server' })
     await ui.press({ key: 'sy-now' })
-    expect(await w.store.get('sync')).toEqual({ on: true, pair: [W, P], folders: ['/w/server'], when: 'on-switch' })
+    expect(await w.store.get('sync')).toEqual({ on: true, pair: [W, P], all: false, folders: ['/w/server'], when: 'on-switch' })
     expect(w.runs.at(-1)?.argv.slice(2)).toEqual(['-From', P, '-Projects', '/w/server', '-Presets', 'folders'])
     expect(await shows(ui, /已在另一個視窗開啟同步工具/)).toBe(true)
+    await ui.unmount()
+  })
+
+  test('全部資料夾：清單收起來、說明有幾個資料夾，組織不同要警告；按了工具收到 -Projects all -Presets all', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL, sync: { on: true, pair: [W, P], folders: ['/w/server'], when: 'on-switch' } } })
+    await $.session.start(START)
+    await $.command.run(RUN('同步'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await ui.find({ key: 'sy-f-/side/blog' })).toBeDefined()
+    expect(await shows(ui, /可能不在同一個組織/)).toBe(false)
+    await ui.press({ key: 'sy-all' })
+    const saved = w.store.get('sync') as { all: boolean; folders: string[] }
+    expect([saved.all, saved.folders]).toEqual([true, ['/w/server']]) // 勾選留著，關掉全部時回來
+    expect(await ui.find({ key: 'sy-f-/side/blog' })).toBeUndefined()
+    expect(await shows(ui, /目前兩個帳號共 2 個資料夾/)).toBe(true)
+    expect(await shows(ui, /可能不在同一個組織/)).toBe(true) // 公司與個人
+    await ui.press({ key: 'sy-now' })
+    expect(w.runs.at(-1)?.argv.slice(2)).toEqual(['-From', P, '-Projects', 'all', '-Presets', 'all'])
+    await ui.press({ key: 'sy-all' })
+    expect(await ui.find({ key: 'sy-f-/side/blog' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('全部資料夾：同組織的兩個帳號不警告；換帳號後的提示說「所有資料夾」', async ($, on) => {
+    const work2 = acct(P, { email: 'me2@corp.example', orgId: OW, label: '公司 2' })
+    const sync = { on: true, pair: [W, P], all: true, folders: [], when: 'on-switch' }
+    const w = world(on, { store: { uses: USES_ALL, sync, lastAccount: P, [`account:${P}`]: work2 } })
+    await $.session.start(START)
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect(await shows(band, /要把所有資料夾的對話帶過來嗎/)).toBe(true)
+    await band.press({ key: 'sync-go' })
+    expect(w.runs.at(-1)?.argv.slice(2)).toEqual(['-From', P, '-Projects', 'all', '-Presets', 'all'])
+    await band.unmount()
+    await $.command.run(RUN('同步'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await shows(ui, /目前兩個帳號共/)).toBe(true)
+    expect(await shows(ui, /可能不在同一個組織/)).toBe(false)
     await ui.unmount()
   })
 

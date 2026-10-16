@@ -12,7 +12,8 @@ export type LaunchPlan = { actions: Action[] } | { unsupported: true }
 export type ToolRequest = {
   dryRun?: boolean
   from?: string
-  projects?: readonly string[]
+  /** 'all'＝全部資料夾（工具的 -Projects all） */
+  projects?: readonly string[] | 'all'
   presets?: 'all' | 'none' | 'folders'
   restore?: string
 }
@@ -39,7 +40,9 @@ export function toolArgs(platform: Platform, req: ToolRequest): string[] | { uns
   } else {
     if (req.dryRun) out.push(flag('-DryRun', '--dry-run'))
     if (req.from) out.push(flag('-From', '--from'), req.from)
-    if (req.projects) {
+    if (req.projects === 'all') {
+      out.push(flag('-Projects', '--projects'), 'all')
+    } else if (req.projects) {
       const comma = req.projects.find(p => p.includes(','))
       if (comma !== undefined) return { unsafe: comma }
       out.push(flag('-Projects', '--projects'), req.projects.length ? req.projects.join(',') : 'none')

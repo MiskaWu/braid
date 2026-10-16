@@ -53,6 +53,11 @@ BK="$W/backups-sel" run_ps -Projects "/p/a,/p/c" -Presets garden -PlanJson "$(ws
 node verify.mjs selected "$W" "$W.before"
 restore_ps "$W/backups-sel"
 
+echo; echo "######## 全部資料夾（同步選「全部」：專案 all＋環境 all，結果要和不指定一樣）"
+BK="$W/backups-all" run_ps -Projects all -Presets all -PlanJson "$(wslpath -w "$W/plan.json")" >/dev/null
+node verify.mjs apply "$W" "$W.before"
+restore_ps "$W/backups-all"
+
 echo; echo "######## 環境跟著資料夾走（專案 /p/a、/p/garden＋環境 folders）"
 BK="$W/backups-fold" run_ps -Projects "/p/a,/p/garden" -Presets folders -PlanJson "$(wslpath -w "$W/plan.json")" >/dev/null
 node verify.mjs folders "$W" "$W.before"

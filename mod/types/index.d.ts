@@ -48,6 +48,8 @@ export type BraidSync = {
   on: boolean
   /** 一起同步的兩個帳號；換到其中一個時，從另一個把對話帶過來 */
   pair: string[]
+  /** true＝全部資料夾（之後新出現的也算），folders 留著，關掉時回到原本的勾選 */
+  all: boolean
   folders: string[]
   /** 換帳號後第一次打開時問要不要同步，或只在按按鈕時同步 */
   when: 'on-switch' | 'manual'

@@ -23,7 +23,7 @@ export const COLOR_NAMES: Record<string, string> = {
 
 export const DEFAULT_USES: BraidUses = { migrate: false, switch: false, sync: false }
 export const DEFAULT_SWITCH: BraidSwitch = { on: true, fiveHour: 90, sevenDay: 95, order: [], folders: {}, otherFolders: 'same-org' }
-export const DEFAULT_SYNC: BraidSync = { on: false, pair: [], folders: [], when: 'on-switch' }
+export const DEFAULT_SYNC: BraidSync = { on: false, pair: [], all: false, folders: [], when: 'on-switch' }
 export const FIVE_HOUR_CHOICES = [80, 90, 95] as const
 export const SEVEN_DAY_CHOICES = [90, 95] as const
 
@@ -58,6 +58,7 @@ export function normalizeSync(x: unknown): BraidSync {
   return {
     on: x.on === true,
     pair: Array.isArray(x.pair) ? x.pair.filter((v): v is string => typeof v === 'string' && v !== '').slice(0, 2) : [],
+    all: x.all === true,
     folders: Array.isArray(x.folders) ? x.folders.filter((v): v is string => typeof v === 'string' && v !== '') : [],
     when: x.when === 'manual' ? 'manual' : 'on-switch',
   }
@@ -309,6 +310,25 @@ export type SyncRow = { path: string; mine: number; theirs: number; checked: boo
 export function partnerOf(sync: BraidSync, current: string | null): string | null {
   if (!current || sync.pair.length !== 2 || !sync.pair.includes(current)) return null
   return sync.pair.find(id => id !== current) ?? null
+}
+
+/**
+ * 同步要工具做什麼：全部資料夾（環境也全部），或勾選的資料夾（環境跟著資料夾走）；沒有範圍就是 null。
+ * 同步頁的按鈕與換帳號後的提示都只用這一個，範圍怎麼算不會兩邊各寫一套。
+ */
+export function syncRequest(
+  sync: BraidSync,
+  partner: string | null,
+): { from: string; projects: readonly string[] | 'all'; presets: 'all' | 'folders' } | null {
+  if (!partner) return null
+  if (sync.all) return { from: partner, projects: 'all', presets: 'all' }
+  if (sync.folders.length === 0) return null
+  return { from: partner, projects: sync.folders, presets: 'folders' }
+}
+
+/** 提示裡怎麼說同步範圍。 */
+export function syncScopeText(sync: BraidSync): string {
+  return sync.all ? '所有資料夾' : `同步的 ${sync.folders.length} 個資料夾`
 }
 
 /** 同步範圍的勾選清單：兩個帳號的資料夾聯集，勾過的排前面，其餘照對話數排。 */

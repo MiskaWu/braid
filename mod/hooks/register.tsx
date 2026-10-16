@@ -46,7 +46,9 @@ import {
   partnerOf,
   seenFromClaudeJson,
   SEVEN_DAY_CHOICES,
+  syncRequest,
   syncRows,
+  syncScopeText,
   upsertSeen,
   usageFrom,
   WINDOW_NAMES,
@@ -859,6 +861,11 @@ async function drawSync($: $, ui: UI) {
   const rows = current && partner ? syncRows(desktop.profiles, current, partner, sy.folders) : []
   const partnerName = partner ? nameOf(accounts, partner) : ''
   const hint = sy.pair.length === 2 && !partner ? `目前的同步設定是「${nameOf(accounts, sy.pair[0] as string)}」和「${nameOf(accounts, sy.pair[1] as string)}」，這個對話的帳號不在裡面。` : null
+  const request = syncRequest(sy, partner)
+  // 兩邊的組織不確定相同（braid 不認得對方、或組織不同）：全部同步會把個人專案也帶過去，要講清楚
+  const mineOrg = current ? accounts[current]?.orgId : undefined
+  const theirOrg = partner ? accounts[partner]?.orgId : undefined
+  const crossOrg = !mineOrg || !theirOrg || mineOrg !== theirOrg
   return (
     <Box flexDirection="column" gap={1}>
       <Select
@@ -885,8 +892,13 @@ async function drawSync($: $, ui: UI) {
       {partner && (
         <Box flexDirection="column">
           <Text bold>哪些資料夾</Text>
-          {rows.length === 0 && <Text dimColor>兩個帳號在桌面 app 都還沒有對話。</Text>}
-          {rows.slice(0, 40).map(r => (
+          <Button key="sy-all" plain onPress={() => putSync($, s => ({ ...s, all: !s.all }))}>
+            {sy.all ? '[x] ' : '[ ] '}全部資料夾 <Text dimColor>之後新出現的也算</Text>
+          </Button>
+          {sy.all && <Text dimColor>{`目前兩個帳號共 ${rows.length} 個資料夾，對話與環境全部互相帶過去。`}</Text>}
+          {sy.all && crossOrg && <Text color="warning">這兩個帳號可能不在同一個組織：全部同步會連個人專案的對話也一起帶過去，反過來也一樣。</Text>}
+          {!sy.all && rows.length === 0 && <Text dimColor>兩個帳號在桌面 app 都還沒有對話。</Text>}
+          {!sy.all && rows.slice(0, 40).map(r => (
             <Button
               key={`sy-f-${r.path}`}
               plain
@@ -908,9 +920,7 @@ async function drawSync($: $, ui: UI) {
         value={sy.when}
         onSelect={v => putSync($, s => ({ ...s, when: v === 'manual' ? 'manual' : 'on-switch' }))}
       />
-      {partner && sy.folders.length > 0 && (
-        <Button key="sy-now" label={`從「${partnerName}」帶過來…`} variant="primary" onPress={async () => say($, await launchTool($, { from: partner, projects: sy.folders, presets: 'folders' }))} />
-      )}
+      {request && <Button key="sy-now" label={`從「${partnerName}」帶過來…`} variant="primary" onPress={async () => say($, await launchTool($, request))} />}
       <Text dimColor>
         同步＝把另一個帳號在這些資料夾的對話與環境，帶到桌面 app 現在登入的帳號。換到另一個帳號時再帶一次，兩邊就一樣了。寫入時要先結束 Claude，會開獨立視窗處理，寫入前先備份。
       </Text>
@@ -1055,19 +1065,20 @@ export const register: Register = on => {
     const sy = await read($, syncAtom)
     const from = await read($, changedFromAtom)
     const platform = await read($, platformAtom)
-    if (uses?.sync && sy.on && sy.when === 'on-switch' && from && current && platform !== 'other' && partnerOf(sy, current) === from && sy.folders.length > 0) {
+    const request = current ? syncRequest(sy, partnerOf(sy, current)) : null
+    if (uses?.sync && sy.on && sy.when === 'on-switch' && from && current && platform !== 'other' && request?.from === from) {
       return (
         <Box flexDirection="row" gap={1} alignItems="center">
           <Text color="warning" bold>
             braid
           </Text>
-          <Text wrap="truncate">{`從「${nameOf(accounts, from)}」換到「${nameOf(accounts, current)}」了。要把同步的 ${sy.folders.length} 個資料夾的對話帶過來嗎？`}</Text>
+          <Text wrap="truncate">{`從「${nameOf(accounts, from)}」換到「${nameOf(accounts, current)}」了。要把${syncScopeText(sy)}的對話帶過來嗎？`}</Text>
           <Button
             key="sync-go"
             label="帶過來…"
             variant="primary"
             onPress={async () => {
-              $.ui.toast(await launchTool($, { from, projects: sy.folders, presets: 'folders' }))
+              $.ui.toast(await launchTool($, request))
               await update($, changedFromAtom, () => null)
             }}
           />
