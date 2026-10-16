@@ -132,6 +132,9 @@ await db.put(lsKey(PREFIX + T), encodeValue(JSON.stringify(tStateOld)))     // �
 await db.put(lsKey(`${PREFIX}${S}.${SO}`), encodeValue(JSON.stringify(empty)))
 await db.put(lsKey(`${PREFIX}${T}.${TO}`), encodeValue(JSON.stringify(empty)))
 await db.put(lsKey(PREFIX + U), encodeValue(JSON.stringify({ state: { presets: [preset('p-u', 'u', '/p/u')] }, version: 5 })))
+// app 記的目前登入：信箱給人看、帳號 ID 跟 config.json 交叉比對
+await db.put(lsKey('lastLoginEmail'), encodeValue('tester@example.com'))
+await db.put(lsKey('rq-cache-confirmed-account'), encodeValue(T))
 await db.compactRange(Buffer.from([0]), Buffer.from([0xff, 0xff, 0xff]))  // 壓進 snappy 資料表
 await db.put(lsKey(PREFIX + T), encodeValue(JSON.stringify(tState)))        // 新值只在日誌：讀的時候要取序號大的
 for (let i = 400; i < 450; i++) await db.put(...filler(i))

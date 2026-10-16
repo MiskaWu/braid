@@ -30,43 +30,55 @@ Claude 桌面 app 換帳號登入後，Code 分頁側欄的舊對話和「已儲
 2. **一台電腦只用一個 `~/.claude`**：不要照官方的多帳號建議替每個帳號設 `CLAUDE_CONFIG_DIR`，
    那樣記憶、對話紀錄、設定會被按帳號拆開。
 
-## 用法一：直接雙擊（不需要 Claude Code）
+## 安裝
 
-- Windows：`mod/tool/windows/migrate.cmd`
-- macOS：`mod/tool/macos/migrate.command`（從瀏覽器下載的話，第一次要按右鍵 →「打開」）
+三種方式擇一，都不用改任何設定檔。
 
-視窗會依序：偵測 app 是否開著並請你結束 → 列出要搬什麼 → 你確認 → 備份 → 寫入 → 問要不要重新開啟 Claude。
-想先看看會搬什麼，加 `-DryRun`（Windows）或 `--dry-run`（macOS）只列計畫不寫入。
+**A. 請 Claude 幫你裝**：在任何一個 Claude Code 對話（桌面 app 的 Code 分頁也可以）輸入：
 
-## 用法二：在 Claude Code 裡打 `/braid migrate`
+> 請照 https://github.com/MiskaWu/braid README 的「給 Claude 的安裝步驟」幫我安裝
 
-這是一個 mod（函式 hook 外掛），目前是 Claude Code 的 early access 功能。安裝在**終端機**做
-（桌面 app 的 Code 分頁不能跑 `/plugin`），裝一次之後桌面 app 也能用：
+**B. 自己在終端機裝**（電腦上有 `claude` 指令的話）：
 
-1. 在 `~/.claude/settings.json` 的 `env` 加上：
+```bash
+claude plugin marketplace add MiskaWu/braid && claude plugin install braid@braid
+```
 
-   ```json
-   "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"
-   ```
+**C. 不裝，直接雙擊**（不需要 Claude Code）：下載這個 repo，Windows 雙擊 `mod/tool/windows/migrate.cmd`，
+macOS 雙擊 `mod/tool/macos/migrate.command`（從瀏覽器下載的話，第一次要按右鍵 →「打開」）。
 
-2. 加入 marketplace 並安裝：
+### 給 Claude 的安裝步驟
 
-   ```bash
-   claude plugin marketplace add MiskaWu/braid && claude plugin install braid@braid
-   ```
+照下面做，不要改 `settings.json`，也不要替使用者執行遷移（遷移由使用者自己打指令）。
 
-   或在終端機裡的 Claude Code 輸入 `/plugin marketplace add MiskaWu/braid`、`/plugin install braid@braid`。
+1. 決定用哪個 `claude`：`command -v claude` 有結果就用它；沒有的話用環境變數 `$CLAUDE_CODE_EXECPATH`
+   （目前這個 Claude Code 本身，桌面 app 的 Code 分頁裡也有）。以下記作 `$CLAUDE`。
+2. 加入 marketplace：`"$CLAUDE" plugin marketplace add MiskaWu/braid`。
+   已經加過的話改跑 `"$CLAUDE" plugin marketplace update braid`。
+3. 安裝：`"$CLAUDE" plugin install braid@braid`。已經裝過的話改跑 `"$CLAUDE" plugin update braid@braid`。
+4. 用 `"$CLAUDE" plugin list` 確認 `braid@braid` 是 enabled，然後告訴使用者：先輸入 `/reload-plugins`
+   （或開一個新對話），再輸入 `/braid migrate 試跑` 看會搬什麼。
 
-之後在任何對話打 `/braid migrate`，會另外開一個視窗跑遷移工具；`/braid migrate 試跑` 只列計畫。
-只打 `/braid` 會列出所有動作。
-遷移要在 app 結束後才能寫入，所以工具一定在獨立視窗執行：你結束 Claude 後它還在，搬完會問要不要重開 Claude。
+## 使用
+
+- `/braid migrate 試跑`：另外開一個視窗**只列計畫、不寫入**。Claude 不用結束，先跑這個看看。
+- `/braid migrate`：正式搬。另外開一個視窗，它會請你從系統匣（macOS 是選單列）**結束 Claude**，
+  只關視窗不夠；這個對話會跟著中斷，沒關係。工具備份、搬完，會問要不要重新開啟 Claude。
+- 只打 `/braid` 會列出所有動作。
+
+雙擊的方式流程相同；想只看計畫，Windows 加 `-DryRun`、macOS 加 `--dry-run`。
+
+**寫入前一定要看清楚方向**：視窗會顯示「目前登入（搬到這裡）：你的信箱」，最後問「方向對嗎」，
+要輸入 Y 才會寫入（直接按 Enter 不算）。信箱不是你要搬過去的帳號（例如公司信箱），就輸入 N，
+到桌面 app 換帳號後再執行。
 
 ## 安全
 
 - **只複製、不搬移**：舊帳號的資料原封不動。可以重跑，已經搬過的會略過。
 - **寫入前先備份**到 `~/braid-backups/<時間>/`，完成畫面會給還原指令。
 - **不需要系統管理員權限**：只讀寫自己的使用者資料夾。
-- **app 開著時不寫**：工具會等你結束 app。
+- **app 開著時不寫**：工具會等你結束 app（試跑例外，只讀不寫）。
+- **不會搬錯方向**：顯示要搬過去的帳號信箱，要你輸入 Y 確認；app 自己記的兩份「目前帳號」說法不一致時直接停下，不猜。
 - **卡住會問，不會直接停掉**：
 
   | 狀況 | 工具怎麼做 |
@@ -89,6 +101,9 @@ Claude 桌面 app 換帳號登入後，Code 分頁側欄的舊對話和「已儲
 - **環境顯示「app 的環境資料格式改版了」**：桌面 app 改了資料格式，工具不猜、直接略過環境，請更新工具。
   session 仍會照常搬。
 - **看到「已停用指令碼執行」**：公司政策禁止 PowerShell 腳本，請聯絡 IT。
+- **「兩處紀錄對目前登入哪個帳號說法不一致」**：打開桌面 app，確認登入的是要搬過去的帳號，在 Code 分頁開一個對話，結束 app 後再跑。
+- **輸入 `/braid` 沒反應**：先輸入 `/reload-plugins` 或開新對話。還是沒有的話，可能是你的帳號還沒開放 mod 功能：
+  在 `~/.claude/settings.json` 的 `env` 加 `"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"` 後開新對話；或改用雙擊的方式。
 
 ## 開發
 

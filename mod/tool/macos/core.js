@@ -341,7 +341,7 @@ var CDM = (function () {
         if (!interactive) return auto;
         for (;;) {
           var a = String(io.readLine(prompt) || '').trim().toUpperCase();
-          if (a === '') return def;
+          if (a === '') { if (def) return def; continue; }
           if (choices.indexOf(a) >= 0) return a;
         }
       },
@@ -356,6 +356,20 @@ var CDM = (function () {
         }
       },
     };
+  }
+
+  // Local Storage 裡單一字串值（讀不到就回 null；容忍讀，app 開著也行）
+  function lsString(io, dir, name) {
+    try {
+      var st = lsRead(io, dir, name, true);
+      for (var k in st.entries) {
+        var e = st.entries[k];
+        if (e.deleted) continue;
+        var parts = splitKey(e.key);
+        if (parts && parts[1] === name) return decodeValue(e.value).replace(/^"|"$/g, '');
+      }
+    } catch (err) { /* 讀不到就當沒有 */ }
+    return null;
   }
 
   function waitAppClosed(io, ui, opts) {
@@ -439,10 +453,25 @@ var CDM = (function () {
         ui.say('請先用新帳號登入桌面 app，在 Code 分頁開一個新對話（打一句話就好），結束 app 後再執行一次。');
         return 2;
       }
+      // 目前登入的帳號：config.json 與 Local Storage 各記一份，說法不一致就停，避免搬錯方向
+      var lsDir = io.join.apply(null, [opts.appDataRoot].concat(spec.presets.localStorageDir.split('/')));
+      var email = null;
+      if (io.isDir(lsDir)) {
+        email = lsString(io, lsDir, spec.app.loginEmailKey);
+        var confirmed = lsString(io, lsDir, spec.app.confirmedAccountKey);
+        if (confirmed && confirmed !== current) {
+          ui.say('桌面 app 的兩處紀錄對「目前登入哪個帳號」說法不一致。為了不搬錯方向，先停下來。', 'red');
+          ui.say('請打開桌面 app，確認登入的是要搬過去的帳號（例如公司帳號），在 Code 分頁開一個對話，結束 app 後再執行一次。');
+          return 2;
+        }
+      }
+      var targetName = email || ('帳號 ' + short(target.account) + '…（讀不到登入信箱）');
+
       var sources = profiles.filter(function (p) { return p.dir !== target.dir && p.count > 0; }).sort(function (a, b) { return b.last - a.last; });
       if (!sources.length) { ui.say('這台電腦上沒有其他帳號的 session 可以遷移。', 'green'); return 0; }
 
-      ui.say('目前登入（搬到這裡）：', 'cyan');
+      ui.say('目前登入（搬到這裡）：' + targetName, 'cyan');
+      ui.say('  不是你要搬過去的帳號（例如公司帳號）的話，現在按 Ctrl+C 取消，到桌面 app 換帳號後再執行。', 'yellow');
       showProfile(ui, target, '');
       ui.say('');
       var source = null;
@@ -509,7 +538,7 @@ var CDM = (function () {
       }
 
       // --- 規劃環境 ---
-      var presetPlans = [], lsDir = io.join.apply(null, [opts.appDataRoot].concat(spec.presets.localStorageDir.split('/')));
+      var presetPlans = [];
       if (io.isDir(lsDir)) {
         try {
           var state = lsRead(io, lsDir, spec.presets.keyPrefix, !!opts.dryRun), byName = {}, kp = spec.presets.keyPrefix;
@@ -573,7 +602,7 @@ var CDM = (function () {
       if (opts.planJson) {
         var planOut = {
           source: { account: source.account, org: source.org },
-          target: { account: target.account, org: target.org },
+          target: { account: target.account, org: target.org, email: email },
           sessions: {
             copy: copy.map(function (x) { return x.name; }).sort(),
             skip: skip.slice().sort(function (a, b) { return a.file < b.file ? -1 : 1; }).map(function (s) { return { file: s.file, reason: s.reason }; }),
@@ -587,7 +616,8 @@ var CDM = (function () {
       var mergeScopes = presetPlans.filter(function (p) { return p.status === 'merge'; });
       if (!copy.length && !addArchived.length && !mergeScopes.length) { ui.say('沒有需要搬的東西，結束。', 'green'); return 0; }
       if (opts.dryRun) { ui.say('試跑模式：沒有寫入任何東西。要正式搬，不加 --dry-run 再跑一次（會請你先結束 Claude）。', 'cyan'); return 0; }
-      if (ui.ask('開始寫入？[Y/N]（直接按 Enter＝Y）', ['Y', 'N'], 'Y', 'Y') !== 'Y') throw new Error('CANCEL');
+      ui.say('確認方向：把帳號 ' + short(source.account) + '… 的資料（' + copy.length + ' 筆對話，環境 ' + mergeScopes.length + ' 層）複製到 ' + targetName + '。', 'yellow');
+      if (ui.ask('  方向對嗎？輸入 Y 開始寫入，N 取消', ['Y', 'N'], '', 'Y') !== 'Y') throw new Error('CANCEL');
 
       // --- 備份 ---
       var mirrorPath = io.join(opts.appDataRoot, spec.presets.mirrorFile);

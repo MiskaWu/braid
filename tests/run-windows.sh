@@ -46,6 +46,20 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1" -AppDataRoot "$(w
   -SkipAppCheck -Yes -Restore "$(wslpath -w "$B")" | tr -d '\r'
 node verify.mjs restored "$W" "$W.before"
 
+echo; echo "######## 目前帳號說法不一致"
+# 兩處紀錄對目前帳號說法不一致（config.json 指向舊帳號、Local Storage 確認的是新帳號）：要停下來、不寫任何東西
+node -e 'const fs=require("fs"),f=process.argv[1],c=JSON.parse(fs.readFileSync(f));c.lastKnownAccountUuid="11111111-1111-4111-8111-111111111111";fs.writeFileSync(f,JSON.stringify(c))' "$W/app/config.json"
+cp -r "$W" "$W.mismatch-before"
+set +e
+out=$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1" -AppDataRoot "$(wslpath -w "$W/app")" -ClaudeHome "$(wslpath -w "$W/claude-home")" \
+  -BackupRoot "$(wslpath -w "$W/backups2")" -SkipAppCheck -NoRelaunch -Yes 2>&1 | tr -d '\r'; exit "${PIPESTATUS[0]}")
+rc=$?
+set -e
+[ "$rc" = 2 ] && echo "  ok  結束碼 2" || { echo "  NG  結束碼 $rc（預期 2）"; echo "$out"; exit 1; }
+echo "$out" | grep -q '說法不一致' && echo "  ok  說明為什麼停" || { echo "  NG  沒有說明"; echo "$out"; exit 1; }
+[ ! -e "$W/backups2" ] && diff -rq "$W/app" "$W.mismatch-before/app" >/dev/null && echo "  ok  什麼都沒寫" || { echo "  NG  有東西被改了"; exit 1; }
+rm -rf "$W.mismatch-before"
+
 rm -rf "$W" "$W.before" "$LOCAL" "$WSLDIR"
 echo; echo "######## LevelDB 邊界"
 node leveldb-edge.mjs ps

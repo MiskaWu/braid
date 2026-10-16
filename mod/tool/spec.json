@@ -27,6 +27,9 @@
   "app": {
     "configFile": "config.json",
     "currentAccountKey": "lastKnownAccountUuid",
+    "_localStorageKeys": "app 內建瀏覽器（claude.ai 來源）記的目前登入：信箱給人看，帳號 ID 拿來跟 config.json 交叉比對，不一致就停，避免搬錯方向。",
+    "loginEmailKey": "lastLoginEmail",
+    "confirmedAccountKey": "rq-cache-confirmed-account",
     "macBundleId": "com.anthropic.claudefordesktop"
   }
 }

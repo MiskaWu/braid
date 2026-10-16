@@ -50,7 +50,7 @@ function Ask([string]$Prompt, [string[]]$Choices, [string]$Default, [string]$Aut
     if ($Yes -or -not $Interactive) { return $Auto }
     while ($true) {
         $a = (Read-Host $Prompt).Trim().ToUpper()
-        if ($a -eq '') { return $Default }
+        if ($a -eq '') { if ($Default) { return $Default } else { continue } }
         if ($Choices -contains $a) { return $a }
     }
 }
@@ -183,6 +183,20 @@ function Test-Transcript($E) {
     return 'missing'
 }
 
+# Local Storage 裡單一字串值（讀不到就回 $null；試跑模式的容忍讀，app 開著也行）
+function Get-LsString([string]$Dir, [string]$Name) {
+    try {
+        $st = [CdmLevelDb]::Read($Dir, $Name, $true)
+        foreach ($kv in $st.Entries.GetEnumerator()) {
+            $e = $kv.Value
+            if ($e.Deleted) { continue }
+            $parts = [CdmLevelDb]::SplitKey($e.Key)
+            if ($parts -and $parts[1] -eq $Name) { return ([CdmLevelDb]::DecodeValue($e.Value)).Trim('"') }
+        }
+    } catch { }
+    return $null
+}
+
 # ---------- 環境（Local Storage）合併 ----------
 
 function Get-PlaceKey($Target) {
@@ -303,10 +317,25 @@ function Main {
         exit 2
     }
 
+    # 目前登入的帳號：config.json 與 Local Storage 各記一份，說法不一致就停，避免搬錯方向
+    $lsDir = Join-Path $AppDataRoot ($spec.presets.localStorageDir -replace '/', '\')
+    $email = $null
+    if ($lsAvailable -and (Test-Path -LiteralPath $lsDir)) {
+        $email = Get-LsString $lsDir $spec.app.loginEmailKey
+        $confirmed = Get-LsString $lsDir $spec.app.confirmedAccountKey
+        if ($confirmed -and $confirmed -ne $current) {
+            Say '桌面 app 的兩處紀錄對「目前登入哪個帳號」說法不一致。為了不搬錯方向，先停下來。' Red
+            Say '請打開桌面 app，確認登入的是要搬過去的帳號（例如公司帳號），在 Code 分頁開一個對話，結束 app 後再執行一次。'
+            exit 2
+        }
+    }
+    $targetName = if ($email) { $email } else { "帳號 $(Short $target.Account)…（讀不到登入信箱）" }
+
     $sources = @($profiles | Where-Object { $_.Dir -ne $target.Dir -and $_.Count -gt 0 } | Sort-Object Last -Descending)
     if ($sources.Count -eq 0) { Say '這台電腦上沒有其他帳號的 session 可以遷移。' Green; return }
 
-    Say '目前登入（搬到這裡）：' Cyan
+    Say "目前登入（搬到這裡）：$targetName" Cyan
+    Say '  不是你要搬過去的帳號（例如公司帳號）的話，現在按 Ctrl+C 取消，到桌面 app 換帳號後再執行。' Yellow
     Show-Profile $target ''
     Say ''
     $source = $null
@@ -390,7 +419,6 @@ function Main {
 
     # --- 規劃環境 ---
     $presetPlans = New-Object System.Collections.ArrayList
-    $lsDir = Join-Path $AppDataRoot ($spec.presets.localStorageDir -replace '/', '\')
     if ($lsAvailable -and (Test-Path -LiteralPath $lsDir)) {
         try {
             $state = [CdmLevelDb]::Read($lsDir, $spec.presets.keyPrefix, [bool]$DryRun)
@@ -468,7 +496,7 @@ function Main {
     if ($PlanJson) {
         $plan = [ordered]@{
             source   = [ordered]@{ account = $source.Account; org = $source.Org }
-            target   = [ordered]@{ account = $target.Account; org = $target.Org }
+            target   = [ordered]@{ account = $target.Account; org = $target.Org; email = $email }
             sessions = [ordered]@{
                 copy = @($copy | ForEach-Object { $_.File.Name } | Sort-Object)
                 skip = @($skip | Sort-Object File | ForEach-Object { [ordered]@{ file = $_.File; reason = $_.Reason } })
@@ -482,7 +510,8 @@ function Main {
     $mergeScopes = @($presetPlans | Where-Object { $_.Status -eq 'merge' })
     if ($copy.Count -eq 0 -and $addArchived.Count -eq 0 -and $mergeScopes.Count -eq 0) { Say '沒有需要搬的東西，結束。' Green; return }
     if ($DryRun) { Say '試跑模式：沒有寫入任何東西。要正式搬，不加 -DryRun 再跑一次（會請你先結束 Claude）。' Cyan; return }
-    $go = Ask '開始寫入？[Y/N]（直接按 Enter＝Y）' @('Y', 'N') 'Y' 'Y'
+    Say ("確認方向：把帳號 {0}… 的資料（{1} 筆對話，環境 {2} 層）複製到 {3}。" -f (Short $source.Account), $copy.Count, $mergeScopes.Count, $targetName) Yellow
+    $go = Ask '  方向對嗎？輸入 Y 開始寫入，N 取消' @('Y', 'N') '' 'Y'
     if ($go -ne 'Y') { throw 'CANCEL' }
 
     # --- 備份 ---

@@ -55,7 +55,7 @@ if (mode === 'restored') {
 console.log('== 計畫 ==')
 const plan = readJson(path.join(root, 'plan.json'))
 eq(plan.source, { account: S, org: SO }, '來源帳號＝-From 指定的那個')
-eq(plan.target, { account: T, org: TO }, '目標帳號＝config.json 記的目前帳號')
+eq(plan.target, { account: T, org: TO, email: 'tester@example.com' }, '目標帳號＝config.json 記的目前帳號，附上 app 記的登入信箱')
 eq(plan.sessions.copy, ['a', 'c', 'f', 'i'].map((c) => `local_${uuid(c)}.json`), '要複製的 session')
 eq(plan.sessions.skip.map((s) => [s.file.slice(-6, -5), s.reason]),
   [['b', 'missing-transcript'], ['d', 'exists'], ['e', 'tombstone'], ['g', 'missing-transcript'], ['h', 'invalid']], '略過的 session 與原因')
