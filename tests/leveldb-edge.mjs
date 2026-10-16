@@ -11,9 +11,10 @@ const fsIo = {
   appendBytes: (p, b) => fs.appendFileSync(p, b), fileSize: (p) => fs.statSync(p).size, exists: (p) => fs.existsSync(p), listDir: (p) => fs.readdirSync(p),
 }
 
-const winTemp = !impls.includes('ps') ? null : execFileSync('wslpath', ['-u', execFileSync('cmd.exe', ['/c', 'echo %TEMP%'], { cwd: '/mnt/c' }).toString().trim()]).toString().trim()
+// Windows 路徑只在測 PowerShell 版時才找：CI（Ubuntu）沒有 wslpath 與 cmd.exe
 const toWin = (p) => execFileSync('wslpath', ['-w', p]).toString().trim()
-const ps1 = toWin(path.resolve('append.ps1'))
+const winTemp = !impls.includes('ps') ? null : execFileSync('wslpath', ['-u', execFileSync('cmd.exe', ['/c', 'echo %TEMP%'], { cwd: '/mnt/c' }).toString().trim()]).toString().trim()
+const ps1 = !impls.includes('ps') ? null : toWin(path.resolve('append.ps1'))
 const BLOCK = 32768
 
 async function scenario(impl, label, fillTo, valueLen) {
