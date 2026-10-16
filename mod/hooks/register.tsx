@@ -37,6 +37,7 @@ import {
   meter,
   nameOf,
   normalizeAccount,
+  normalizeFolder,
   normalizeSwitch,
   normalizeSync,
   normalizeUses,
@@ -577,7 +578,7 @@ async function drawOnboarding($: $, ui: UI) {
   const options: { id: keyof BraidUses; title: string; desc: string }[] = [
     { id: 'migrate', title: '換帳號了，把舊對話搬過來', desc: '桌面 app 舊帳號在 Code 分頁的對話與環境，複製到現在的帳號。搬一次就好。' },
     { id: 'switch', title: '用量用完，換另一個帳號接著做', desc: '快到上限時提醒，一鍵用另一個帳號在新視窗接著同一段對話。要兩個以上的帳號。' },
-    { id: 'sync', title: '幾個帳號長期一起用', desc: '桌面 app 換帳號後，指定資料夾的對話與環境跟著過去。' },
+    { id: 'sync', title: '幾個帳號長期一起用', desc: '桌面 app 換帳號後，對話與環境跟著過去（預設全部資料夾，也可以只挑幾個）。' },
   ]
   return (
     <Box flexDirection="column" gap={1}>
@@ -895,7 +896,7 @@ async function drawSwitch($: $, ui: UI) {
 }
 
 async function drawSync($: $, ui: UI) {
-  const { Box, Text, Button, Select } = ui
+  const { Box, Text, Button, Input, Select } = ui
   const platform = await read($, platformAtom)
   if (platform === 'other') {
     return <Text>CLI 的對話不分帳號：換帳號後用 claude --resume 就看得到全部，不需要同步。同步是給桌面 app 的側欄用的。</Text>
@@ -908,6 +909,7 @@ async function drawSync($: $, ui: UI) {
   const partner = partnerOf(sy, current)
   const known = [...new Set([...desktop.profiles.map(p => p.account), ...Object.values(accounts).filter(a => a.source === 'desktop').map(a => a.id)])].filter(id => id !== current)
   const rows = current && partner ? syncRows(desktop.profiles, current, partner, sy.folders) : []
+  const cwd = await $.session.cwd()
   const partnerName = partner ? nameOf(accounts, partner) : ''
   const hint = sy.pair.length === 2 && !partner ? `目前的同步設定是「${nameOf(accounts, sy.pair[0] as string)}」和「${nameOf(accounts, sy.pair[1] as string)}」，這個對話的帳號不在裡面。` : null
   const request = syncRequest(sy, partner)
@@ -915,6 +917,54 @@ async function drawSync($: $, ui: UI) {
   const mineOrg = current ? accounts[current]?.orgId : undefined
   const theirOrg = partner ? accounts[partner]?.orgId : undefined
   const crossOrg = !mineOrg || !theirOrg || mineOrg !== theirOrg
+  const byPath = new Map(rows.map(r => [r.path, r]))
+  const counts = (path: string) => {
+    const r = byPath.get(path)
+    return r && r.mine + r.theirs > 0 ? `目前 ${r.mine} · ${partnerName} ${r.theirs}` : '兩邊都還沒有對話'
+  }
+  const addFolder = (text: string) => {
+    const path = normalizeFolder(text)
+    if (path === null) return
+    return putSync($, s => (s.folders.includes(path) ? s : { ...s, folders: [...s.folders, path] }))
+  }
+  const drawSyncAll = () => (
+    <Box key="sy-all-box" flexDirection="column">
+      <Text dimColor>{`目前兩個帳號共 ${rows.length} 個資料夾，對話與環境全部互相帶過去。`}</Text>
+      {crossOrg && <Text color="warning">這兩個帳號可能不在同一個組織：全部同步會連個人專案的對話也一起帶過去，反過來也一樣。要分開，改成「只同步我挑的資料夾」。</Text>}
+    </Box>
+  )
+  // 自己挑：已加入的一列一列、各自可以移除；下面三種加法——這個對話的資料夾、從清單挑、輸入路徑
+  const drawSyncPicked = () => {
+    const choices = rows.filter(r => !sy.folders.includes(r.path))
+    return (
+      <Box key="sy-picked-box" flexDirection="column" gap={1}>
+        <Box flexDirection="column">
+          <Text bold>{`要同步的資料夾（${sy.folders.length}）`}</Text>
+          {sy.folders.length === 0 && <Text dimColor>還沒加入任何資料夾，用下面的方式加。</Text>}
+          {sy.folders.map(path => (
+            <Box key={`sy-row-${path}`} flexDirection="row" gap={1}>
+              <Text wrap="truncate-start">
+                {path} <Text dimColor>{counts(path)}</Text>
+              </Text>
+              <Button key={`sy-del-${path}`} label="移除" dimColor onPress={() => putSync($, s => ({ ...s, folders: s.folders.filter(f => f !== path) }))} />
+            </Box>
+          ))}
+        </Box>
+        {!sy.folders.includes(cwd) && <Button key="sy-add-here" label={`＋ 加入這個對話的資料夾（${cwd}）`} onPress={() => addFolder(cwd)} />}
+        {choices.length > 0 && (
+          <Select
+            key="sy-add"
+            label="從清單加入"
+            options={[{ value: '', label: `（還有 ${choices.length} 個資料夾可以加）` }, ...choices.map(r => ({ value: r.path, label: `${r.path}　${counts(r.path)}` }))]}
+            value=""
+            onSelect={v => addFolder(v)}
+          />
+        )}
+        <Input key="sy-add-path" label="或輸入資料夾路徑" value="" placeholder="例如 /home/me/work/api，按 Enter 加入" onSubmit={v => addFolder(v)} />
+        <Text dimColor>路徑要和桌面 app 對話的資料夾完全一樣（子資料夾要另外加）。</Text>
+      </Box>
+    )
+  }
   return (
     <Box flexDirection="column" gap={1}>
       <Select
@@ -939,24 +989,18 @@ async function drawSync($: $, ui: UI) {
       )}
       {hint && <Text dimColor>{hint}</Text>}
       {partner && (
-        <Box flexDirection="column">
-          <Text bold>哪些資料夾</Text>
-          <Button key="sy-all" plain onPress={() => putSync($, s => ({ ...s, all: !s.all }))}>
-            {sy.all ? '[x] ' : '[ ] '}全部資料夾 <Text dimColor>之後新出現的也算</Text>
-          </Button>
-          {sy.all && <Text dimColor>{`目前兩個帳號共 ${rows.length} 個資料夾，對話與環境全部互相帶過去。`}</Text>}
-          {sy.all && crossOrg && <Text color="warning">這兩個帳號可能不在同一個組織：全部同步會連個人專案的對話也一起帶過去，反過來也一樣。</Text>}
-          {!sy.all && rows.length === 0 && <Text dimColor>兩個帳號在桌面 app 都還沒有對話。</Text>}
-          {!sy.all && rows.slice(0, 40).map(r => (
-            <Button
-              key={`sy-f-${r.path}`}
-              plain
-              onPress={() => putSync($, s => ({ ...s, folders: s.folders.includes(r.path) ? s.folders.filter(f => f !== r.path) : [...s.folders, r.path] }))}
-            >
-              {r.checked ? '[x] ' : '[ ] '}
-              {r.path} <Text dimColor>{`目前 ${r.mine} · ${partnerName} ${r.theirs}`}</Text>
-            </Button>
-          ))}
+        <Box flexDirection="column" gap={1}>
+          <Select
+            key="sy-scope"
+            label="同步範圍"
+            options={[
+              { value: 'all', label: '全部資料夾（建議，之後新出現的也算）' },
+              { value: 'picked', label: '只同步我挑的資料夾' },
+            ]}
+            value={sy.all ? 'all' : 'picked'}
+            onSelect={v => putSync($, s => ({ ...s, all: v === 'all' }))}
+          />
+          {sy.all ? drawSyncAll() : drawSyncPicked()}
         </Box>
       )}
       <Select

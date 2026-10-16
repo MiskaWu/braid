@@ -14,6 +14,7 @@ import {
   folderRule,
   meter,
   normalizeAccount,
+  normalizeFolder,
   normalizeSwitch,
   normalizeSync,
   normalizeUses,
@@ -71,10 +72,17 @@ describe('讀回儲存的資料', () => {
       otherFolders: 'same-org',
     })
     expect(normalizeSync({ on: true, pair: ['a', 'b', 'c'], folders: ['/x', ''], when: 'manual' })).toEqual({ on: true, pair: ['a', 'b'], all: false, folders: ['/x'], when: 'manual' })
-    expect(normalizeSync({ all: true }).all).toBe(true)
+    // 同步預設全部；沒有 all 欄位的舊設定，挑過資料夾的維持只同步挑的
+    expect([normalizeSync(null).all, normalizeSync({}).all, normalizeSync({ all: false }).all, normalizeSync({ all: true, folders: ['/x'] }).all]).toEqual([true, true, false, true])
     expect(normalizeAccount({ label: 'x' })).toBe(null)
     expect(normalizeAccount({ id: 'tok-1', credential: 'file', source: 'token' })?.credentialId).toBe('tok-1')
     expect(normalizeAccount({ id: 'a', credential: 'stolen' })?.credential).toBe(null)
+  })
+})
+
+describe('輸入的資料夾路徑', () => {
+  test('去掉前後空白、引號與結尾斜線；根目錄與磁碟機根目錄保留；空的不收', async () => {
+    expect(['  /a/b/ ', '"/a b"', "'C:\\proj\\'", '/', 'C:\\', '  ', '""'].map(normalizeFolder)).toEqual(['/a/b', '/a b', 'C:\\proj', '/', 'C:\\', null, null])
   })
 })
 

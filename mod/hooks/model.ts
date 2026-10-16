@@ -23,7 +23,7 @@ export const COLOR_NAMES: Record<string, string> = {
 
 export const DEFAULT_USES: BraidUses = { migrate: false, switch: false, sync: false }
 export const DEFAULT_SWITCH: BraidSwitch = { on: true, fiveHour: 90, sevenDay: 95, order: [], folders: {}, otherFolders: 'same-org' }
-export const DEFAULT_SYNC: BraidSync = { on: false, pair: [], all: false, folders: [], when: 'on-switch' }
+export const DEFAULT_SYNC: BraidSync = { on: false, pair: [], all: true, folders: [], when: 'on-switch' }
 export const FIVE_HOUR_CHOICES = [80, 90, 95] as const
 export const SEVEN_DAY_CHOICES = [90, 95] as const
 
@@ -55,13 +55,25 @@ export function normalizeSwitch(x: unknown): BraidSwitch {
 
 export function normalizeSync(x: unknown): BraidSync {
   if (!isObj(x)) return { ...DEFAULT_SYNC }
+  const folders = Array.isArray(x.folders) ? x.folders.filter((v): v is string => typeof v === 'string' && v !== '') : []
   return {
     on: x.on === true,
     pair: Array.isArray(x.pair) ? x.pair.filter((v): v is string => typeof v === 'string' && v !== '').slice(0, 2) : [],
-    all: x.all === true,
-    folders: Array.isArray(x.folders) ? x.folders.filter((v): v is string => typeof v === 'string' && v !== '') : [],
+    // 預設全部；沒有 all 欄位的舊設定，挑過資料夾的維持只同步挑的
+    all: x.all === true || (x.all === undefined && folders.length === 0),
+    folders,
     when: x.when === 'manual' ? 'manual' : 'on-switch',
   }
+}
+
+/** 使用者輸入的資料夾路徑：去掉前後空白、貼上時常帶的引號、結尾的斜線（根目錄除外）；空的回 null。 */
+export function normalizeFolder(text: string): string | null {
+  const t = text.trim().replace(/^(["'])(.*)\1$/, '$2').trim()
+  if (!t) return null
+  const stripped = t.replace(/[\\/]+$/, '')
+  if (stripped === '') return t.startsWith('/') ? '/' : null
+  if (/^[A-Za-z]:$/.test(stripped)) return `${stripped}\\`
+  return stripped
 }
 
 function normalizeWindow(x: unknown): BraidWindow | null {

@@ -490,40 +490,62 @@ describe('切換設定', () => {
 })
 
 describe('同步', () => {
-  test('選同步的帳號與資料夾，按了開工具：從對方把這些資料夾的對話帶過來、環境跟著資料夾', async ($, on) => {
+  test('第一次設定：預設全部資料夾；按了工具收到 -Projects all -Presets all；組織不同要警告', async ($, on) => {
     const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL } })
     await $.session.start(START)
     await $.command.run(RUN('同步'))
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
     await ui.select({ key: 'sy-on', value: 'on' })
     await ui.select({ key: 'sy-partner', value: P })
-    expect(await shows(ui, /\/side\/blog.*目前 0 · 個人 2/)).toBe(true)
-    expect(await shows(ui, /\/w\/server.*目前 1 · 個人 1/)).toBe(true)
-    await ui.press({ key: 'sy-f-/w/server' })
+    expect(await w.store.get('sync')).toEqual({ on: true, pair: [W, P], all: true, folders: [], when: 'on-switch' })
+    expect((await ui.find({ key: 'sy-scope' }))?.props.value).toBe('all')
+    expect(await shows(ui, /目前兩個帳號共 2 個資料夾/)).toBe(true)
+    expect(await shows(ui, /可能不在同一個組織/)).toBe(true) // 公司與個人
+    expect(await ui.find({ key: 'sy-add' })).toBeUndefined()
     await ui.press({ key: 'sy-now' })
-    expect(await w.store.get('sync')).toEqual({ on: true, pair: [W, P], all: false, folders: ['/w/server'], when: 'on-switch' })
-    expect(w.runs.at(-1)?.argv.slice(2)).toEqual(['-From', P, '-Projects', '/w/server', '-Presets', 'folders'])
+    expect(w.runs.at(-1)?.argv.slice(2)).toEqual(['-From', P, '-Projects', 'all', '-Presets', 'all'])
     expect(await shows(ui, /已在另一個視窗開啟同步工具/)).toBe(true)
     await ui.unmount()
   })
 
-  test('全部資料夾：清單收起來、說明有幾個資料夾，組織不同要警告；按了工具收到 -Projects all -Presets all', async ($, on) => {
-    const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL, sync: { on: true, pair: [W, P], folders: ['/w/server'], when: 'on-switch' } } })
+  test('自己挑：一個一個加——這個對話的資料夾、從清單挑、輸入路徑；可以移除；按了只帶這些資料夾、環境跟著資料夾', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL, sync: { on: true, pair: [W, P], all: true, folders: [], when: 'on-switch' } } })
     await $.session.start(START)
     await $.command.run(RUN('同步'))
+    for (const surface of SURFACES) {
+      const ui = await $.ui.mount({ ...PANE, surface })
+      await ui.select({ key: 'sy-scope', value: 'picked' })
+      expect(await shows(ui, /還沒加入任何資料夾/)).toBe(true)
+      expect(await ui.find({ key: 'sy-now' })).toBeUndefined() // 沒有範圍就沒有「帶過來」
+      await ui.unmount()
+    }
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-    expect(await ui.find({ key: 'sy-f-/side/blog' })).toBeDefined()
-    expect(await shows(ui, /可能不在同一個組織/)).toBe(false)
-    await ui.press({ key: 'sy-all' })
-    const saved = w.store.get('sync') as { all: boolean; folders: string[] }
-    expect([saved.all, saved.folders]).toEqual([true, ['/w/server']]) // 勾選留著，關掉全部時回來
-    expect(await ui.find({ key: 'sy-f-/side/blog' })).toBeUndefined()
-    expect(await shows(ui, /目前兩個帳號共 2 個資料夾/)).toBe(true)
-    expect(await shows(ui, /可能不在同一個組織/)).toBe(true) // 公司與個人
+    // 1. 這個對話的資料夾
+    expect((await ui.find({ key: 'sy-add-here' }))?.props.label).toBe('＋ 加入這個對話的資料夾（/w/server）')
+    await ui.press({ key: 'sy-add-here' })
+    expect(await ui.find({ key: 'sy-add-here' })).toBeUndefined()
+    expect(await shows(ui, /\/w\/server.*目前 1 · 個人 1/)).toBe(true)
+    // 2. 從清單挑：只列還沒加的，附兩邊的對話數
+    const options = ((await ui.find({ key: 'sy-add' }))?.props.options ?? []) as { value: string; label: string }[]
+    expect(options.map(o => o.value)).toEqual(['', '/side/blog'])
+    expect(options[1]?.label).toBe('/side/blog　目前 0 · 個人 2')
+    await ui.select({ key: 'sy-add', value: '/side/blog' })
+    expect(await ui.find({ key: 'sy-add' })).toBeUndefined() // 清單都加完了
+    // 3. 輸入路徑：去掉引號、空白與結尾斜線；重複的不再加
+    await ui.input({ key: 'sy-add-path', text: '  "/new/proj/"  ' })
+    await ui.input({ key: 'sy-add-path', text: '/new/proj' })
+    expect(await shows(ui, /\/new\/proj.*兩邊都還沒有對話/)).toBe(true)
+    expect((w.store.get('sync') as { folders: string[] }).folders).toEqual(['/w/server', '/side/blog', '/new/proj'])
+    // 移除
+    await ui.press({ key: 'sy-del-/side/blog' })
+    expect((w.store.get('sync') as { folders: string[] }).folders).toEqual(['/w/server', '/new/proj'])
     await ui.press({ key: 'sy-now' })
-    expect(w.runs.at(-1)?.argv.slice(2)).toEqual(['-From', P, '-Projects', 'all', '-Presets', 'all'])
-    await ui.press({ key: 'sy-all' })
-    expect(await ui.find({ key: 'sy-f-/side/blog' })).toBeDefined()
+    expect(w.runs.at(-1)?.argv.slice(2)).toEqual(['-From', P, '-Projects', '/w/server,/new/proj', '-Presets', 'folders'])
+    // 切回全部：挑過的留著，再切回來還在
+    await ui.select({ key: 'sy-scope', value: 'all' })
+    expect(w.store.get('sync')).toMatchObject({ all: true, folders: ['/w/server', '/new/proj'] })
+    await ui.select({ key: 'sy-scope', value: 'picked' })
+    expect(await ui.find({ key: 'sy-del-/new/proj' })).toBeDefined()
     await ui.unmount()
   })
 
