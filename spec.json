@@ -1,0 +1,32 @@
+{
+  "_說明": "Windows 與 macOS 兩份腳本共用的遷移規則。app 改了資料格式時改這裡，不要各自改腳本。",
+
+  "sessions": {
+    "_說明": "側欄 session 清單：claude-code-sessions/<帳號>/<組織>/local_*.json，每筆指向一份對話紀錄 jsonl。",
+    "dir": "claude-code-sessions",
+    "filePrefix": "local_",
+    "tombstonePrefix": "deleted_",
+    "archivedIndex": "archived-sessions.idx",
+    "requiredKeys": ["sessionId", "cliSessionId", "cwd"],
+    "_dropKeys": "綁在舊帳號雲端的欄位：遠端控制橋接、斷線重接、排程。新帳號上指不到東西。",
+    "dropKeys": ["bridgeSessionIds", "sshReattach", "priorRemoteCliSessionIds", "scheduledTaskId"],
+    "nullKeys": ["startedFromEnvironmentId"],
+    "_replaceFromTarget": "換成新帳號最近一筆 session 的值（舊帳號的連接器新帳號未必有）。",
+    "replaceFromTarget": ["remoteMcpServersConfig"]
+  },
+
+  "presets": {
+    "_說明": "已儲存的環境。正本在 Local Storage（LevelDB），app 啟動時用它覆寫 mirrorFile；只改 mirrorFile 會被蓋回。",
+    "localStorageDir": "Local Storage/leveldb",
+    "keyPrefix": "persisted.ccd-session-presets.",
+    "mirrorFile": "ccd-session-presets.json",
+    "supportedVersions": [4],
+    "requiredStateKeys": ["presets"]
+  },
+
+  "app": {
+    "configFile": "config.json",
+    "currentAccountKey": "lastKnownAccountUuid",
+    "macBundleId": "com.anthropic.claudefordesktop"
+  }
+}
