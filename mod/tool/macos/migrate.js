@@ -36,7 +36,7 @@ function run(argv) {
     from: opt('--from'),
     appDataRoot: opt('--app-data-root') || join(home, 'Library', 'Application Support', 'Claude'),
     claudeHome: opt('--claude-home') || join(home, '.claude'),
-    backupRoot: opt('--backup-root') || join(home, 'claude-desktop-migrate-backups'),
+    backupRoot: opt('--backup-root') || join(home, 'switchboard-backups'),
     planJson: opt('--plan-json'),
     skipAppCheck: argv.indexOf('--skip-app-check') >= 0,
     noRelaunch: argv.indexOf('--no-relaunch') >= 0,

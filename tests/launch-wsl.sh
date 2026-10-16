@@ -13,14 +13,14 @@ ok() { echo "  ok  $1"; }; ng() { echo "  NG  $1"; exit 1; }
 for mode in normal dry; do
   arg=(); [ $mode = dry ] && arg=(-DryRun)
   out=$(PATH="$FAKE:$PATH" bash ../mod/tool/launch-from-wsl.sh "${arg[@]}")
-  dest="$(wslpath -u "$TEST_TEMP")/claude-desktop-migrate"
+  dest="$(wslpath -u "$TEST_TEMP")/switchboard"
   for f in spec.json windows/migrate.ps1 windows/migrate.cmd windows/LevelDbLite.cs; do
     cmp -s "../mod/tool/$f" "$dest/$f" || ng "[$mode] $f 沒有完整複製到 Windows 暫存"
   done
   ok "[$mode] 工具完整複製到 Windows 暫存資料夾"
   mapfile -t a < "$FAKE/args"
   [ "${a[0]}" = "-NoProfile" ] && [ "${a[1]}" = "-Command" ] || ng "[$mode] powershell 參數不對：${a[*]}"
-  want="Start-Process -FilePath '$TEST_TEMP\\claude-desktop-migrate\\windows\\migrate.cmd'"
+  want="Start-Process -FilePath '$TEST_TEMP\\switchboard\\windows\\migrate.cmd'"
   [ $mode = dry ] && want="$want -ArgumentList '-DryRun'"
   [ "${a[2]}" = "$want" ] || ng "[$mode] Start-Process 指令不對：${a[2]}"
   ok "[$mode] 用 Start-Process 開 Windows 路徑上的 migrate.cmd"

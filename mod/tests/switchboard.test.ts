@@ -21,9 +21,9 @@ function world(on: On, env: Record<string, string>, opts: { uname?: string; fail
   return { runs, writes }
 }
 
-const RUN = (args = '') => ({ command: 'desktop-migrate', args, origin: { kind: 'composer' as const }, presentation: { isFullscreen: true, columns: 120 } })
+const RUN = (args = 'migrate') => ({ command: 'switchboard', args, origin: { kind: 'composer' as const }, presentation: { isFullscreen: true, columns: 120 } })
 
-describe('/desktop-migrate 依平台開獨立視窗', () => {
+describe('/switchboard migrate 依平台開獨立視窗', () => {
   test('WSL：交給 launch-from-wsl.sh（它會複製到 Windows 暫存再開視窗）', async ($, on) => {
     const { runs } = world(on, { WSL_DISTRO_NAME: 'dev' })
     const { text } = await $.command.run(RUN())
@@ -37,7 +37,7 @@ describe('/desktop-migrate 依平台開獨立視窗', () => {
 
   test('WSL 試跑：帶 -DryRun', async ($, on) => {
     const { runs } = world(on, { WSL_DISTRO_NAME: 'dev' })
-    const { text } = await $.command.run(RUN('試跑'))
+    const { text } = await $.command.run(RUN('migrate 試跑'))
     expect(runs[0]?.[1]).toMatch(/\/tool\/launch-from-wsl\.sh$/)
     expect(runs[0]?.[2]).toBe('-DryRun')
     expect(text).toContain('試跑')
@@ -64,8 +64,8 @@ describe('/desktop-migrate 依平台開獨立視窗', () => {
 
   test('macOS 試跑：寫一個帶 --dry-run 的包裝再開', async ($, on) => {
     const { runs, writes } = world(on, { TMPDIR: '/var/folders/x/T/' }, { uname: 'Darwin' })
-    await $.command.run(RUN('dry-run'))
-    const wrapper = '/var/folders/x/T/claude-desktop-migrate-dry-run.command'
+    await $.command.run(RUN('遷移 dry-run'))
+    const wrapper = '/var/folders/x/T/switchboard-migrate-dry-run.command'
     expect(writes.length).toBe(1)
     expect(writes[0]?.path).toBe(wrapper)
     expect(writes[0]?.text).toMatch(/^#!\/bin\/bash\nexec "\/.+\/tool\/macos\/migrate\.command" --dry-run\n$/)
@@ -87,6 +87,29 @@ describe('/desktop-migrate 依平台開獨立視窗', () => {
   })
 })
 
+describe('/switchboard 的動作', () => {
+  test('不帶動作：列出用法，什麼都不執行', async ($, on) => {
+    const { runs } = world(on, { WSL_DISTRO_NAME: 'dev' })
+    const { text } = await $.command.run(RUN(''))
+    expect(runs).toEqual([])
+    expect(text).toContain('用法：')
+    expect(text).toContain('/switchboard migrate [試跑]')
+  })
+
+  test('不認得的動作：說明並列出用法，什麼都不執行', async ($, on) => {
+    const { runs } = world(on, { WSL_DISTRO_NAME: 'dev' })
+    const { text } = await $.command.run(RUN('switch 公司'))
+    expect(runs).toEqual([])
+    expect(text).toContain('沒有「switch」這個動作。')
+  })
+
+  test('試跑不是動作：/switchboard 試跑 不會開視窗', async ($, on) => {
+    const { runs } = world(on, { WSL_DISTRO_NAME: 'dev' })
+    await $.command.run(RUN('試跑'))
+    expect(runs).toEqual([])
+  })
+})
+
 describe('純函式', () => {
   test('試跑的寫法', async () => {
     for (const a of ['試跑', 'dry-run', 'dryrun', '--dry-run', '-DryRun', '  試跑  ']) expect(parseDryRun(a)).toBe(true)
@@ -97,6 +120,6 @@ describe('純函式', () => {
     const win = planLaunch('windows', "C:/Users/O'Neil/.claude/plugins/x", false)
     expect('actions' in win && win.actions[0]).toEqual({ run: ['powershell.exe', '-NoProfile', '-Command', "Start-Process -FilePath 'C:\\Users\\O''Neil\\.claude\\plugins\\x\\tool\\windows\\migrate.cmd'"] })
     const mac = planLaunch('mac', '/Users/a "b"/$x', true, '/tmp')
-    expect('actions' in mac && mac.actions[0]).toEqual({ write: { path: '/tmp/claude-desktop-migrate-dry-run.command', text: '#!/bin/bash\nexec "/Users/a \\"b\\"/\\$x/tool/macos/migrate.command" --dry-run\n' } })
+    expect('actions' in mac && mac.actions[0]).toEqual({ write: { path: '/tmp/switchboard-migrate-dry-run.command', text: '#!/bin/bash\nexec "/Users/a \\"b\\"/\\$x/tool/macos/migrate.command" --dry-run\n' } })
   })
 })

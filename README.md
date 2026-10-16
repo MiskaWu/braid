@@ -1,4 +1,7 @@
-# desktop-accounts
+# switchboard
+
+Claude 的帳號工具：像電話總機一樣，在帳號之間轉接你的對話與設定。
+目前提供**換帳號遷移**（下面說明）；CLI 的多帳號切換、桌面 app 換帳號時自動同步規劃中。
 
 Claude 桌面 app 換帳號登入後，Code 分頁側欄的舊對話和「已儲存的環境」都不見了。
 資料其實還在電腦上，只是桌面 app 依帳號分開存。這個工具把它們複製到目前登入的帳號。
@@ -28,7 +31,7 @@ Claude 桌面 app 換帳號登入後，Code 分頁側欄的舊對話和「已儲
 視窗會依序：偵測 app 是否開著並請你結束 → 列出要搬什麼 → 你確認 → 備份 → 寫入 → 問要不要重新開啟 Claude。
 想先看看會搬什麼，加 `-DryRun`（Windows）或 `--dry-run`（macOS）只列計畫不寫入。
 
-## 用法二：在 Claude Code 裡打 `/desktop-migrate`
+## 用法二：在 Claude Code 裡打 `/switchboard migrate`
 
 這是一個 mod（函式 hook 外掛），目前是 Claude Code 的 early access 功能。安裝在**終端機**做
 （桌面 app 的 Code 分頁不能跑 `/plugin`），裝一次之後桌面 app 也能用：
@@ -42,16 +45,17 @@ Claude 桌面 app 換帳號登入後，Code 分頁側欄的舊對話和「已儲
 2. 加入 marketplace 並安裝（`<repo>` 換成這個 repo 的 git 網址）：
 
    ```bash
-   claude plugin marketplace add <repo> && claude plugin install desktop-accounts@desktop-accounts
+   claude plugin marketplace add <repo> && claude plugin install switchboard@switchboard
    ```
 
-之後在任何對話打 `/desktop-migrate`，會另外開一個視窗跑遷移工具；`/desktop-migrate 試跑` 只列計畫。
+之後在任何對話打 `/switchboard migrate`，會另外開一個視窗跑遷移工具；`/switchboard migrate 試跑` 只列計畫。
+只打 `/switchboard` 會列出所有動作。
 遷移要在 app 結束後才能寫入，所以工具一定在獨立視窗執行：你結束 Claude 後它還在，搬完會問要不要重開 Claude。
 
 ## 安全
 
 - **只複製、不搬移**：舊帳號的資料原封不動。可以重跑，已經搬過的會略過。
-- **寫入前先備份**到 `~/claude-desktop-migrate-backups/<時間>/`，完成畫面會給還原指令。
+- **寫入前先備份**到 `~/switchboard-backups/<時間>/`，完成畫面會給還原指令。
 - **不需要系統管理員權限**：只讀寫自己的使用者資料夾。
 - **app 開著時不寫**：工具會等你結束 app。
 - **卡住會問，不會直接停掉**：

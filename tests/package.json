@@ -1,5 +1,5 @@
 {
-  "name": "claude-desktop-migrate-tests",
+  "name": "switchboard-tests",
   "private": true,
   "type": "module",
   "description": "測試用：造假資料、驗證結果。使用者執行遷移工具不需要這些。",
