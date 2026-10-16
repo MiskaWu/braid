@@ -17,7 +17,8 @@
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File migrate.ps1 -Projects "/home/me/work-a,/home/me/work-b" -Presets none
-  不跳出勾選清單，直接指定要搬的專案資料夾與環境（逗號分隔；all＝全部，none＝都不要）。
+  不跳出勾選清單，直接指定要搬的專案資料夾與環境（逗號分隔；all＝全部，none＝都不要，
+  環境寫 folders＝只帶工作資料夾在指定專案裡的環境）。
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File migrate.ps1 -Restore "C:\Users\me\braid-backups\20261016-150000"
@@ -331,7 +332,13 @@ function Select-Migration($Copy, $PresetCands, [string]$TargetName) {
         }
         if ($Presets -and -not $listed.ContainsKey($Presets.Trim().ToLower())) {
             $result.PresetIds = @{}
-            if ($Presets.Trim().ToLower() -ne 'none') {
+            if ($Presets.Trim().ToLower() -eq 'folders') {
+                # folders＝環境跟著資料夾走：只帶工作資料夾在選到的專案裡的（同步用）
+                foreach ($p in $PresetCands) {
+                    $cwd = if ((Has $p 'target') -and (Has $p.target 'cwd')) { [string]$p.target.cwd } else { '' }
+                    if ($null -eq $result.Projects -or $result.Projects.ContainsKey($cwd)) { $result.PresetIds[[string]$p.id] = $true }
+                }
+            } elseif ($Presets.Trim().ToLower() -ne 'none') {
                 $names = @{}; foreach ($n in $Presets.Split(',')) { $names[$n.Trim()] = $true }
                 foreach ($p in $PresetCands) { if ($names.ContainsKey([string]$p.name)) { $result.PresetIds[[string]$p.id] = $true } }
             }

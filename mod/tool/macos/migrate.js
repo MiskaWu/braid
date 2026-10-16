@@ -1,6 +1,6 @@
 // Claude desktop account migration - macOS entry point (JXA, built into every Mac).
 //   osascript -l JavaScript migrate.js [--dry-run] [--yes] [--from ID] [--restore DIR]
-//                                      [--projects all|none|DIR,DIR] [--presets all|none|NAME,NAME]
+//                                      [--projects all|none|DIR,DIR] [--presets all|none|folders|NAME,NAME]
 // All logic and user-facing text live in core.js; this file only bridges files, the terminal
 // and the app process through ObjC. Keep this file ASCII-only: osascript may not read it as UTF-8.
 ObjC.import('Foundation');

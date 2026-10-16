@@ -85,6 +85,15 @@ if (mode === 'selected') {   // --projects "/p/a,/p/c" --presets garden
     startedPlaces: ['sp9', 'sp1'], startedFrom: ['p-atlas-new', 'x1', 'p-garden'],
   })
 }
+if (mode === 'folders') {    // --projects "/p/a,/p/garden" --presets folders：環境跟著資料夾走（同步用）
+  await checkSelection('環境跟著資料夾走', {
+    copy: ['a'], notSelected: ['c', 'f', 'i'], archived: [],
+    presets: [['account', 'merge', ['garden'], ['atlas']], ['org', 'none', [], []]],
+    presetNames: ['atlas', 'garden'],
+    placeDefaults: { ...ATLAS, 'local:dev:/p/garden': { modelId: 'm', effort: 'xhigh' }, 'local:dev:/p/a': { modelId: 'A' } },
+    startedPlaces: ['sp9', 'sp1'], startedFrom: ['p-atlas-new', 'x1', 'p-garden'],
+  })
+}
 if (mode === 'picked') {     // BRAID_TEST_PICKS="2,4,6;1"：專案 f、a＋環境 notebook，展開後只留 f
   await checkSelection('勾選視窗（測試替身）', {
     copy: ['f'], notSelected: ['a', 'c', 'i'], archived: [],

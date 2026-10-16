@@ -53,6 +53,11 @@ BK="$W/backups-sel" run_ps -Projects "/p/a,/p/c" -Presets garden -PlanJson "$(ws
 node verify.mjs selected "$W" "$W.before"
 restore_ps "$W/backups-sel"
 
+echo; echo "######## 環境跟著資料夾走（專案 /p/a、/p/garden＋環境 folders）"
+BK="$W/backups-fold" run_ps -Projects "/p/a,/p/garden" -Presets folders -PlanJson "$(wslpath -w "$W/plan.json")" >/dev/null
+node verify.mjs folders "$W" "$W.before"
+restore_ps "$W/backups-fold"
+
 echo; echo "######## 勾選視窗（測試替身：專案 f、a＋環境 notebook，展開只留 f）"
 # 環境變數要傳進 Windows 的 powershell.exe：WSLENV 列出要帶過去的變數
 BRAID_TEST_PICKS='2,4,6;1' WSLENV="BRAID_TEST_PICKS${WSLENV:+:$WSLENV}" BK="$W/backups-pick" run_ps -PlanJson "$(wslpath -w "$W/plan.json")" >/dev/null

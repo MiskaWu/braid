@@ -5,15 +5,15 @@
     "url": "https://github.com/MiskaWu"
   },
   "metadata": {
-    "description": "Claude 桌面 app 的帳號工具。",
-    "version": "0.1.3"
+    "description": "Claude 的多帳號工具。",
+    "version": "0.2.0"
   },
   "plugins": [
     {
       "name": "braid",
       "source": "./mod",
-      "description": "Claude 桌面 app 的帳號工具：換帳號時把舊帳號 Code 分頁的側欄對話與已儲存的環境搬到新帳號（/desktop-migrate）。",
-      "version": "0.1.3",
+      "description": "Claude 的多帳號工具：面板管理這台電腦的帳號與用量、用量快用完時用另一個帳號接著做、桌面 app 換帳號後同步或遷移對話與環境（/braid）。",
+      "version": "0.2.0",
       "author": {
         "name": "MiskaWu",
         "url": "https://github.com/MiskaWu"
@@ -24,6 +24,9 @@
       "keywords": [
         "desktop",
         "account",
+        "usage",
+        "switch",
+        "sync",
         "migrate",
         "sessions",
         "mod"

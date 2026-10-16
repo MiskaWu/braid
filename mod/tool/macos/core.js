@@ -412,7 +412,13 @@ var CDM = (function () {
       }
       if (opts.presets && !listed(opts.presets)) {
         result.presetIds = {};
-        if (opts.presets.trim().toLowerCase() !== 'none') {
+        if (opts.presets.trim().toLowerCase() === 'folders') {
+          // folders＝環境跟著資料夾走：只帶工作資料夾在選到的專案裡的（同步用）
+          presetCands.forEach(function (p) {
+            var cwd = p.target && p.target.cwd ? String(p.target.cwd) : '';
+            if (!result.projects || result.projects[cwd]) result.presetIds[String(p.id)] = true;
+          });
+        } else if (opts.presets.trim().toLowerCase() !== 'none') {
           var names = {};
           opts.presets.split(',').forEach(function (n) { names[n.trim()] = true; });
           presetCands.forEach(function (p) { if (names[String(p.name)]) result.presetIds[String(p.id)] = true; });
