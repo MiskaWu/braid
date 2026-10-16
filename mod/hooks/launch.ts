@@ -8,7 +8,7 @@ export type Action = { run: string[] } | { write: { path: string; text: string }
 
 export type LaunchPlan = { actions: Action[] } | { unsupported: true }
 
-/** `/switchboard migrate 試跑`（或 dry-run）只列出計畫，不寫入。 */
+/** `/braid migrate 試跑`（或 dry-run）只列出計畫，不寫入。 */
 export function parseDryRun(args: string): boolean {
   return args
     .trim()
@@ -30,7 +30,7 @@ export function planLaunch(platform: Platform, root: string, dryRun: boolean, tm
       const script = `${root}/tool/macos/migrate.command`
       if (!dryRun) return { actions: [{ run: ['open', '-a', 'Terminal', script] }] }
       // open 沒辦法把參數交給 .command，試跑時寫一個帶參數的小包裝
-      const wrapper = `${(tmpDir ?? '/tmp').replace(/\/+$/, '')}/switchboard-migrate-dry-run.command`
+      const wrapper = `${(tmpDir ?? '/tmp').replace(/\/+$/, '')}/braid-migrate-dry-run.command`
       const quoted = script.replace(/(["\\$`])/g, '\\$1')
       return {
         actions: [

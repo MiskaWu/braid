@@ -1,9 +1,16 @@
-# switchboard — 開發指南
+# braid — 開發指南
 
-Claude 的帳號工具（名稱取「電話總機」：在帳號之間轉接）。目前做「換帳號遷移」：把舊帳號 Code 分頁的側欄 session 與已儲存的環境
-複製到目前登入的帳號。之後要擴充：CLI 的多帳號切換（終局是多個帳號同時登入、只做切換，Linux 也要支援）、桌面 app 切換時同步
-（可選資料夾或範圍）、帳號管理面板，都加在同一個 mod 與工具。對話裡的指令與命令列版共用動作名稱：
-`/switchboard <動作>` 對應 `switchboard <動作>`。
+Claude 的多帳號工具。名稱取「辮子」：每個帳號是一股線，使用者的工作是編成的那一條。
+三種用法是同一套機制的不同設定，不要各寫一套：
+
+| 用法 | 方向 | 時機 | 範圍 | 狀態 |
+|---|---|---|---|---|
+| 遷移（migrate） | 單向 | 手動一次 | 全部 | 已完成（桌面 app） |
+| 用量切換（use） | 跟著使用者走 | 每次切換時 | 全部或最近用的 | 規劃中；CLI 終局＝多個帳號同時登入、只做切換，Linux 也要支援 |
+| 同步（sync） | 雙向 | 持續 | 依資料夾規則 | 規劃中 |
+
+底層共用一張「哪些資料、怎麼合併、什麼時候能寫」的登記表（目前是 `mod/tool/spec.json`）。
+對話裡的指令與命令列版共用動作名稱：`/braid <動作>` 對應 `braid <動作>`。
 repo 本身是 marketplace（`.claude-plugin/`），plugin 在 `mod/`。
 
 ## 結構
@@ -13,7 +20,7 @@ repo 本身是 marketplace（`.claude-plugin/`），plugin 在 `mod/`。
 mod/                              plugin 本體（從 marketplace 安裝時只會複製這個資料夾）
   .claude-plugin/plugin.json
   .claude-plugin/types/           引擎載入 mod 時寫入的型別（gitignore，不要手改）
-  hooks/register.ts               /switchboard <動作>；動作表 ACTIONS＋switch 分派；migrate 偵測平台、開獨立視窗跑工具
+  hooks/register.ts               /braid <動作>；動作表 ACTIONS＋switch 分派；migrate 偵測平台、開獨立視窗跑工具
   hooks/launch.ts                 平台 → 要執行的動作（純函式）
   tests/                          claude plugin test
   tool/spec.json                  兩個平台共用的遷移規則
@@ -56,13 +63,13 @@ tests/                            工具的測試（Node＋classic-level 造資�
 - **格式認不得就停**：Local Storage 版本不在 `spec.json` 的 `supportedVersions`、LevelDB 校驗不過，
   一律放棄寫環境並說明，不猜。
 - **卡住改成問**：任何可能失敗的步驟都包在「重試／略過／取消」裡；公司政策（強制簽章、受限語言模式）不繞過。
-- **遷移邏輯不靠模型**：`/switchboard migrate` 只開視窗，讀寫全在工具裡；工具也能不透過 Claude 直接雙擊。
+- **遷移邏輯不靠模型**：`/braid migrate` 只開視窗，讀寫全在工具裡；工具也能不透過 Claude 直接雙擊。
 - **規則只寫在 `spec.json`**：要拿掉哪些欄位、認得哪些版本，兩個平台都讀它。
 
 ## 坑
 
 - **名稱不能用 `claude-`／`anthropic-` 開頭**：plugin validate 會擋（保留給官方，避免被誤認），
-  所以 repo、plugin、命令列指令都叫 `switchboard`，不叫 claude-account。
+  所以不叫 claude-account；命名過程試過 switchboard、mycelium 等，2026-10-16 定為 `braid`。
 - **mod 裡 `$` 不能經由資料結構傳遞**（放進物件再呼叫會讓模組載入失敗）：動作的分派寫成 `switch`，
   直接呼叫模組裡的函式並傳 `$` 則可以。
 

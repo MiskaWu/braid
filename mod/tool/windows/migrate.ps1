@@ -16,7 +16,7 @@
   只列出會做什麼，不寫入。
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File migrate.ps1 -Restore "C:\Users\me\switchboard-backups\20261016-150000"
+  powershell -ExecutionPolicy Bypass -File migrate.ps1 -Restore "C:\Users\me\braid-backups\20261016-150000"
   用備份還原到遷移前的狀態。
 #>
 [CmdletBinding()]
@@ -27,7 +27,7 @@ param(
     [string]$Restore,
     [string]$AppDataRoot = (Join-Path $env:APPDATA 'Claude'),
     [string]$ClaudeHome = (Join-Path $env:USERPROFILE '.claude'),
-    [string]$BackupRoot = (Join-Path $env:USERPROFILE 'switchboard-backups'),
+    [string]$BackupRoot = (Join-Path $env:USERPROFILE 'braid-backups'),
     [switch]$SkipAppCheck,
     [switch]$NoRelaunch,
     [string]$PlanJson

@@ -1,6 +1,6 @@
 .PHONY: test test-tool test-mod typecheck
 
-# switchboard：Claude Code mod（mod/），repo 本身也是它的 marketplace（.claude-plugin/）。
+# braid：Claude Code mod（mod/），repo 本身也是它的 marketplace（.claude-plugin/）。
 # 遷移工具本體在 mod/tool/，不透過 Claude 也能直接雙擊執行。
 
 # 測試要用 2.1.288 以上的 claude（更舊的測試工具行為不同）。PATH 上的太舊就 make test CLAUDE=<執行檔>

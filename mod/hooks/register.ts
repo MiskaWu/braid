@@ -1,4 +1,4 @@
-// switchboard：Claude 的帳號工具。對話裡用 /switchboard <動作>，動作名稱與命令列版共用。
+// braid：Claude 的帳號工具。對話裡用 /braid <動作>，動作名稱與命令列版共用。
 // 目前一個動作：migrate 開獨立視窗跑桌面 app 的遷移工具（tool/）。指令本身不碰任何帳號資料，
 // 讀寫全在工具裡做，工具也能不透過 Claude 直接雙擊。之後的同步、切換帳號：在 ACTIONS 加一列、
 // 在 command.run 的 switch 加一個 case（引擎不准把 $ 經由資料結構傳遞，所以分派寫成 switch）。
@@ -24,7 +24,7 @@ export function parseCommand(args: string): { action: Action | undefined; word: 
 }
 
 function help(prefix?: string): string {
-  const lines = ACTIONS.map(a => `  /switchboard ${a.usage}\n      ${a.summary}`)
+  const lines = ACTIONS.map(a => `  /braid ${a.usage}\n      ${a.summary}`)
   return [...(prefix ? [prefix, ''] : []), '用法：', ...lines].join('\n')
 }
 
@@ -69,14 +69,14 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     await $.command.register({
-      name: 'switchboard',
+      name: 'braid',
       description: 'Claude 帳號工具：migrate＝換帳號後把桌面 app 的舊對話與環境搬過來',
       argumentHint: 'migrate [試跑]',
     })
     return started
   })
 
-  on('command.run', { command: 'switchboard' }, async ($, e) => {
+  on('command.run', { command: 'braid' }, async ($, e) => {
     const { action, word, rest } = parseCommand(e.args)
     if (!action) return { text: help(word ? `沒有「${word}」這個動作。` : undefined) }
     switch (action.name) {

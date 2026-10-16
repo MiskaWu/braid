@@ -15,7 +15,7 @@ PWSH=$(win powershell.exe WindowsPowerShell/v1.0/)
 
 wintemp="$("$CMD" /c 'echo %TEMP%' 2>/dev/null | tr -d '\r')"
 [ -n "$wintemp" ] || { echo "讀不到 Windows 的暫存資料夾位置" >&2; exit 1; }
-dest="$(wslpath -u "$wintemp")/switchboard"
+dest="$(wslpath -u "$wintemp")/braid"
 rm -rf "$dest"
 mkdir -p "$dest"
 cp -r "$here/windows" "$here/spec.json" "$dest/"

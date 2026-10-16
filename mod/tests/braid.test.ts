@@ -21,9 +21,9 @@ function world(on: On, env: Record<string, string>, opts: { uname?: string; fail
   return { runs, writes }
 }
 
-const RUN = (args = 'migrate') => ({ command: 'switchboard', args, origin: { kind: 'composer' as const }, presentation: { isFullscreen: true, columns: 120 } })
+const RUN = (args = 'migrate') => ({ command: 'braid', args, origin: { kind: 'composer' as const }, presentation: { isFullscreen: true, columns: 120 } })
 
-describe('/switchboard migrate 依平台開獨立視窗', () => {
+describe('/braid migrate 依平台開獨立視窗', () => {
   test('WSL：交給 launch-from-wsl.sh（它會複製到 Windows 暫存再開視窗）', async ($, on) => {
     const { runs } = world(on, { WSL_DISTRO_NAME: 'dev' })
     const { text } = await $.command.run(RUN())
@@ -65,7 +65,7 @@ describe('/switchboard migrate 依平台開獨立視窗', () => {
   test('macOS 試跑：寫一個帶 --dry-run 的包裝再開', async ($, on) => {
     const { runs, writes } = world(on, { TMPDIR: '/var/folders/x/T/' }, { uname: 'Darwin' })
     await $.command.run(RUN('遷移 dry-run'))
-    const wrapper = '/var/folders/x/T/switchboard-migrate-dry-run.command'
+    const wrapper = '/var/folders/x/T/braid-migrate-dry-run.command'
     expect(writes.length).toBe(1)
     expect(writes[0]?.path).toBe(wrapper)
     expect(writes[0]?.text).toMatch(/^#!\/bin\/bash\nexec "\/.+\/tool\/macos\/migrate\.command" --dry-run\n$/)
@@ -87,13 +87,13 @@ describe('/switchboard migrate 依平台開獨立視窗', () => {
   })
 })
 
-describe('/switchboard 的動作', () => {
+describe('/braid 的動作', () => {
   test('不帶動作：列出用法，什麼都不執行', async ($, on) => {
     const { runs } = world(on, { WSL_DISTRO_NAME: 'dev' })
     const { text } = await $.command.run(RUN(''))
     expect(runs).toEqual([])
     expect(text).toContain('用法：')
-    expect(text).toContain('/switchboard migrate [試跑]')
+    expect(text).toContain('/braid migrate [試跑]')
   })
 
   test('不認得的動作：說明並列出用法，什麼都不執行', async ($, on) => {
@@ -103,7 +103,7 @@ describe('/switchboard 的動作', () => {
     expect(text).toContain('沒有「switch」這個動作。')
   })
 
-  test('試跑不是動作：/switchboard 試跑 不會開視窗', async ($, on) => {
+  test('試跑不是動作：/braid 試跑 不會開視窗', async ($, on) => {
     const { runs } = world(on, { WSL_DISTRO_NAME: 'dev' })
     await $.command.run(RUN('試跑'))
     expect(runs).toEqual([])
@@ -120,6 +120,6 @@ describe('純函式', () => {
     const win = planLaunch('windows', "C:/Users/O'Neil/.claude/plugins/x", false)
     expect('actions' in win && win.actions[0]).toEqual({ run: ['powershell.exe', '-NoProfile', '-Command', "Start-Process -FilePath 'C:\\Users\\O''Neil\\.claude\\plugins\\x\\tool\\windows\\migrate.cmd'"] })
     const mac = planLaunch('mac', '/Users/a "b"/$x', true, '/tmp')
-    expect('actions' in mac && mac.actions[0]).toEqual({ write: { path: '/tmp/switchboard-migrate-dry-run.command', text: '#!/bin/bash\nexec "/Users/a \\"b\\"/\\$x/tool/macos/migrate.command" --dry-run\n' } })
+    expect('actions' in mac && mac.actions[0]).toEqual({ write: { path: '/tmp/braid-migrate-dry-run.command', text: '#!/bin/bash\nexec "/Users/a \\"b\\"/\\$x/tool/macos/migrate.command" --dry-run\n' } })
   })
 })
