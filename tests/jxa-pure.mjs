@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import vm from 'node:vm'
 import crypto from 'node:crypto'
 import { check, finish } from './lib.mjs'
-const src = fs.readFileSync(new URL('../macos/migrate.js', import.meta.url), 'utf8')
+const src = fs.readFileSync(new URL('../mod/tool/macos/migrate.js', import.meta.url), 'utf8')
 check(/^[\x00-\x7f]*$/.test(src), 'migrate.js 只用 ASCII（osascript 不一定用 UTF-8 讀）')
 const ctx = { ObjC: { import() {} }, Uint8Array }
 vm.createContext(ctx)

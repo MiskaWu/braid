@@ -4,7 +4,7 @@ import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { openDb, copyDir, check, eq, finish } from './lib.mjs'
-const CDM = createRequire(import.meta.url)('../macos/core.js')
+const CDM = createRequire(import.meta.url)('../mod/tool/macos/core.js')
 const impls = process.argv.slice(2).length ? process.argv.slice(2) : ['ps', 'js']
 const fsIo = {
   join: (...p) => path.join(...p), readText: (p) => fs.readFileSync(p, 'utf8'), readBytes: (p) => new Uint8Array(fs.readFileSync(p)),

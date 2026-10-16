@@ -4,8 +4,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
-const CDM = require('../macos/core.js')
-const spec = JSON.parse(fs.readFileSync(new URL('../spec.json', import.meta.url), 'utf8'))
+const CDM = require('../mod/tool/macos/core.js')
+const spec = JSON.parse(fs.readFileSync(new URL('../mod/tool/spec.json', import.meta.url), 'utf8'))
 
 const args = process.argv.slice(2), opt = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : undefined }
 const opts = {

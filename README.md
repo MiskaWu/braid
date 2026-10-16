@@ -1,0 +1,82 @@
+# desktop-accounts
+
+Claude 桌面 app 換帳號登入後，Code 分頁側欄的舊對話和「已儲存的環境」都不見了。
+資料其實還在電腦上，只是桌面 app 依帳號分開存。這個工具把它們複製到目前登入的帳號。
+
+## 會搬什麼
+
+| 項目 | 處理 |
+|---|---|
+| Code 分頁側欄的 session | **搬**：複製到新帳號，點進去就能接著做（對話紀錄本來就在電腦上） |
+| 封存狀態 | **搬**：舊帳號封存的，新帳號也是封存 |
+| 已儲存的環境 | **搬**：連同各資料夾預設的模型與 effort、最近使用的位置；新帳號已有同一個資料夾的環境就保留新帳號那筆 |
+| Claude Code 的記憶、`CLAUDE.md`、設定、hooks | **不用搬**：都在 `~/.claude`，依專案資料夾分，不分帳號 |
+| claude.ai 的聊天、Projects、artifacts、claude.ai 記憶 | **搬不了**：存在伺服器、綁帳號 |
+| Cowork 的對話與記憶、從 CLI 開的 session | 這一版還沒處理 |
+
+## 使用前
+
+1. **先用新帳號登入桌面 app，在 Code 分頁開一個新對話**（打一句話就好）。工具靠這個認得新帳號。
+2. **一台電腦只用一個 `~/.claude`**：不要照官方的多帳號建議替每個帳號設 `CLAUDE_CONFIG_DIR`，
+   那樣記憶、對話紀錄、設定會被按帳號拆開。
+
+## 用法一：直接雙擊（不需要 Claude Code）
+
+- Windows：`mod/tool/windows/migrate.cmd`
+- macOS：`mod/tool/macos/migrate.command`（從瀏覽器下載的話，第一次要按右鍵 →「打開」）
+
+視窗會依序：偵測 app 是否開著並請你結束 → 列出要搬什麼 → 你確認 → 備份 → 寫入 → 問要不要重新開啟 Claude。
+想先看看會搬什麼，加 `-DryRun`（Windows）或 `--dry-run`（macOS）只列計畫不寫入。
+
+## 用法二：在 Claude Code 裡打 `/desktop-migrate`
+
+這是一個 mod（函式 hook 外掛），目前是 Claude Code 的 early access 功能。安裝在**終端機**做
+（桌面 app 的 Code 分頁不能跑 `/plugin`），裝一次之後桌面 app 也能用：
+
+1. 在 `~/.claude/settings.json` 的 `env` 加上：
+
+   ```json
+   "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"
+   ```
+
+2. 加入 marketplace 並安裝（`<repo>` 換成這個 repo 的 git 網址）：
+
+   ```bash
+   claude plugin marketplace add <repo> && claude plugin install desktop-accounts@desktop-accounts
+   ```
+
+之後在任何對話打 `/desktop-migrate`，會另外開一個視窗跑遷移工具；`/desktop-migrate 試跑` 只列計畫。
+遷移要在 app 結束後才能寫入，所以工具一定在獨立視窗執行：你結束 Claude 後它還在，搬完會問要不要重開 Claude。
+
+## 安全
+
+- **只複製、不搬移**：舊帳號的資料原封不動。可以重跑，已經搬過的會略過。
+- **寫入前先備份**到 `~/claude-desktop-migrate-backups/<時間>/`，完成畫面會給還原指令。
+- **不需要系統管理員權限**：只讀寫自己的使用者資料夾。
+- **app 開著時不寫**：工具會等你結束 app。
+- **卡住會問，不會直接停掉**：
+
+  | 狀況 | 工具怎麼做 |
+  |---|---|
+  | app 還開著 | 說明怎麼結束並等你；Windows 可按 K 強制結束（會先確認），macOS 可由工具送出「結束」 |
+  | 寫檔失敗（防毒掃描中、檔案被占用） | 問你：重試／略過這一項／全部取消 |
+  | WSL 或遠端主機上的對話紀錄確認不到 | 問你：仍要複製嗎 |
+  | 讀不了環境資料 | 問你：只搬 session，還是取消 |
+  | 公司政策禁止執行 PowerShell 腳本 | 不繞過，請聯絡 IT |
+
+## 平台狀態
+
+- **Windows（含在 WSL 裡用 Claude Code）**：自動測試之外，已用真實資料重演一次遷移，結果與實際狀態逐欄相同。
+- **macOS**：遷移邏輯與 Windows 版用同一套測試資料驗證；與 macOS 系統溝通的那一層還沒在 Mac 實機跑過，
+  第一次請先用試跑，有問題回報。
+
+## 疑難
+
+- **「找不到目前登入帳號的 session 資料夾」**：還沒用新帳號在 Code 分頁開過對話，見「使用前」。
+- **環境顯示「app 的環境資料格式改版了」**：桌面 app 改了資料格式，工具不猜、直接略過環境，請更新工具。
+  session 仍會照常搬。
+- **看到「已停用指令碼執行」**：公司政策禁止 PowerShell 腳本，請聯絡 IT。
+
+## 開發
+
+`make test` 跑全部測試。結構、驗證方式與不可違反的約束見 [CLAUDE.md](CLAUDE.md)。

@@ -9,7 +9,7 @@ WINTEMP=$(wslpath -u "$(cd /mnt/c && cmd.exe /c 'echo %TEMP%' | tr -d '\r')")
 W="$WINTEMP/cdm-test"                 # Windows 看得到的位置
 LOCAL=/tmp/cdm-fixture                # 造資料用（LevelDB 在 /mnt/c 上開鎖檔不穩）
 WSLDIR=/tmp/cdm-test-wsl              # 假的 WSL 端對話紀錄
-PS1=$(wslpath -w ../windows/migrate.ps1)
+PS1=$(wslpath -w ../mod/tool/windows/migrate.ps1)
 
 run_ps() {
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1" \
@@ -18,7 +18,7 @@ run_ps() {
 }
 
 # 守門：Windows PowerShell 5.1 把沒有 BOM 的 UTF-8 當 Big5 讀，中文註解會吞掉下一行程式碼
-for f in ../windows/*.ps1 ../windows/*.cs ./*.ps1; do
+for f in ../mod/tool/windows/*.ps1 ../mod/tool/windows/*.cs ./*.ps1; do
   [ "$(head -c3 "$f" | od -An -tx1 | tr -d ' ')" = "efbbbf" ] || { echo "  NG  $f 缺 UTF-8 BOM"; exit 1; }
 done
 echo "  ok  所有 .ps1／.cs 都有 BOM"
