@@ -625,7 +625,8 @@ async function drawAccounts($: $, ui: UI, width: number) {
           <Button key={`forget-no-${a.id}`} label="取消" onPress={() => update($, editingAtom, () => null)} />
         </Box>
       ) : (
-        <Box key={`acts-${a.id}`} flexDirection="row" gap={1}>
+        <Box key={`acts-${a.id}`} flexDirection="row" gap={1} flexWrap="wrap">
+          {!isCurrent && a.credential && <Button key={`go-${a.id}`} label="用它接著這段對話" variant="primary" onPress={() => handoff($, a.id)} />}
           <Button key={`edit-${a.id}`} label="改名稱與顏色" dimColor onPress={() => update($, editingAtom, () => `edit:${a.id}`)} />
           {!isCurrent && <Button key={`forget-${a.id}`} label="移除" dimColor onPress={() => update($, editingAtom, () => `forget:${a.id}`)} />}
         </Box>

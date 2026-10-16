@@ -216,6 +216,17 @@ describe('帳號與用量', () => {
     }
   })
 
+  test('隨時都能換：有憑證的帳號卡片上可以直接用它接著這段對話；沒憑證的沒有這顆按鈕', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL, 'account:tok-00000002': WORK2 } })
+    await $.session.start(START)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ key: `go-${P}` })).toBeUndefined()
+    await ui.press({ key: 'go-tok-00000002' })
+    expect(w.runs.at(-1)?.argv.slice(1)).toEqual([expect.stringMatching(/\/tool\/cli\/open-wsl\.sh$/), '/tmp/braid-resume-tok-00000002.sh'])
+    expect(w.files['/tmp/braid-resume-tok-00000002.sh']).toContain("'sess-1' '/w/server' '/opt/claude' '公司 2'")
+    await ui.unmount()
+  })
+
   test('改名稱：存回去；移除要按兩次，braid 新增的帳號連憑證一起刪', async ($, on) => {
     const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL, 'account:tok-00000002': WORK2 } })
     await $.session.start(START)
