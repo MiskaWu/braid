@@ -48,5 +48,5 @@ node verify.mjs restored "$W" "$W.before"
 
 rm -rf "$W" "$W.before" "$LOCAL" "$WSLDIR"
 echo; echo "######## LevelDB 邊界"
-node leveldb-edge.mjs
+node leveldb-edge.mjs ps
 echo; echo "Windows 版測試全部通過"
