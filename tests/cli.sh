@@ -58,32 +58,45 @@ cat > "$T/bin/claude-setup" <<'EOF'
 [ "$1" = setup-token ] && echo "（假的 setup-token：這裡會顯示憑證）"
 EOF
 chmod +x "$T/bin/claude-setup"
-# 假的 curl：記下參數與從標準輸入收到的標頭，回一份帳號資料（不會真的連 Claude）
+# 假的 Claude API（只聽 127.0.0.1）：回組織標頭，記下收到的 Authorization 與路徑。org.sh 只在 BRAID_API_BASE
+# 是 http://127.0.0.1:<埠> 時才連過來，所以用真的 curl 走完整條路，不會拿假憑證去連 Claude
+python3 fixtures/fake-api.py "$T/api-seen" > "$T/api-port" & API=$!
+python3 fixtures/fake-api.py "$T/api-seen-403" status:403 > "$T/api-port-403" & API403=$!
+trap 'kill $API $API403 2>/dev/null; rm -rf "$T"' EXIT
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$T/api-port" ] && [ -s "$T/api-port-403" ] && break; sleep 0.2; done
+BASE="http://127.0.0.1:$(cat "$T/api-port")"
+res="$T/add.json"
+out=$(printf '\n  %s  \n' "$TOKEN" | BRAID_API_BASE="$BASE" bash "$CLI/add-account.sh" tok-7 "$res" "$T/bin/claude-setup" 2>&1)
+[ "$(cat "$res")" = '{"ok":true,"backend":"file","orgId":"0000aaaa-1111-2222-3333-444455556666"}' ] && ok "成功：結果檔只寫存在哪裡、屬於哪個組織" || ng "結果檔不對：$(cat "$res" 2>&1) / $out"
+grep -q sk-ant "$res" && ng "結果檔裡有憑證" || ok "結果檔裡沒有憑證"
+[ "$(stat -c %a "$res")" = 600 ] && ok "結果檔只有自己讀得到" || ng "權限不對：$(stat -c %a "$res")"
+[ "$(cat "$T/api-seen")" = "Bearer $TOKEN	/v1/models?limit=1" ] && ok "用存好的憑證呼叫「列出模型」，從回應標頭讀組織" || ng "API 收到的不對：$(cat "$T/api-seen")"
+rm -f "$res"
+printf '\n%s\n\n' "$TOKEN" | BRAID_API_BASE="http://127.0.0.1:$(cat "$T/api-port-403")" bash "$CLI/add-account.sh" tok-6 "$res" "$T/bin/claude-setup" >/dev/null 2>&1
+[ "$(cat "$res")" = '{"ok":true,"backend":"file","orgId":null}' ] && ok "查不到組織（被拒絕或連不上）：照樣存好，組織寫 null" || ng "查不到時的結果不對：$(cat "$res" 2>&1)"
+[ "$("$CLI/secret.sh" get tok-7)" = "$TOKEN" ] && ok "貼上的憑證（前後空白去掉）存好了" || ng "存的憑證不對"
+echo "$out" | grep -q '假的 setup-token' && ok "先跑 claude setup-token" || ng "沒跑 setup-token：$out"
+rm -f "$res"
+printf '\nnope\n\n' | BRAID_API_BASE="$BASE" bash "$CLI/add-account.sh" tok-8 "$res" "$T/bin/claude-setup" >/dev/null 2>&1
+[ "$(cat "$res")" = '{"ok":false,"reason":"canceled"}' ] && ! "$CLI/secret.sh" get tok-8 >/dev/null 2>&1 && ok "貼錯再按 Enter：取消，什麼都沒存" || ng "取消時的結果不對：$(cat "$res" 2>&1)"
+
+echo "######## org.sh"
+[ "$(BRAID_API_BASE="$BASE" bash "$CLI/org.sh" tok-7)" = 0000aaaa-1111-2222-3333-444455556666 ] && ok "只印出組織 id" || ng "org.sh 輸出不對"
+BRAID_API_BASE="$BASE" bash "$CLI/org.sh" tok-404 >/dev/null 2>&1 && ng "沒有憑證卻成功" || ok "沒有這組憑證：結束碼 1"
+# 假的 curl：記下參數與標準輸入，驗憑證只經過標準輸入，而且測試用的網址變數只接受本機
 cat > "$T/bin/curl" <<FAKE
 #!/bin/bash
 printf '%s\n' "\$@" > "$T/curl-args"
 cat > "$T/curl-stdin"
-out=; while [ \$# -gt 0 ]; do [ "\$1" = -o ] && out=\$2; shift; done
-[ -n "\${FAKE_CURL_FAIL:-}" ] && exit 22
-printf '{"account":{"uuid":"u-9","email":"me@gmail.example"},"organization":{"uuid":"o-9"}}' > "\$out"
+printf 'HTTP/1.1 200 OK\r\nanthropic-organization-id: 0000aaaa-1111-2222-3333-444455556666\r\n\r\n'
 FAKE
 chmod +x "$T/bin/curl"
-res="$T/add.json"
-out=$(printf '\n  %s  \n' "$TOKEN" | PATH="$T/bin:$PATH" BRAID_PROFILE_URL=https://evil.example/steal bash "$CLI/add-account.sh" tok-7 "$res" "$T/bin/claude-setup" 2>&1)
-[ "$(cat "$res")" = '{"ok":true,"backend":"file","profile":true}' ] && ok "成功：結果檔只寫存在哪裡、有沒有查到是誰" || ng "結果檔不對：$(cat "$res" 2>&1) / $out"
-grep -q sk-ant "$res" "$res.profile.json" && ng "結果檔裡有憑證" || ok "結果檔與帳號資料檔裡都沒有憑證"
-[ "$(stat -c %a "$res")" = 600 ] && [ "$(stat -c %a "$res.profile.json")" = 600 ] && ok "結果檔與帳號資料檔只有自己讀得到" || ng "權限不對：$(stat -c %a "$res" "$res.profile.json")"
-grep -q '"uuid":"u-9"' "$res.profile.json" && ok "查到的帳號資料存下來給面板判斷是誰" || ng "沒有帳號資料：$(cat "$res.profile.json" 2>&1)"
-grep -qx "Authorization: Bearer $TOKEN" "$T/curl-stdin" && ! grep -q sk-ant "$T/curl-args" && ok "憑證經由標準輸入交給 curl，不在參數裡" || ng "憑證出現在 curl 參數，或沒送出：$(cat "$T/curl-args")"
-[ "$(tail -1 "$T/curl-args")" = https://api.anthropic.com/api/oauth/profile ] && ok "只問 api.anthropic.com；測試用的網址變數只接受本機檔案" || ng "網址不對：$(tail -1 "$T/curl-args")"
-rm -f "$res" "$res.profile.json"
-printf '\n%s\n\n' "$TOKEN" | PATH="$T/bin:$PATH" FAKE_CURL_FAIL=1 bash "$CLI/add-account.sh" tok-6 "$res" "$T/bin/claude-setup" >/dev/null 2>&1
-[ "$(cat "$res")" = '{"ok":true,"backend":"file","profile":false}' ] && [ ! -e "$res.profile.json" ] && ok "查不到是誰（連不上）：照樣存好，標成沒查到" || ng "查不到時的結果不對：$(cat "$res" 2>&1)"
-[ "$("$CLI/secret.sh" get tok-7)" = "$TOKEN" ] && ok "貼上的憑證（前後空白去掉）存好了" || ng "存的憑證不對"
-echo "$out" | grep -q '假的 setup-token' && ok "先跑 claude setup-token" || ng "沒跑 setup-token：$out"
-rm -f "$res"
-printf '\nnope\n\n' | PATH="$T/bin:$PATH" bash "$CLI/add-account.sh" tok-8 "$res" "$T/bin/claude-setup" >/dev/null 2>&1
-[ "$(cat "$res")" = '{"ok":false,"reason":"canceled"}' ] && ! "$CLI/secret.sh" get tok-8 >/dev/null 2>&1 && ok "貼錯再按 Enter：取消，什麼都沒存" || ng "取消時的結果不對：$(cat "$res" 2>&1)"
+PATH="$T/bin:$PATH" BRAID_API_BASE=https://evil.example bash "$CLI/org.sh" tok-7 >/dev/null
+grep -q "^Authorization: Bearer $TOKEN$" "$T/curl-stdin" && ! grep -q sk-ant "$T/curl-args" && ok "憑證經由標準輸入交給 curl，不在參數裡" || ng "憑證出現在 curl 參數，或沒送出：$(cat "$T/curl-args")"
+[ "$(tail -1 "$T/curl-args")" = 'https://api.anthropic.com/v1/models?limit=1' ] && ok "只問 api.anthropic.com；測試用的網址變數只接受 127.0.0.1" || ng "網址不對：$(tail -1 "$T/curl-args")"
+printf '#!/bin/bash\ncat >/dev/null\nprintf "HTTP/1.1 200 OK\\r\\nanthropic-organization-id: x\\"; rm -rf /tmp/nope\\r\\n\\r\\n"\n' > "$T/bin/curl"
+PATH="$T/bin:$PATH" bash "$CLI/org.sh" tok-7 >/dev/null 2>&1 && ng "收了格式不對的組織 id" || ok "標頭裡的組織 id 格式不對就不收（不會被塞進結果檔）"
+rm -f "$T/bin/curl"
 
 echo "######## open-linux.sh"
 env -u DISPLAY -u WAYLAND_DISPLAY bash "$CLI/open-linux.sh" "$T/x.sh"; [ $? = 3 ] && ok "沒有圖形桌面：結束碼 3（改給使用者一行指令）" || ng "沒有圖形桌面時沒有回 3"

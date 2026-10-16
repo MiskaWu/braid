@@ -20,14 +20,13 @@ import type {
   BraidTab,
   BraidUsage,
   BraidUses,
-  BraidWho,
 } from '../types'
 import { backupLabel, scanDesktop, type DesktopEnv, type DesktopIo } from './desktop'
 import { manualPath, parseDryRun, planLaunch, toolArgs, type ToolRequest } from './launch'
 import {
   bandFor,
   candidates,
-  classifyWho,
+  classifyOrg,
   DEFAULT_SWITCH,
   DEFAULT_SYNC,
   defaultLabel,
@@ -42,8 +41,8 @@ import {
   normalizeSync,
   normalizeUses,
   orderedIds,
+  isOrgId,
   PALETTE,
-  parseProfile,
   COLOR_NAMES,
   parseTz,
   partnerOf,
@@ -389,7 +388,7 @@ function pollAdd($: $, id: string, resultPath: string, startedAt: number): void 
     }
     timer.cancel()
     addTimer = null
-    let result: { ok?: unknown; backend?: unknown; reason?: unknown; profile?: unknown } = {}
+    let result: { ok?: unknown; backend?: unknown; reason?: unknown; orgId?: unknown } = {}
     try {
       result = JSON.parse((await $.fs.read(resultPath)).replace(/^\uFEFF/, '')) as typeof result
     } catch {
@@ -398,27 +397,9 @@ function pollAdd($: $, id: string, resultPath: string, startedAt: number): void 
     const backends: readonly BraidCredential[] = ['keychain', 'secret-service', 'file', 'credman']
     const backend = backends.find(b => b === result.backend)
     if (result.ok === true && backend) {
-      // 腳本用憑證問到的帳號：就是目前這個帳號的話不能拿來接手，刪掉剛存的憑證、請使用者換一個帳號登入
-      let who: BraidWho | null = null
-      if (result.profile === true) {
-        try {
-          who = parseProfile(await $.fs.read(`${resultPath}.profile.json`))
-        } catch {
-          who = null
-        }
-      }
-      const verdict = who ? classifyWho(await read($, accountsAtom), await read($, currentAtom), who) : null
-      if (who && verdict?.kind === 'current') {
-        await removeSecret($, id)
-        await update($, addAtom, () => ({
-          step: 'failed' as const,
-          reason: `登入的是目前這個帳號（${who.email}），不能拿來接手，剛存的憑證已經刪掉。請在瀏覽器登出或換成要新增的帳號，再試一次。`,
-        }))
-        return
-      }
       // 名稱欄留空、只當提示：沒填就用預設（併進既有帳號時沿用它原本的名稱），不會蓋掉使用者取過的名字
       await update($, addFormAtom, () => ({ label: '', email: '', org: '' }))
-      await update($, addAtom, () => ({ step: 'confirm' as const, id, credential: backend, who }))
+      await update($, addAtom, () => ({ step: 'confirm' as const, id, credential: backend, orgId: isOrgId(result.orgId) ? result.orgId : null }))
     } else {
       const why = result.reason === 'canceled' ? '在登入視窗取消了。' : result.reason === 'store-failed' ? '憑證存不進鑰匙圈。' : '登入視窗沒有完成。'
       await update($, addAtom, () => ({ step: 'failed' as const, reason: `${why}可以再試一次。` }))
@@ -432,20 +413,16 @@ async function finishAdd($: $): Promise<void> {
   if (add?.step !== 'confirm') return
   const form = await read($, addFormAtom)
   const accounts = await read($, accountsAtom)
-  const who = add.who
-  // 查得到是誰：帳號、信箱、組織以 Claude 的回答為準；查不到才用使用者填的
-  const email = who ? who.email : form.email.trim() || null
-  const orgId = who ? who.orgId : form.org || null
-  const orgName = who ? who.orgName : orgId ? (Object.values(accounts).find(a => a.orgId === orgId)?.orgName ?? null) : null
+  const current = await read($, currentAtom)
+  // 組織：查得到就照查到的，查不到才用使用者選的
+  const verdict = add.orgId ? classifyOrg(accounts, current, add.orgId) : null
+  const email = form.email.trim() || null
+  const orgId = add.orgId ?? (form.org || null)
+  const orgName = orgId ? (Object.values(accounts).find(a => a.orgId === orgId)?.orgName ?? null) : null
+  // 認得的帳號就把憑證掛上去；和目前帳號同組織時，使用者已經按了「確定是同組織的另一個帳號」，當成新的
   let same: BraidAccount | undefined
-  if (who) {
-    const verdict = classifyWho(accounts, await read($, currentAtom), who)
-    if (verdict.kind === 'current') return // 等結果檔時已經擋過；清單在這之間變了也不存
-    same = verdict.kind === 'known' ? verdict.account : undefined
-  } else {
-    // 查不到是誰：同一個信箱的帳號已經在清單裡（例如在桌面 app 登入過）就掛到那個帳號上
-    same = email ? Object.values(accounts).find(a => a.email?.toLowerCase() === email.toLowerCase()) : undefined
-  }
+  if (verdict) same = verdict.kind === 'known' ? verdict.account : undefined
+  else same = email ? Object.values(accounts).find(a => a.email?.toLowerCase() === email.toLowerCase()) : undefined
   const label = form.label.trim()
   let saved: BraidAccount
   if (same) {
@@ -462,7 +439,7 @@ async function finishAdd($: $): Promise<void> {
   } else {
     const used = Object.values(accounts).map(a => a.color)
     saved = {
-      id: who ? who.uuid : add.id,
+      id: add.id,
       email,
       orgId,
       orgName,
@@ -741,40 +718,59 @@ async function drawAdd($: $, ui: UI) {
   }
   const form = await read($, addFormAtom)
   const accounts = await read($, accountsAtom)
-  const who = add.who
-  const verdict = who ? classifyWho(accounts, await read($, currentAtom), who) : null
+  const current = await read($, currentAtom)
+  const verdict = add.orgId ? classifyOrg(accounts, current, add.orgId) : null
   const known = verdict?.kind === 'known' ? verdict.account : undefined
-  const suggested = known
-    ? known.label
-    : defaultLabel({ email: who ? who.email : form.email.trim() || null, orgName: who ? who.orgName : null }, Object.values(accounts).map(a => a.label))
+  const orgName = add.orgId ? (Object.values(accounts).find(a => a.orgId === add.orgId)?.orgName ?? null) : null
+  const suggested = known ? known.label : defaultLabel({ email: form.email.trim() || null, orgName }, Object.values(accounts).map(a => a.label))
+  const labelInput = (
+    <Input
+      key="add-label"
+      label="名稱"
+      value={form.label}
+      placeholder={`沒填就叫「${suggested}」`}
+      onInput={v => update($, addFormAtom, f => ({ ...f, label: v }))}
+      onSubmit={v => update($, addFormAtom, f => ({ ...f, label: v }))}
+    />
+  )
+  if (verdict?.kind === 'current-org') {
+    // 多半就是目前這個帳號：預設是刪掉；真的是同組織的另一個帳號才另外確認
+    const cur = current ? accounts[current] : undefined
+    return (
+      <Box key="add-form" flexDirection="column" borderStyle="round" paddingX={1}>
+        <Text color="warning">{`這組憑證屬於目前帳號「${cur?.label ?? ''}」的組織${orgName ? `（${orgName}）` : ''}。`}</Text>
+        <Text>你在這個組織只有一個帳號的話，它就是目前這個帳號，用它接著做不會多出用量。多半是瀏覽器剛好登著目前的帳號：到瀏覽器登出（或開無痕視窗）再新增一次。</Text>
+        <Box flexDirection="row" gap={1} flexWrap="wrap">
+          <Button key="add-discard" label="不要了，刪掉這組憑證" variant="primary" onPress={() => discardAdd($)} />
+          <Button key="add-save" label="確定是同組織的另一個帳號，加入" dimColor onPress={() => finishAdd($)} />
+        </Box>
+      </Box>
+    )
+  }
   const orgs = new Map<string, string>()
   for (const a of Object.values(accounts)) if (a.orgId) orgs.set(a.orgId, a.orgName ?? `${a.label} 的組織`)
   return (
     <Box key="add-form" flexDirection="column" borderStyle="round" paddingX={1}>
       <Text color="success">{`憑證已存好（${CREDENTIAL_TEXT[add.credential]}）。最後填一下：`}</Text>
-      {who ? (
-        <Text>{`登入的是 ${who.email}${who.orgName ? `（${who.orgName}）` : ''}`}</Text>
+      {known ? (
+        <Text>{`看起來是已經認得的「${known.label}」（同一個組織）：按加入會更新它的登入憑證，不會多一筆。`}</Text>
+      ) : add.orgId ? (
+        <Text>這組憑證屬於另一個組織，不是目前帳號的。</Text>
       ) : (
-        <Text color="warning">查不出這組憑證是哪個帳號（連不上 Claude，或回應的格式改了）。請自己確認登入的不是目前這個帳號。</Text>
+        <Text color="warning">查不出這組憑證屬於哪個組織（連不上 Claude）。請自己確認登入的不是目前這個帳號。</Text>
       )}
-      {known && <Text dimColor>{`這是已經認得的「${known.label}」：按加入會更新它的登入憑證，不會多一筆。`}</Text>}
-      <Input
-        key="add-label"
-        label="名稱"
-        value={form.label}
-        placeholder={`沒填就叫「${suggested}」`}
-        onInput={v => update($, addFormAtom, f => ({ ...f, label: v }))}
-        onSubmit={v => update($, addFormAtom, f => ({ ...f, label: v }))}
-      />
-      {!who && (
+      {labelInput}
+      {!known && (
+        <Input
+          key="add-email"
+          label="信箱（只用來顯示，可以空著）"
+          value={form.email}
+          onInput={v => update($, addFormAtom, f => ({ ...f, email: v }))}
+          onSubmit={v => update($, addFormAtom, f => ({ ...f, email: v }))}
+        />
+      )}
+      {!add.orgId && (
         <Box key="add-manual" flexDirection="column">
-          <Input
-            key="add-email"
-            label="信箱（只用來顯示，可以空著）"
-            value={form.email}
-            onInput={v => update($, addFormAtom, f => ({ ...f, email: v }))}
-            onSubmit={v => update($, addFormAtom, f => ({ ...f, email: v }))}
-          />
           <Select
             key="add-org"
             label="這個帳號屬於"

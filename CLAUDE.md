@@ -88,10 +88,12 @@ tests/                            工具的測試（Node＋classic-level 造資�
 - **接著做用 `--fork-session`**：複製一份新的對話，原本的不動，兩個行程不會寫同一份紀錄。
   憑證在 macOS／Linux／WSL 經由 `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` 交出去（Claude Code 讀完會刪變數，
   管道也讀空，對話裡執行的指令拿不到）；Windows 沒有這個機制，只能放那個視窗的 `CLAUDE_CODE_OAUTH_TOKEN`。
-- **新增帳號要查是誰**：add-account 存好憑證後用它打 `GET https://api.anthropic.com/api/oauth/profile`
-  （Claude Code 自己的做法，未公開文件；憑證經標準輸入交給 curl，Windows 用 Invoke-WebRequest），回應另存
-  `<結果檔>.profile.json`（600）。面板用 `model.ts` 的 `classifyWho` 判斷：是目前帳號就拒絕並刪憑證、認得的就更新它的憑證、
-  新的照查到的 uuid／信箱／組織存。回應格式不對或連不上就當查不到，退回由使用者說明。`BRAID_PROFILE_URL` 只接受 file://（測試用）。
+- **新增帳號用組織判斷是誰**：一年期憑證（setup-token）打 `/api/oauth/profile` 會被拒（403 permission_error，
+  2026-10-17 用真的憑證驗過；假憑證是 401，只用假的測不出來）。改由 `org.sh`／`org.ps1` 用憑證打公開的
+  `GET /v1/models?limit=1`（不算用量、不用指定模型），讀回應標頭 `anthropic-organization-id`；只查得到組織。
+  面板用 `model.ts` 的 `classifyOrg`：和目前帳號同組織＝多半就是目前帳號（預設刪憑證，另按確認才加入）、
+  正好一個認得的帳號在該組織＝更新它的憑證、其他＝新帳號。測試用 `tests/fixtures/fake-api.py`（只聽 127.0.0.1），
+  腳本的 `BRAID_API_BASE` 只接受 `http://127.0.0.1:<埠>`。
 - **不繞過公司政策**：policy 設了 `forceLoginOrgUUID` 就不讓新增帳號（新增前沒辦法知道會登入哪個組織）。
   組織不明的帳號在「只換同組織」的資料夾一律不算同組織。
 - **測試碰不到真的工具**：會真的啟動 Windows 程式的測試（`launch-wsl.sh` 的實跑那段），先刪掉複製出去的真工具、

@@ -65,14 +65,12 @@ export type BraidProfile = { account: string; org: string; sessions: number; las
 export type BraidBackup = { name: string; dir: string }
 export type BraidDesktop = { profiles: BraidProfile[]; backups: BraidBackup[]; error: string | null }
 
-/** 新增的憑證屬於哪個帳號：新增帳號的腳本用憑證問 Claude 查到的（查不到就是 null）。 */
-export type BraidWho = { uuid: string; email: string; orgId: string; orgName: string | null }
-
 /** 新增帳號的進度：開視窗登入 → 等結果檔 → 填名稱。 */
 export type BraidAdd =
   | { step: 'blocked'; reason: string }
   | { step: 'waiting'; id: string; resultPath: string; startedAt: number }
-  | { step: 'confirm'; id: string; credential: BraidCredential; who: BraidWho | null }
+  /** orgId：新增帳號的腳本用憑證查到的組織（一年期憑證只查得到組織）；查不到是 null */
+  | { step: 'confirm'; id: string; credential: BraidCredential; orgId: string | null }
   | { step: 'failed'; reason: string }
 
 export type BraidAddForm = { label: string; email: string; org: string }

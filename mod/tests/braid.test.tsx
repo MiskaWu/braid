@@ -353,7 +353,7 @@ describe('新增帳號', () => {
     w.files[result] = '\uFEFF{"ok":true,"backend":"file"}'
     await w.clock.advance(1500)
     expect(await shows(ui, /憑證已存好（只有你讀得到的檔案）/)).toBe(true)
-    expect(await shows(ui, /查不出這組憑證是哪個帳號/)).toBe(true) // 結果檔沒有 profile：由使用者說明
+    expect(await shows(ui, /查不出這組憑證屬於哪個組織/)).toBe(true) // 結果檔沒有組織：由使用者說明
     await ui.input({ key: 'add-label', text: '公司 2' })
     await ui.select({ key: 'add-org', value: OW })
     await ui.press({ key: 'add-save' })
@@ -364,50 +364,63 @@ describe('新增帳號', () => {
     await ui.unmount()
   })
 
-  // 新增帳號的腳本查到的帳號資料（/api/oauth/profile 的回應）
-  const addWith = async (w: ReturnType<typeof world>, ui: { press: (t: { key: string }) => Promise<unknown> }, profile: unknown) => {
+  // 新增帳號的腳本查到的組織（一年期憑證只查得到組織）
+  const addWith = async (w: ReturnType<typeof world>, ui: { press: (t: { key: string }) => Promise<unknown> }, orgId: string | null) => {
     await ui.press({ key: 'add' })
     const id = /braid-add-(tok-[0-9a-f]{8})\.sh$/.exec(w.runs.at(-1)?.argv[2] ?? '')?.[1] ?? ''
-    w.files[`/tmp/braid-add-${id}.json.profile.json`] = JSON.stringify(profile)
-    w.files[`/tmp/braid-add-${id}.json`] = '{"ok":true,"backend":"file","profile":true}'
+    w.files[`/tmp/braid-add-${id}.json`] = JSON.stringify({ ok: true, backend: 'file', orgId })
     await w.clock.advance(1500)
     return id
   }
+  const ORG_X = '0000aaaa-1111-2222-3333-444455556666'
+  const ORG_W = 'cccccccc-0000-4000-8000-00000000000a'
 
-  test('查得到是誰：新的帳號用它真正的 uuid、信箱與組織存，不用問', async ($, on) => {
+  test('另一個組織：照查到的組織存成新帳號，不用選組織', async ($, on) => {
     const w = world(on, { store: { uses: USES_ALL } })
     await $.session.start(START)
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-    const id = await addWith(w, ui, { account: { uuid: 'cccc-new', email: 'me2@corp.example' }, organization: { uuid: OW, name: 'Corp' } })
-    expect(await shows(ui, /登入的是 me2@corp\.example（Corp）/)).toBe(true)
-    expect(await ui.find({ key: 'add-email' })).toBeUndefined()
+    const id = await addWith(w, ui, ORG_X)
+    expect(await shows(ui, /屬於另一個組織，不是目前帳號的/)).toBe(true)
     expect(await ui.find({ key: 'add-org' })).toBeUndefined()
     await ui.press({ key: 'add-save' })
-    const saved = w.store.get('account:cccc-new') as { email: string; orgId: string; orgName: string; label: string; credentialId: string }
-    expect([saved.email, saved.orgId, saved.orgName, saved.label, saved.credentialId]).toEqual(['me2@corp.example', OW, 'Corp', 'Corp', id])
-    expect(w.store.get(`account:${id}`)).toBeUndefined()
+    const saved = w.store.get(`account:${id}`) as { orgId: string; credentialId: string; label: string }
+    expect([saved.orgId, saved.credentialId, saved.label]).toEqual([ORG_X, id, '個人'])
     await ui.unmount()
   })
 
-  test('登入的就是目前這個帳號：不存、刪掉剛存的憑證，請使用者換一個帳號再試', async ($, on) => {
-    const w = world(on, { store: { uses: USES_ALL } })
+  test('和目前帳號同一個組織：警告多半就是目前這個帳號，預設刪掉憑證', async ($, on) => {
+    const work = acct(W, { email: 'me@corp.example', orgId: ORG_W, label: '公司' })
+    const w = world(on, { store: { uses: USES_ALL, [`account:${W}`]: work }, env: { CLAUDE_CODE_ORGANIZATION_UUID: ORG_W } })
     await $.session.start(START)
-    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    const id = await addWith(w, ui, { account: { uuid: W, email: 'me@corp.example' }, organization: { uuid: OW } })
-    expect(await shows(ui, /登入的是目前這個帳號（me@corp\.example），不能拿來接手/)).toBe(true)
-    expect(w.runs.at(-1)?.argv.slice(-2)).toEqual(['delete', id])
-    expect(await ui.find({ key: 'add-save' })).toBeUndefined()
-    expect([...w.store.keys()].filter(k => k.startsWith('account:'))).toEqual([`account:${W}`])
+    for (const surface of SURFACES) {
+      const ui = await $.ui.mount({ ...PANE, surface })
+      const id = await addWith(w, ui, ORG_W)
+      expect(await shows(ui, /這組憑證屬於目前帳號「公司」的組織/)).toBe(true)
+      expect((await ui.find({ key: 'add-discard' }))?.props.variant).toBe('primary')
+      await ui.press({ key: 'add-discard' })
+      expect(w.runs.at(-1)?.argv.slice(-2)).toEqual(['delete', id])
+      expect([...w.store.keys()].filter(k => k.startsWith('account:'))).toEqual([`account:${W}`])
+      await ui.unmount()
+    }
+  })
+
+  test('和目前帳號同一個組織，但確定是另一個帳號：明確按了才加入', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL }, env: { CLAUDE_CODE_ORGANIZATION_UUID: ORG_W } })
+    await $.session.start(START)
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    const id = await addWith(w, ui, ORG_W)
+    await ui.press({ key: 'add-save' })
+    expect((w.store.get(`account:${id}`) as { orgId: string }).orgId).toBe(ORG_W)
     await ui.unmount()
   })
 
-  test('已經認得的帳號（例如在桌面 app 登入過）：更新它的憑證，不多一筆；舊憑證刪掉', async ($, on) => {
-    const old = { ...PERSONAL, credential: 'file', credentialId: 'tok-0000000a' }
+  test('組織和一個已經認得的帳號相同（例如在桌面 app 登入過的個人帳號）：更新它的憑證，不多一筆', async ($, on) => {
+    const old = { ...PERSONAL, orgId: ORG_X, credential: 'file', credentialId: 'tok-0000000a' }
     const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: old } })
     await $.session.start(START)
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-    const id = await addWith(w, ui, { account: { uuid: P, email: 'me@gmail.example' }, organization: { uuid: OP } })
-    expect(await shows(ui, /這是已經認得的「個人」/)).toBe(true)
+    const id = await addWith(w, ui, ORG_X)
+    expect(await shows(ui, /看起來是已經認得的「個人」/)).toBe(true)
     await ui.press({ key: 'add-save' })
     expect(w.runs.some(r => r.argv.slice(-2).join(' ') === 'delete tok-0000000a')).toBe(true)
     const saved = w.store.get(`account:${P}`) as { credentialId: string; label: string }

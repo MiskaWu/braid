@@ -8,7 +8,6 @@ import type {
   BraidSync,
   BraidUsage,
   BraidUses,
-  BraidWho,
   BraidWindow,
 } from '../types'
 
@@ -146,37 +145,24 @@ export function upsertSeen(accounts: Record<string, BraidAccount>, seen: Seen, n
   }
 }
 
-// ── 新增帳號：這組憑證是誰 ──
+// ── 新增帳號：這組憑證屬於哪個組織 ──
 
-/** /api/oauth/profile 的回應 → 帳號與組織；格式不對就是 null（不猜）。 */
-export function parseProfile(text: string): BraidWho | null {
-  try {
-    const d = JSON.parse(text.replace(/^\uFEFF/, '')) as { account?: unknown; organization?: unknown }
-    if (!isObj(d.account) || !isObj(d.organization)) return null
-    const uuid = str(d.account.uuid)
-    const email = str(d.account.email)
-    const orgId = str(d.organization.uuid)
-    if (!uuid || !email || !orgId) return null
-    return { uuid, email, orgId, orgName: str(d.organization.name) }
-  } catch {
-    return null
-  }
-}
+/** 組織 id 長這樣才收（新增帳號的腳本從 API 回應標頭讀來的）。 */
+export const isOrgId = (x: unknown): x is string => typeof x === 'string' && /^[0-9a-fA-F-]{36}$/.test(x)
 
-export type WhoVerdict = { kind: 'current' } | { kind: 'known'; account: BraidAccount } | { kind: 'new' }
+export type OrgVerdict = { kind: 'current-org' } | { kind: 'known'; account: BraidAccount } | { kind: 'new' }
 
 /**
- * 新增的憑證跟清單裡的帳號是什麼關係：就是目前這個帳號（不能拿來接手）、已經認得的帳號（更新它的憑證）、或新的。
- * 認得＝帳號 uuid 相同；braid 早期新增、還不知道 uuid 的帳號（tok-…）則比信箱。
+ * 一年期憑證（setup-token）查不了帳號資料，只查得到組織，所以用組織判斷新增的憑證是誰：
+ * - 和目前帳號同一個組織：一個人在一個組織通常只有一個帳號，多半就是目前這個帳號（瀏覽器剛好登著它）
+ * - 正好有一個認得的帳號（不是目前這個）在這個組織：當成那個帳號，更新它的憑證
+ * - 其他：新的帳號
  */
-export function classifyWho(accounts: Record<string, BraidAccount>, current: string | null, who: BraidWho): WhoVerdict {
-  if (current && (who.uuid === current || accounts[current]?.id === who.uuid)) return { kind: 'current' }
-  const byId = accounts[who.uuid]
-  if (byId) return { kind: 'known', account: byId }
-  const email = who.email.toLowerCase()
-  const byEmail = Object.values(accounts).find(a => a.id.startsWith('tok-') && a.email?.toLowerCase() === email)
-  if (byEmail) return byEmail.id === current ? { kind: 'current' } : { kind: 'known', account: byEmail }
-  return { kind: 'new' }
+export function classifyOrg(accounts: Record<string, BraidAccount>, current: string | null, orgId: string): OrgVerdict {
+  const cur = current ? accounts[current] : undefined
+  if (cur?.orgId === orgId) return { kind: 'current-org' }
+  const same = Object.values(accounts).filter(a => a.id !== current && a.orgId === orgId)
+  return same.length === 1 && same[0] ? { kind: 'known', account: same[0] } : { kind: 'new' }
 }
 
 // ── 用量 ──

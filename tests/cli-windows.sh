@@ -55,19 +55,20 @@ if "%1"=="setup-token" echo (fake setup-token)
 EOF
 sed -i 's/$/\r/' "$W/claude-setup.cmd"
 res="$W/add.json"
-# 帳號資料用本機檔案代替（BRAID_PROFILE_URL 只接受 file://），不會拿假憑證去連 Claude
-printf '{"account":{"uuid":"u-9","email":"me@gmail.example"},"organization":{"uuid":"o-9"}}' > "$W/profile.json"
-PROFILE_URL="file:///$(wslpath -w "$W/profile.json" | tr '\\' /)"
-printf '\r\n  %s  \r\n\r\n' "$TOKEN" | BRAID_ACCOUNT="$ID-add" BRAID_RESULT="$(wslpath -w "$res")" BRAID_CLAUDE="$(wslpath -w "$W/claude-setup.cmd")" BRAID_PROFILE_URL="$PROFILE_URL" \
-  WSLENV="BRAID_ACCOUNT:BRAID_RESULT:BRAID_CLAUDE:BRAID_PROFILE_URL${WSLENV:+:$WSLENV}" ps -File "$(wslpath -w ../mod/tool/windows/add-account.ps1)" >/dev/null 2>&1
-[ "$(cat "$res" 2>&1)" = '{"ok":true,"backend":"credman","profile":true}' ] && ok "成功：結果檔只寫存在哪裡、有沒有查到是誰" || ng "結果檔不對：$(cat "$res" 2>&1)"
-grep -q '"uuid":"u-9"' "$res.profile.json" && ok "查到的帳號資料存下來給面板判斷是誰" || ng "沒有帳號資料：$(cat "$res.profile.json" 2>&1)"
-grep -q sk-ant "$res.profile.json" && ng "帳號資料檔裡有憑證" || ok "帳號資料檔裡沒有憑證"
-grep -q sk-ant "$res" && ng "結果檔裡有憑證" || ok "結果檔裡沒有憑證"
+# 假的 Claude API（WSL 的 127.0.0.1，Windows 經 localhost 轉送連得到）：org.ps1 只在 BRAID_API_BASE 是 127.0.0.1 時才連過來
+python3 fixtures/fake-api.py "$W/api-seen" > "$W/api-port" & API=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$W/api-port" ] && break; sleep 0.2; done
+BASE="http://127.0.0.1:$(cat "$W/api-port")"
+printf '\r\n  %s  \r\n\r\n' "$TOKEN" | BRAID_ACCOUNT="$ID-add" BRAID_RESULT="$(wslpath -w "$res")" BRAID_CLAUDE="$(wslpath -w "$W/claude-setup.cmd")" BRAID_API_BASE="$BASE" \
+  WSLENV="BRAID_ACCOUNT:BRAID_RESULT:BRAID_CLAUDE:BRAID_API_BASE${WSLENV:+:$WSLENV}" ps -File "$(wslpath -w ../mod/tool/windows/add-account.ps1)" >/dev/null 2>&1
+[ "$(cat "$res" 2>&1)" = '{"ok":true,"backend":"credman","orgId":"0000aaaa-1111-2222-3333-444455556666"}' ] && ok "成功：結果檔只寫存在哪裡、屬於哪個組織" || ng "結果檔不對：$(cat "$res" 2>&1)"
+[ "$(cat "$W/api-seen")" = "Bearer $TOKEN	/v1/models?limit=1" ] && ok "用存好的憑證呼叫「列出模型」，從回應標頭讀組織" || ng "API 收到的不對：$(cat "$W/api-seen")"
+[ "$(BRAID_API_BASE="$BASE" WSLENV="BRAID_API_BASE${WSLENV:+:$WSLENV}" ps -File "$(wslpath -w ../mod/tool/windows/org.ps1)" "$ID-add")" = 0000aaaa-1111-2222-3333-444455556666 ] && ok "org.ps1 只印出組織 id" || ng "org.ps1 輸出不對"
+kill $API 2>/dev/null
 [ "$(ps -File "$SECRET" get "$ID-add")" = "$TOKEN" ] && ok "貼上的憑證（前後空白去掉）存進認證管理員" || ng "憑證沒存好"
 rm -f "$res"
-printf '\r\nnope\r\n\r\n' | BRAID_ACCOUNT="$ID-add2" BRAID_RESULT="$(wslpath -w "$res")" BRAID_CLAUDE="$(wslpath -w "$W/claude-setup.cmd")" BRAID_PROFILE_URL="$PROFILE_URL" \
-  WSLENV="BRAID_ACCOUNT:BRAID_RESULT:BRAID_CLAUDE:BRAID_PROFILE_URL${WSLENV:+:$WSLENV}" ps -File "$(wslpath -w ../mod/tool/windows/add-account.ps1)" >/dev/null 2>&1
+printf '\r\nnope\r\n\r\n' | BRAID_ACCOUNT="$ID-add2" BRAID_RESULT="$(wslpath -w "$res")" BRAID_CLAUDE="$(wslpath -w "$W/claude-setup.cmd")" \
+  WSLENV="BRAID_ACCOUNT:BRAID_RESULT:BRAID_CLAUDE${WSLENV:+:$WSLENV}" ps -File "$(wslpath -w ../mod/tool/windows/add-account.ps1)" >/dev/null 2>&1
 [ "$(cat "$res" 2>&1)" = '{"ok":false,"reason":"canceled"}' ] && ok "貼錯再按 Enter：取消" || ng "取消時的結果不對：$(cat "$res" 2>&1)"
 ps -File "$SECRET" get "$ID-add2" >/dev/null 2>&1 && ng "取消了卻存了憑證" || ok "取消時什麼都沒存"
 

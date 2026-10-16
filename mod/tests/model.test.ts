@@ -6,7 +6,7 @@ import { parseDryRun, planLaunch, toolArgs } from '../hooks/launch'
 import {
   bandFor,
   candidates,
-  classifyWho,
+  classifyOrg,
   DEFAULT_SWITCH,
   defaultLabel,
   effectivePct,
@@ -18,7 +18,7 @@ import {
   normalizeSync,
   normalizeUses,
   orderedIds,
-  parseProfile,
+  isOrgId,
   parseTz,
   partnerOf,
   syncRequest,
@@ -100,30 +100,18 @@ describe('認帳號', () => {
   })
 })
 
-describe('新增的憑證是誰', () => {
-  const profile = (o: unknown) => JSON.stringify(o)
-  test('讀 /api/oauth/profile 的回應：帳號 uuid、信箱、組織；缺欄位或不是 JSON 就是 null', async () => {
-    expect(parseProfile('\uFEFF' + profile({ account: { uuid: 'u1', email: 'a@b', full_name: 'x' }, organization: { uuid: 'o1', name: 'Acme' } }))).toEqual({
-      uuid: 'u1',
-      email: 'a@b',
-      orgId: 'o1',
-      orgName: 'Acme',
-    })
-    expect(parseProfile(profile({ account: { uuid: 'u1', email: 'a@b' }, organization: { uuid: 'o1' } }))?.orgName).toBe(null)
-    expect(parseProfile(profile({ account: { uuid: 'u1' }, organization: { uuid: 'o1' } }))).toBe(null)
-    expect(parseProfile('<html>proxy</html>')).toBe(null)
+describe('新增的憑證屬於哪個組織', () => {
+  test('組織 id 的格式', async () => {
+    expect([isOrgId('12345678-90ab-4cde-8f01-23456789abcd'), isOrgId('x'), isOrgId(null), isOrgId('"; rm -rf /')]).toEqual([true, false, false, false])
   })
 
-  test('就是目前這個帳號、已經認得（uuid 相同，或早期新增的 tok- 帳號信箱相同）、或新的', async () => {
-    const who = (uuid: string, email = 'x@y') => ({ uuid, email, orgId: 'o', orgName: null })
-    const tok = account('tok-1', { email: 'Old@Gmail.com', credential: 'file', credentialId: 'tok-1' })
-    const list = { work, home, 'tok-1': tok }
-    expect(classifyWho(list, 'work', who('work')).kind).toBe('current')
-    expect(classifyWho(list, 'work', who('home'))).toEqual({ kind: 'known', account: home })
-    expect(classifyWho(list, 'work', who('u-new', 'old@gmail.com'))).toEqual({ kind: 'known', account: tok })
-    expect(classifyWho(list, 'tok-1', who('u-new', 'old@gmail.com')).kind).toBe('current') // 目前就是用那個早期新增的帳號
-    expect(classifyWho(list, 'work', who('u-new', 'someone@else')).kind).toBe('new')
-    expect(classifyWho({ work, home: { ...home, email: 'same@x' } }, 'work', who('u-new', 'same@x')).kind).toBe('new') // 不是 tok- 帳號就只比 uuid
+  test('和目前帳號同組織、正好一個認得的帳號在這個組織、或新的', async () => {
+    const list = { work, home }
+    expect(classifyOrg(list, 'work', 'org-w').kind).toBe('current-org')
+    expect(classifyOrg(list, 'work', 'org-h')).toEqual({ kind: 'known', account: home })
+    expect(classifyOrg(list, 'work', 'org-x').kind).toBe('new')
+    expect(classifyOrg({ ...list, work2 }, 'home', 'org-w').kind).toBe('new') // 同組織有兩個認得的帳號：分不出是哪個，當新的
+    expect(classifyOrg(list, null, 'org-w')).toEqual({ kind: 'known', account: work }) // 認不出目前帳號時不擋
   })
 })
 
