@@ -119,6 +119,11 @@ tests/                            工具的測試（Node＋classic-level 造資�
 - **mod 裡 `$` 不能經由資料結構傳遞，也不能傳過 import**：動作的分派寫成 `switch`；`$` 只能傳給同一個檔裡的函式。
   別的檔需要讀檔或執行指令時，在 register.tsx 用 `$` 組一組函式傳過去（見 `desktop.ts` 的 `DesktopIo`）；
   `$.env.get` 的變數名稱一定要寫成字面字串，所以環境變數也在 register.tsx 先讀好再傳。
+- **`$.state` 在外掛更新、重新載入後還留著上一版寫的值**（`$.store` 的設定每次 `loadStore` 會重新整理，`$.state` 不會）。
+  0.3.2 更新後面板整片空白，就是 0.3.1 的桌面資料沒有 `trash` 欄位。從磁碟讀來的暫存（`desktopAtom`）在 `session.start` 一律清掉，
+  再在背景重讀；改了某個 atom 的形狀，就要嘛在這裡一起清、要嘛讀的地方能接受舊形狀。面板的分頁畫壞時會顯示原因和「重新讀取」，
+  不會整片空白。測試的 `$` 碰不到 `$.state`：模擬舊值要攔 `state.get`（見 `braid.test.tsx` 的「更新之後」），
+  攔下的讀取不算在測試工具的重畫追蹤裡，之後要自己 `ui.redraw()`。
 - **JSX 檔裡不能有叫 `h` 的變數**：JSX 編譯成全域的 `h(...)`，同名的區域變數會把它蓋掉，hook 直接被跳過。
 - **測試套件裡沒有東西墊底**：`session.start`、`session.measure`、`prompt.submit`、`command.register`、
   沒畫東西時的 `ui.render`、`store.*` 都要測試自己答（生命週期事件直接回結果，`$` 名詞的事件回 `{ value }`）。

@@ -394,6 +394,8 @@ async function runMirror($: $, mode: 'tick' | 'urgent' | 'now'): Promise<void> {
     const status = await mirrorOnce($, platform, now)
     await $.store.set('mirror', status)
     await update($, mirrorAtom, () => status)
+    // 多了或少了紀錄（也多了刪除備份）：面板上的資料夾與備份筆數跟著重讀；只是更新內容就不必
+    if (status.created + status.deleted > 0 && (await read($, desktopAtom)) !== null) await ensureDesktop($, true)
   } finally {
     mirroring = false
   }
@@ -1398,11 +1400,17 @@ export const register: Register = on => {
       description: 'Claude 帳號工具：打開面板管理帳號、用量切換、同步；migrate＝桌面 app 換帳號後把舊對話搬過來',
       argumentHint: '[帳號|切換|同步|migrate [試跑]]',
     })
+    // $.state 在外掛更新、重新載入後還留著上一版寫的值。從磁碟讀來的暫存一律丟掉重讀，
+    // 不然新版讀到舊版的形狀（例如 0.3.1 的桌面資料沒有 trash）畫面就壞了（0.3.2 更新後面板空白）
+    await update($, desktopAtom, () => null)
     const platform = await detectPlatform($)
     await update($, platformAtom, () => platform)
     const tz = await localTz($, platform)
     await update($, tzAtom, () => tz)
     await loadStore($)
+    // 上面丟掉的桌面資料在背景重讀：面板開著時重新載入，才不會一直停在「讀取中」
+    const uses = await read($, usesAtom)
+    if (uses?.sync || uses?.migrate) $.clock.after(1, () => ensureDesktop($))
     const seen = await seenNow($)
     if (seen) {
       const account = upsertSeen(await read($, accountsAtom), seen, await $.clock.now())
@@ -1551,14 +1559,21 @@ export const register: Register = on => {
     const saved = await read($, tabAtom)
     const tab = tabs.some(t => t.id === saved) ? saved : 'accounts'
     const notice = await read($, noticeAtom)
-    const body =
-      tab === 'switch'
-        ? await drawSwitch($, ui)
-        : tab === 'sync'
-          ? await drawSync($, ui)
-          : tab === 'migrate'
-            ? await drawMigrate($, ui)
-            : await drawAccounts($, ui, e.props.bodyColumns)
+    const drawTab = () => (tab === 'switch' ? drawSwitch($, ui) : tab === 'sync' ? drawSync($, ui) : tab === 'migrate' ? drawMigrate($, ui) : drawAccounts($, ui, e.props.bodyColumns))
+    // 一頁畫壞了就說出來、給重讀的按鈕，不要讓整個面板變成空白
+    const body = await drawTab().catch((err: unknown) => (
+      <Box key="pane-error" flexDirection="column" gap={1}>
+        <Text color="warning">{`這一頁畫不出來：${err instanceof Error ? err.message : String(err)}`}</Text>
+        <Button
+          key="pane-retry"
+          label="重新讀取"
+          onPress={async () => {
+            await update($, desktopAtom, () => null) // 先清掉：重讀的內容和原本一樣時，畫面也會重畫
+            await ensureDesktop($, true)
+          }}
+        />
+      </Box>
+    ))
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="row" gap={1} flexWrap="wrap">

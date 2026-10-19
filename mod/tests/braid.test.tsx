@@ -767,6 +767,7 @@ describe('同步', () => {
     w.files[`${APP}/config.json`] = JSON.stringify({ lastKnownAccountUuid: W })
     await w.store.set('sync', { ...SYNC_ON, pair: [W, other] })
     await $.session.start(START)
+    await w.clock.advance(1) // 重新載入後桌面資料在背景重讀
     await ui.press({ key: 'sy-now' })
     expect(await shows(ui, /「帳號 cccccccc…」還沒在桌面 app 用過 Code 分頁/)).toBe(true)
     await ui.unmount()
@@ -829,6 +830,51 @@ describe('同步', () => {
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     expect(await shows(ui, /CLI 的對話不分帳號/)).toBe(true)
     await ui.unmount()
+  })
+})
+
+describe('更新之後', () => {
+  // 0.3.1 寫進 $.state 的桌面資料沒有 trash、backupRoot；$.state 在重新載入後還留著。
+  // 測試的 $ 碰不到 $.state，改成攔截讀取：braid 自己寫 desktop 之前，讀到的都是舊版的形狀
+  const OLD_DESKTOP = { profiles: [], backups: [], error: null }
+  function leftover(on: On) {
+    const held = { on: true }
+    on('state.get', ($, e, next) => (held.on && e.plugin === 'braid' && e.key === 'desktop' ? { value: { value: OLD_DESKTOP, version: 1 } } : next(e)))
+    on('state.set', ($, e, next) => {
+      if (e.plugin === 'braid' && e.key === 'desktop') held.on = false
+      return next(e)
+    })
+    return held
+  }
+
+  test('上一版留下的暫存：重新載入時丟掉重讀，同步頁照常畫得出來', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL, sync: SYNC_ON } })
+    leftover(on)
+    await $.session.start(START)
+    await $.command.run(RUN('同步'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await ui.find({ key: 'keep-days' })).toBeDefined()
+    expect(await ui.find({ key: 'pane-error' })).toBeUndefined()
+    await ui.unmount()
+    void w
+  })
+
+  test('一頁畫壞了：說原因、給「重新讀取」，按了重讀就好，其他分頁照樣能切', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL, sync: SYNC_ON } })
+    const held = leftover(on)
+    await $.session.start(START)
+    await $.command.run(RUN('同步'))
+    held.on = true // 載入之後才又冒出舊形狀（模擬沒被重讀蓋掉的情況）
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await shows(ui, /這一頁畫不出來/)).toBe(true)
+    expect(await ui.find({ key: 'tab-accounts' })).toBeDefined()
+    await ui.press({ key: 'pane-retry' })
+    // 攔下來的那次讀取不算在測試工具的追蹤裡，它不知道要重畫；實際的 app 讀取都經過它，會自己重畫
+    await ui.redraw()
+    expect(await ui.find({ key: 'pane-error' })).toBeUndefined()
+    expect(await ui.find({ key: 'keep-days' })).toBeDefined()
+    await ui.unmount()
+    void w
   })
 })
 

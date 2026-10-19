@@ -1,6 +1,6 @@
 {
   "name": "braid",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Claude 的多帳號工具：面板管理這台電腦的帳號與用量、用量快用完時用另一個帳號接著做、桌面 app 換帳號後同步或遷移對話與環境（/braid）。",
   "author": {
     "name": "MiskaWu",
