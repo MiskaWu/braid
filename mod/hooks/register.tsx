@@ -27,6 +27,7 @@ import { backupLabel, desktopPaths, listToolBackups, listTrash, scanDesktop, typ
 import { manualPath, parseDryRun, planLaunch, toolArgs, type ToolRequest } from './launch'
 import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo } from './mirror'
 import {
+  absorbTokenTwin,
   bandFor,
   candidates,
   classifyOrg,
@@ -63,6 +64,7 @@ import {
   SEVEN_DAY_CHOICES,
   syncRequest,
   syncRows,
+  sameEmail,
   upsertSeen,
   usageFrom,
   WINDOW_NAMES,
@@ -581,7 +583,7 @@ async function finishAdd($: $): Promise<void> {
   // 認得的帳號就把憑證掛上去；和目前帳號同組織時，使用者已經按了「確定是同組織的另一個帳號」，當成新的
   let same: BraidAccount | undefined
   if (verdict) same = verdict.kind === 'known' ? verdict.account : undefined
-  else same = email ? Object.values(accounts).find(a => a.email?.toLowerCase() === email.toLowerCase()) : undefined
+  else same = sameEmail(accounts, email)[0]
   const label = form.label.trim()
   let saved: BraidAccount
   if (same) {
@@ -827,6 +829,10 @@ async function drawAccounts($: $, ui: UI, width: number) {
   const tz = await read($, tzAtom)
   const now = await $.clock.now()
   const barWidth = Math.max(8, Math.min(24, width - 34))
+  // 沒有憑證、但和這個對話的帳號一起自動同步：在桌面 app 換過去就能接著做
+  const uses = await read($, usesAtom)
+  const sy = await read($, syncAtom)
+  const syncedWith = (id: string) => !!uses?.sync && sy.on && !!current && sy.pair.includes(current) && sy.pair.includes(id)
 
   const block = (a: BraidAccount, isCurrent: boolean) => {
     const usage = isCurrent ? (live ?? a.usage) : a.usage
@@ -883,7 +889,11 @@ async function drawAccounts($: $, ui: UI, width: number) {
         )}
         {!isCurrent && (
           <Text size="footnote" dimColor>
-            {a.credential ? `可以一鍵接手（憑證存在${CREDENTIAL_TEXT[a.credential]}）` : 'braid 沒有它的登入憑證，只能在桌面 app 手動換'}
+            {a.credential
+              ? `可以一鍵接手（憑證存在${CREDENTIAL_TEXT[a.credential]}）`
+              : syncedWith(a.id)
+                ? '在桌面 app 換成它就能接著做，對話會自動同步'
+                : 'braid 沒有它的登入憑證，只能在桌面 app 手動換'}
           </Text>
         )}
         {editRow}
@@ -1413,7 +1423,15 @@ export const register: Register = on => {
     if (uses?.sync || uses?.migrate) $.clock.after(1, () => ensureDesktop($))
     const seen = await seenNow($)
     if (seen) {
-      const account = upsertSeen(await read($, accountsAtom), seen, await $.clock.now())
+      const accounts = await read($, accountsAtom)
+      // 先前用 braid 新增憑證的同一個帳號（tok-…，信箱相同）：併成一筆，憑證掛到認出來的帳號上
+      const { account, absorbed } = absorbTokenTwin(accounts, upsertSeen(accounts, seen, await $.clock.now()))
+      if (absorbed) {
+        const twin = accounts[absorbed]
+        await dropAccount($, absorbed)
+        if (twin?.credentialId && twin.credentialId !== account.credentialId) await removeSecret($, twin.credentialId)
+        await putSwitch($, s => ({ ...s, order: s.order.map(id => (id === absorbed ? account.id : id)) }))
+      }
       await putAccount($, account)
       await update($, currentAtom, () => account.id)
     }

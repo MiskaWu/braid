@@ -212,6 +212,42 @@ export function upsertSeen(accounts: Record<string, BraidAccount>, seen: Seen, n
   }
 }
 
+/** 信箱相同的帳號（不分大小寫）。認帳號是不是同一個，新增憑證與認出帳號兩條路都用這一個。 */
+export function sameEmail(accounts: Record<string, BraidAccount>, email: string | null): BraidAccount[] {
+  const want = email?.trim().toLowerCase()
+  return want ? Object.values(accounts).filter(a => a.email?.trim().toLowerCase() === want) : []
+}
+
+/** braid 自動取的名稱（個人、公司、個人 2…）；使用者改過的不算。 */
+const isAutoLabel = (label: string) => /^(個人|公司)( \d+)?$/.test(label)
+
+/**
+ * 同一個帳號的兩筆紀錄併成一筆。braid 新增憑證時還不知道帳號 id（tok-…），之後在桌面 app 或 CLI 認出同一個帳號
+ * （信箱相同，而且正好一筆 tok-）時，把憑證併過來、丟掉 tok- 那筆。名稱與顏色：認出來的那筆還是自動取的名稱，
+ * 就用 tok- 那筆的（新增時使用者取的）；使用者改過的保留。用量取比較新的。
+ */
+export function absorbTokenTwin(accounts: Record<string, BraidAccount>, a: BraidAccount): { account: BraidAccount; absorbed: string | null } {
+  if (a.id.startsWith('tok-')) return { account: a, absorbed: null }
+  const twins = sameEmail(accounts, a.email).filter(t => t.id.startsWith('tok-'))
+  const t = twins.length === 1 ? twins[0] : undefined
+  if (!t) return { account: a, absorbed: null }
+  const mine = !isAutoLabel(a.label)
+  const usage = !a.usage ? t.usage : !t.usage ? a.usage : a.usage.at >= t.usage.at ? a.usage : t.usage
+  return {
+    account: {
+      ...a,
+      label: mine ? a.label : t.label,
+      color: mine ? a.color : t.color,
+      orgId: a.orgId ?? t.orgId,
+      orgName: a.orgName ?? t.orgName,
+      credential: a.credential ?? t.credential,
+      credentialId: a.credential ? a.credentialId : t.credentialId,
+      usage,
+    },
+    absorbed: t.id,
+  }
+}
+
 // ── 新增帳號：這組憑證屬於哪個組織 ──
 
 /** 組織 id 長這樣才收（新增帳號的腳本從 API 回應標頭讀來的）。 */

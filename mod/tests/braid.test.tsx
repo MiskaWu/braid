@@ -273,6 +273,34 @@ describe('帳號與用量', () => {
     await ui.unmount()
   })
 
+  test('先用 braid 新增過憑證的帳號，之後在桌面 app 換成它：併成一筆，名稱、顏色、憑證、切換順序都接過去', async ($, on) => {
+    const tok = acct('tok-00000007', { email: 'me@gmail.example', orgId: OP, label: 'MiskaWu', color: '#8E6BD8', source: 'token', credential: 'file', credentialId: 'tok-00000007' })
+    const w = world(on, {
+      env: { CLAUDE_CODE_ACCOUNT_UUID: P, CLAUDE_CODE_USER_EMAIL: 'me@gmail.example', CLAUDE_CODE_ORGANIZATION_UUID: OP },
+      store: { uses: USES_ALL, [`account:${W}`]: acct(W, { email: 'me@corp.example', orgId: OW, label: '公司' }), 'account:tok-00000007': tok, switch: { on: true, fiveHour: 90, sevenDay: 95, order: ['tok-00000007', W], restrict: false, restricted: [] } },
+    })
+    await $.session.start(START)
+    expect(w.store.get('account:tok-00000007')).toBeUndefined()
+    expect(w.store.get(`account:${P}`)).toMatchObject({ label: 'MiskaWu', color: '#8E6BD8', credential: 'file', credentialId: 'tok-00000007', source: 'desktop' })
+    expect((w.store.get('switch') as { order: string[] }).order).toEqual([P, W])
+    expect(w.runs.some(r => r.argv.join(' ').includes('secret.sh delete'))).toBe(false) // 憑證還要用，不刪
+    await $.command.run(RUN('帳號'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect((await ui.findAll({ key: 'go-tok-00000007' })).length).toBe(0) // 不會對自己「用它接著做」
+    expect(await shows(ui, /MiskaWu/)).toBe(true)
+    await ui.unmount()
+  })
+
+  test('沒有憑證、但和這個帳號一起自動同步的帳號：說在桌面 app 換過去就能接著做', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL, sync: SYNC_ON, [`account:${P}`]: PERSONAL } })
+    await $.session.start(START)
+    await $.command.run(RUN('帳號'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await shows(ui, /在桌面 app 換成它就能接著做，對話會自動同步/)).toBe(true)
+    await ui.unmount()
+    void w
+  })
+
   test('改名稱：存回去；移除要按兩次，braid 新增的帳號連憑證一起刪', async ($, on) => {
     const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL, 'account:tok-00000002': WORK2 } })
     await $.session.start(START)

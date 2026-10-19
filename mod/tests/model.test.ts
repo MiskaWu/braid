@@ -4,6 +4,7 @@ import type { BraidAccount, BraidSwitch } from '../types'
 import { backupLabel } from '../hooks/desktop'
 import { parseDryRun, planLaunch, toolArgs } from '../hooks/launch'
 import {
+  absorbTokenTwin,
   bandFor,
   candidates,
   classifyOrg,
@@ -599,6 +600,31 @@ describe('自動同步：複製側欄紀錄', () => {
     expect(parseSpec(JSON.stringify({ sessions: { ...SPEC, dropKeys: 'x' } }))).toBe(null)
     expect(parseSpec(JSON.stringify({ sessions: { ...SPEC, filePrefix: '' } }))).toBe(null)
     expect(parseSpec('{')).toBe(null)
+  })
+})
+
+describe('同一個帳號的兩筆紀錄', () => {
+  const tok = (over: Partial<BraidAccount> = {}) =>
+    account('tok-1', { email: 'Me@Gmail.com', orgId: 'org-h', label: 'MiskaWu', color: '#8E6BD8', source: 'token', credential: 'file', credentialId: 'tok-1', ...over })
+
+  test('認出來的帳號信箱和一個 braid 新增的帳號相同：併成一筆，憑證、名稱與顏色用新增時的，用量取新的', async () => {
+    const desk = account('desk', { email: 'me@gmail.com', orgId: 'org-h', label: '個人', color: '#14A38E', usage: { fiveHour: { pct: 1, resetsAt: null }, sevenDay: null, at: 200 } })
+    const t = tok({ usage: { fiveHour: { pct: 9, resetsAt: null }, sevenDay: null, at: 100 } })
+    const got = absorbTokenTwin({ desk, 'tok-1': t }, desk)
+    expect(got.absorbed).toBe('tok-1')
+    expect(got.account).toMatchObject({ id: 'desk', label: 'MiskaWu', color: '#8E6BD8', credential: 'file', credentialId: 'tok-1', source: 'desktop' })
+    expect(got.account.usage?.fiveHour?.pct).toBe(1)
+  })
+
+  test('使用者改過名的保留；信箱不同、兩筆都像、或自己就是 tok- 的都不併', async () => {
+    const renamed = account('desk', { email: 'me@gmail.com', label: '我的', color: '#14A38E' })
+    expect(absorbTokenTwin({ renamed, 'tok-1': tok() }, renamed).account).toMatchObject({ label: '我的', color: '#14A38E', credentialId: 'tok-1' })
+    const other = account('desk', { email: 'you@gmail.com', label: '個人' })
+    expect(absorbTokenTwin({ other, 'tok-1': tok() }, other).absorbed).toBe(null)
+    const desk = account('desk', { email: 'me@gmail.com', label: '個人' })
+    expect(absorbTokenTwin({ desk, 'tok-1': tok(), 'tok-2': tok({ id: 'tok-2' }) }, desk).absorbed).toBe(null)
+    expect(absorbTokenTwin({ 'tok-1': tok(), 'tok-2': tok({ id: 'tok-2' }) }, tok({ id: 'tok-2' })).absorbed).toBe(null)
+    expect(absorbTokenTwin({ 'tok-1': tok() }, account('desk', { email: null, label: '個人' })).absorbed).toBe(null)
   })
 })
 
