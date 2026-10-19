@@ -109,7 +109,8 @@ export type BraidAdd =
   | { step: 'waiting'; id: string; resultPath: string; startedAt: number }
   /** orgId：新增帳號的腳本用憑證查到的組織（一年期憑證只查得到組織）；查不到是 null */
   | { step: 'confirm'; id: string; credential: BraidCredential; orgId: string | null }
-  | { step: 'failed'; reason: string }
+  /** command：要使用者自己執行的指令（找不到 claude 時是安裝指令），面板顯示並給複製鈕 */
+  | { step: 'failed'; reason: string; command?: string }
 
 export type BraidAddForm = { label: string; email: string; org: string }
 

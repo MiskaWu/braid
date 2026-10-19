@@ -2,7 +2,7 @@
 # 測 mod/tool/windows 的帳號腳本：在 WSL 裡叫 Windows 的 powershell.exe 跑。
 #   secret.ps1：真的寫進「認證管理員」再讀回、刪掉（用測試專用的名稱，跑完一定刪）
 #   resume.ps1：用假的 claude.cmd 頂替，驗參數、工作資料夾（中文）、憑證只在那個視窗的環境變數
-#   add-account.ps1：用假的 claude.cmd 頂替 setup-token，從標準輸入貼憑證
+#   add-account.ps1：用假的 claude.cmd 頂替 setup-token，從標準輸入貼憑證；找不到 claude 時先講，不收憑證
 set -uo pipefail
 cd "$(dirname "$0")"
 ok() { echo "  ok  $1"; }
@@ -16,7 +16,7 @@ SECRET=$(wslpath -w ../mod/tool/windows/secret.ps1)
 # 每次都限時：腳本卡在等輸入時不要整個測試掛住
 ps() { (cd /mnt/c && timeout 60 powershell.exe -NoProfile -ExecutionPolicy Bypass "$@") | tr -d '\r'; }
 cleanup() {
-  for id in "$ID" "$ID-add" "$ID-add2"; do ps -File "$SECRET" delete "$id" >/dev/null 2>&1; done
+  for id in "$ID" "$ID-add" "$ID-add2" "$ID-add3"; do ps -File "$SECRET" delete "$id" >/dev/null 2>&1; done
   rm -rf "$W"
 }
 
@@ -55,6 +55,12 @@ out=$(iconv -f cp950 -t utf-8 "$W/out.txt" 2>/dev/null || cat "$W/out.txt")
 out=$(printf '%s' "$out" | tr -d '\r')
 echo "$out" | grep -qx "args=--resume sess-2 --fork-session" && echo "$out" | grep -qx "token=" && echo "$out" | grep -qx "account=acct-login" \
   && ok "憑證 id 是 -：不帶憑證，用 Claude Code 自己登入的帳號接著做" || ng "用本機登入接著做不對：$out"
+rm -f "$W/out.txt"
+out=$(BRAID_ACCOUNT=acct-login BRAID_CREDENTIAL=- BRAID_SESSION=sess-2 BRAID_CWD="$(wslpath -w "$W/中文 資料夾")" BRAID_CLAUDE="$(wslpath -w "$W/no-such-claude.cmd")" BRAID_LABEL='公司' \
+  WSLENV="BRAID_ACCOUNT:BRAID_CREDENTIAL:BRAID_SESSION:BRAID_CWD:BRAID_CLAUDE:BRAID_LABEL${WSLENV:+:$WSLENV}" \
+  ps -File "$(wslpath -w ../mod/tool/windows/resume.ps1)" </dev/null 2>&1)
+echo "$out" | grep -q '找不到 Claude Code 的命令列程式：.*no-such-claude\.cmd。回到 braid 面板再按一次' && [ ! -e "$W/out.txt" ] \
+  && ok "找不到 claude：說回面板再按一次，不啟動任何東西" || ng "找不到 claude 時的處理不對：$out"
 
 echo "######## add-account.ps1"
 cat > "$W/claude-setup.cmd" <<'EOF'
@@ -79,6 +85,15 @@ printf '\r\nnope\r\n\r\n' | BRAID_ACCOUNT="$ID-add2" BRAID_RESULT="$(wslpath -w 
   WSLENV="BRAID_ACCOUNT:BRAID_RESULT:BRAID_CLAUDE${WSLENV:+:$WSLENV}" ps -File "$(wslpath -w ../mod/tool/windows/add-account.ps1)" >/dev/null 2>&1
 [ "$(cat "$res" 2>&1)" = '{"ok":false,"reason":"canceled"}' ] && ok "貼錯再按 Enter：取消" || ng "取消時的結果不對：$(cat "$res" 2>&1)"
 ps -File "$SECRET" get "$ID-add2" >/dev/null 2>&1 && ng "取消了卻存了憑證" || ok "取消時什麼都沒存"
+# 面板交來的 claude 不見了（完整路徑、或裸名稱在 PATH 上找不到）：開頭就講，不收憑證
+for claude in "$(wslpath -w "$W/no-such-claude.cmd")" braid-no-such-claude; do
+  rm -f "$res"
+  out=$(printf '\r\n%s\r\n\r\n' "$TOKEN" | BRAID_ACCOUNT="$ID-add3" BRAID_RESULT="$(wslpath -w "$res")" BRAID_CLAUDE="$claude" \
+    WSLENV="BRAID_ACCOUNT:BRAID_RESULT:BRAID_CLAUDE${WSLENV:+:$WSLENV}" ps -File "$(wslpath -w ../mod/tool/windows/add-account.ps1)" 2>&1)
+  [ "$(cat "$res" 2>&1)" = '{"ok":false,"reason":"no-claude"}' ] && echo "$out" | grep -q '找不到 Claude Code 的命令列程式' && ! echo "$out" | grep -q '接下來會開瀏覽器' \
+    && ok "找不到 claude（${claude##*\\}）：開頭就講、結果檔寫 no-claude" || ng "找不到 claude 時的處理不對：$(cat "$res" 2>&1) / $out"
+  ps -File "$SECRET" get "$ID-add3" >/dev/null 2>&1 && ng "找不到 claude 卻存了憑證"
+done
 
 echo "######## open-wsl.sh"
 # 先用假的 powershell.exe 記下指令，再把同一條指令加上隱藏、等待，真的跑一次：

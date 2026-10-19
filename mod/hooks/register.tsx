@@ -79,7 +79,7 @@ import {
   type Seen,
   type Why,
 } from './model'
-import { newCredentialId, planTerminal, removeFile, removeToolBackup, secretDelete, type TerminalPlan } from './terminal'
+import { claudeInstall, claudeLookup, newCredentialId, newestFirst, planTerminal, removeFile, removeToolBackup, secretDelete, type TerminalPlan } from './terminal'
 
 type $ = EngineInterface
 // Svg：桌面 app 與手機畫成圖；終端機（ui.Svg 是 undefined）照舊用文字
@@ -168,8 +168,42 @@ async function tmpDir($: $, platform: BraidPlatform): Promise<string> {
   return '/tmp'
 }
 
-async function claudePath($: $): Promise<string> {
-  return (await $.env.get('CLAUDE_CODE_EXECPATH')) ?? 'claude'
+/**
+ * claude 執行檔的完整路徑；哪裡都找不到是 null。新增帳號、接著做、更新都從這裡拿，不各自猜。
+ * 找的順序在 terminal.ts 的 claudeLookup：跑這個對話的那支、PATH、常見安裝位置、桌面 app 自帶的（新版先）。
+ */
+async function findClaude($: $, platform: BraidPlatform): Promise<string | null> {
+  const where = claudeLookup(platform, {
+    execPath: await $.env.get('CLAUDE_CODE_EXECPATH'),
+    path: await $.env.get('PATH'),
+    home: platform === 'windows' ? await $.env.get('USERPROFILE') : await $.env.get('HOME'),
+    appData: platform === 'windows' ? await $.env.get('APPDATA') : undefined,
+  })
+  const exists = (path: string) => $.fs.exists(path).catch(() => false)
+  const list = (dir: string) => $.fs.list(dir).catch(() => [])
+  for (const file of where.files) if (await exists(file)) return file
+  const sep = platform === 'windows' ? '\\' : '/'
+  for (const { dir, exe } of where.bundles) {
+    const entries = await list(dir)
+    for (const name of newestFirst(entries.map(e => e.name))) {
+      const at = `${dir}${sep}${name}`
+      if (exe === null) {
+        if (entries.find(e => e.name === name)?.kind === 'file') return at
+        continue
+      }
+      if (await exists(`${at}${sep}${exe}`)) return `${at}${sep}${exe}`
+      for (const sub of await list(at)) {
+        if (sub.kind === 'dir' && (await exists(`${at}${sep}${sub.name}${sep}${exe}`))) return `${at}${sep}${sub.name}${sep}${exe}`
+      }
+    }
+  }
+  return null
+}
+
+/** 找不到 claude 時怎麼跟使用者說：做什麼要用到它、在哪裡執行哪一行裝。 */
+function noClaudeText(platform: BraidPlatform, need: string): { text: string; command: string } {
+  const { shell, command } = claudeInstall(platform)
+  return { text: `這台電腦找不到 Claude Code 的命令列程式（claude），${need}。請在${shell}執行下面這行安裝：`, command }
 }
 
 /** 當地與 UTC 差幾分鐘：用 date 問系統（外掛的執行環境不一定知道時區），Windows 用 JS 的。 */
@@ -582,7 +616,13 @@ async function checkUpdate($: $): Promise<void> {
 async function runUpdate($: $): Promise<void> {
   const set = (step: BraidUpdate['step'], message: string | null) => update($, updateAtom, u => (u ? { ...u, step, message } : u))
   await set('running', '更新中…')
-  const claude = await claudePath($)
+  const platform = (await read($, platformAtom)) ?? 'other'
+  const claude = await findClaude($, platform)
+  if (!claude) {
+    const missing = noClaudeText(platform, '沒辦法在這裡更新')
+    await set('failed', `${missing.text}${missing.command}；或在 /plugin 裡更新 braid。`)
+    return
+  }
   for (const argv of [[claude, 'plugin', 'marketplace', 'update', MARKETPLACE], [claude, 'plugin', 'update', `braid@${MARKETPLACE}`]]) {
     try {
       const r = await $.process.run(argv, { timeoutMs: 180_000 })
@@ -655,11 +695,17 @@ async function startAdd($: $): Promise<void> {
     return
   }
   const platform = (await read($, platformAtom)) ?? 'other'
+  // 找不到就不開視窗：不要讓使用者準備好登入才在視窗裡看到失敗
+  const claude = await findClaude($, platform)
+  if (!claude) {
+    await update($, addAtom, () => noClaudeAdd(platform))
+    return
+  }
   const id = newCredentialId(Math.random)
   const tmp = await tmpDir($, platform)
   const sep = platform === 'windows' ? '\\' : '/'
   const resultPath = `${tmp.replace(/[\\/]+$/, '')}${sep}braid-add-${id}.json`
-  const plan = planTerminal(platform, $.plugin.root, { kind: 'add', credentialId: id, result: resultPath, claude: await claudePath($) }, tmp)
+  const plan = planTerminal(platform, $.plugin.root, { kind: 'add', credentialId: id, result: resultPath, claude }, tmp)
   const ran = await runPlan($, plan)
   if (ran === 'manual' && 'steps' in plan) {
     await $.ui.copy({ text: plan.manual ?? '' })
@@ -671,6 +717,11 @@ async function startAdd($: $): Promise<void> {
   const startedAt = await $.clock.now()
   await update($, addAtom, () => ({ step: 'waiting' as const, id, resultPath, startedAt }))
   pollAdd($, id, resultPath, startedAt)
+}
+
+function noClaudeAdd(platform: BraidPlatform): BraidAdd {
+  const { text, command } = noClaudeText(platform, '新增帳號要用它開瀏覽器登入')
+  return { step: 'failed', reason: text, command }
 }
 
 function pollAdd($: $, id: string, resultPath: string, startedAt: number): void {
@@ -707,6 +758,9 @@ function pollAdd($: $, id: string, resultPath: string, startedAt: number): void 
       // 名稱欄留空、只當提示：沒填就用預設（併進既有帳號時沿用它原本的名稱），不會蓋掉使用者取過的名字
       await update($, addFormAtom, () => ({ label: '', email: '', org: '' }))
       await update($, addAtom, () => ({ step: 'confirm' as const, id, credential: backend, orgId: isOrgId(result.orgId) ? result.orgId : null }))
+    } else if (result.reason === 'no-claude') {
+      const platform = (await read($, platformAtom)) ?? 'other'
+      await update($, addAtom, () => noClaudeAdd(platform))
     } else {
       const why = result.reason === 'canceled' ? '在登入視窗取消了。' : result.reason === 'store-failed' ? '憑證存不進鑰匙圈。' : '登入視窗沒有完成。'
       await update($, addAtom, () => ({ step: 'failed' as const, reason: `${why}可以再試一次。` }))
@@ -800,6 +854,13 @@ async function handoff($: $, id: string): Promise<void> {
   // braid 有憑證就帶憑證；CLI 自己 /login 的帳號不帶（憑證 id 寫「-」，腳本直接開 claude）
   const credentialId = account.credential && account.credentialId ? account.credentialId : '-'
   const platform = (await read($, platformAtom)) ?? 'other'
+  const claude = await findClaude($, platform)
+  if (!claude) {
+    const missing = noClaudeText(platform, '沒辦法開新視窗接著做')
+    await $.ui.copy({ text: missing.command })
+    $.ui.toast(`braid：${missing.text}${missing.command}（已複製）`)
+    return
+  }
   const plan = planTerminal(
     platform,
     $.plugin.root,
@@ -809,7 +870,7 @@ async function handoff($: $, id: string): Promise<void> {
       credentialId,
       session: await $.session.id(),
       cwd: await $.session.cwd(),
-      claude: await claudePath($),
+      claude,
       label: account.label,
     },
     await tmpDir($, platform),
@@ -1310,7 +1371,11 @@ async function drawAdd($: $, ui: UI) {
     return (
       <Box key="add-msg" flexDirection="column">
         <Text color="warning">{add.reason}</Text>
+        {add.step === 'failed' && add.command && <Text key="add-cmd">{add.command}</Text>}
         <Box flexDirection="row" gap={1}>
+          {add.step === 'failed' && add.command && (
+            <Button key="add-copy" label="複製安裝指令" onPress={() => $.ui.copy({ text: add.command ?? '' })} />
+          )}
           {add.step === 'failed' && <Button key="add-retry" label="再試一次" onPress={() => startAdd($)} />}
           <Button key="add-close" label="知道了" onPress={() => update($, addAtom, () => null)} />
         </Box>

@@ -39,7 +39,7 @@ import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo, type SessionSpec } 
 import { accountCard, backupTiles, fit, header, initial, ownerHero, rankRow, slotOf, switchHero, syncFlow, useIcon } from '../hooks/visual'
 import { ANY, cleanFolder, draftGroups, normalizePolicy, projectOf, remoteKey, riskOf, ruleFor, setRule, sideOf, verdictFor } from '../hooks/policy'
 import { isNewPage, parseIndex, projectSlug, titleOf, urlIn } from '../hooks/pages'
-import { newCredentialId, planTerminal, removeFile, removeToolBackup, secretDelete, wrapperText } from '../hooks/terminal'
+import { claudeInstall, claudeLookup, newCredentialId, newestFirst, planTerminal, removeFile, removeToolBackup, secretDelete, wrapperText } from '../hooks/terminal'
 
 // 2026-10-16 14:00（UTC+8）
 const NOW = Date.parse('2026-10-16T06:00:00Z')
@@ -387,6 +387,48 @@ describe('開新視窗跑帳號腳本', () => {
     expect(newCredentialId(() => (i++ % 16) / 16)).toBe('tok-01234567')
     expect(removeFile('wsl', '/tmp/braid-add-tok-1.json')).toEqual(['rm', '-f', '--', '/tmp/braid-add-tok-1.json'])
     expect(removeFile('windows', "C:\\T\\o'k.json")).toEqual(['powershell.exe', '-NoProfile', '-Command', "Remove-Item -LiteralPath 'C:\\T\\o''k.json' -Force -ErrorAction SilentlyContinue"])
+  })
+})
+
+describe('找 claude 執行檔', () => {
+  test('Windows：跑這個對話的那支 → PATH（exe 先於 npm 的 cmd）→ 原生安裝 → npm → 桌面 app 自帶的', async () => {
+    const roaming = 'C:\\Users\\u\\AppData\\Roaming'
+    expect(claudeLookup('windows', { execPath: 'C:\\A\\claude.exe', path: 'C:\\Windows;"C:\\npm dir\\";;', home: 'C:\\Users\\u', appData: roaming })).toEqual({
+      files: [
+        'C:\\A\\claude.exe',
+        'C:\\Windows\\claude.exe',
+        'C:\\Windows\\claude.cmd',
+        'C:\\npm dir\\claude.exe',
+        'C:\\npm dir\\claude.cmd',
+        'C:\\Users\\u\\.local\\bin\\claude.exe',
+        `${roaming}\\npm\\claude.cmd`,
+      ],
+      bundles: [{ dir: `${roaming}\\Claude\\claude-code`, exe: 'claude.exe' }],
+    })
+  })
+
+  test('WSL：PATH 裡 /mnt/ 底下的是 Windows 的 claude，不算；桌面 app 開的對話用的在 ccd-cli', async () => {
+    const where = claudeLookup('wsl', { path: '/usr/bin:/mnt/c/Users/u/AppData/Roaming/npm:/home/u/.local/bin', home: '/home/u' })
+    expect(where.files).toEqual(['/usr/bin/claude', '/home/u/.local/bin/claude', '/home/u/.claude/local/claude', '/opt/homebrew/bin/claude', '/usr/local/bin/claude'])
+    expect(where.bundles).toEqual([{ dir: '/home/u/.claude/remote/ccd-cli', exe: null }])
+  })
+
+  test('npm 安裝時 CLAUDE_CODE_EXECPATH 是 node：不拿來跑 claude 的指令', async () => {
+    expect(claudeLookup('other', { execPath: '/usr/local/bin/node', home: '/h' }).files[0]).toBe('/h/.local/bin/claude')
+    expect(claudeLookup('windows', { execPath: 'C:\\nodejs\\NODE.EXE' }).files).toEqual([])
+  })
+
+  test('macOS：桌面 app 自帶的在 Application Support', async () => {
+    expect(claudeLookup('mac', { home: '/Users/u' }).bundles[0]).toEqual({ dir: '/Users/u/Library/Application Support/Claude/claude-code', exe: 'claude' })
+  })
+
+  test('版本資料夾由新到舊：看數字不看字串（2.1.299 比 2.1.30 新），不像版本的排最後', async () => {
+    expect(newestFirst(['2.1.30', 'junk', '2.1.299-686c67ec1014', '2.1.293', '10.0.0'])).toEqual(['10.0.0', '2.1.299-686c67ec1014', '2.1.293', '2.1.30', 'junk'])
+  })
+
+  test('真的沒裝：給官方安裝程式的那一行', async () => {
+    expect(claudeInstall('windows')).toEqual({ shell: 'PowerShell', command: 'irm https://claude.ai/install.ps1 | iex' })
+    expect(claudeInstall('wsl').command).toBe('curl -fsSL https://claude.ai/install.sh | bash')
   })
 })
 

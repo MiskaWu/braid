@@ -24,7 +24,7 @@ if [ "$id" != - ]; then
     || fail "找不到「$label」的登入憑證。請在 Claude 輸入 /braid，到帳號頁重新新增這個帳號。"
 fi
 cd "$cwd" 2>/dev/null || fail "找不到工作資料夾：$cwd"
-command -v "$claude" >/dev/null 2>&1 || fail "找不到 Claude Code：$claude"
+command -v "$claude" >/dev/null 2>&1 || fail "找不到 Claude Code 的命令列程式：$claude。回到 braid 面板再按一次：面板會重新找，真的沒裝會給安裝指令。"
 
 # 從 Claude 裡開的視窗可能帶著上一個對話的變數（主要是 Linux 的終端機程式會繼承），清掉以免新的對話認錯身分。
 # 桌面 app 會把 ANTHROPIC_BASE_URL 指向自己的代理，只有在那種情況才一起清。

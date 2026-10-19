@@ -24,7 +24,7 @@ mod/                              plugin 本體（從 marketplace 安裝時只�
   hooks/register.tsx              指令、面板四頁、輸入框上方的提示、交接後的防呆；所有 $ 呼叫都在這個檔
   hooks/model.ts                  純邏輯：帳號、用量、門檻、換帳號規則、同步範圍（不碰 $）
   hooks/launch.ts                 遷移工具的參數與開視窗的方式（純函式）
-  hooks/terminal.ts               帳號腳本（接著做、新增帳號）開新視窗的方式（純函式）
+  hooks/terminal.ts               帳號腳本（接著做、新增帳號）開新視窗的方式、去哪裡找 claude（純函式）
   hooks/desktop.ts                讀桌面 app 的側欄資料與備份（收一組讀檔函式，不收 $）
   hooks/mirror.ts                 自動同步的核心：把側欄紀錄複製到沒登入的帳號（收一組讀寫檔函式，不收 $）
   hooks/visual.ts                 桌面版面板的圖（頁首、帳號卡、用量條、切換總覽與名次列、同步卡、歸屬總覽、用法插圖）：給資料回 SVG 字串的純函式
@@ -145,6 +145,13 @@ tests/                            工具的測試（Node＋classic-level 造資�
   設計稿先在暫存資料夾用產生器輸出拼 462px 寬的假面板、Playwright 深淺色截圖看過再接進來。
 - **用量顯示**：狀態列（`$.ui.status`）只能放文字，寫 5 小時與 7 天；桌面版另外在輸入框下方那行（`PromptHint`）
   先拿 `next(e)` 畫好的 app 提示，再在旁邊接 `usageStrip` 的 SVG 量表，不蓋掉 app 自己的提示。
+- **找 claude 只有一個地方**：新增帳號、接著做、面板內更新都經 `register.tsx` 的 `findClaude`（找的順序在 `terminal.ts`
+  的 `claudeLookup`：跑這個對話的那支、PATH、常見安裝位置、桌面 app 自帶的、新版先），交給視窗的一律是完整路徑。
+  只靠 `CLAUDE_CODE_EXECPATH` 不夠：2026-10-19 有人在只裝桌面 app 的 Windows 上，面板拿不到這個變數、交了裸的 `claude`，
+  按了 Enter 才看到「無法辨識 'claude' 詞彙」。WSL 開的視窗是 `wsl.exe -e bash`、不讀 `.bashrc`，裸名稱也常找不到。
+  桌面 app 自帶的 claude 可以單獨跑（Windows 在 `%APPDATA%\Claude\claude-code\<版本>\<雜湊>\claude.exe`，
+  WSL 在 `~/.claude/remote/ccd-cli/<版本>`）。npm 安裝時 `CLAUDE_CODE_EXECPATH` 是 node，不拿來用。
+  都找不到就不開視窗，面板給官方安裝指令（`claudeInstall`）；腳本開頭也再確認一次，不見了就寫結果檔 `no-claude`。
 - **更新**：官方是 `/plugin` 裡打開 marketplace 的自動更新（第三方預設關，`marketplace.json` 不能替使用者開）。
   braid 另外自己查 GitHub 上 `mod/.claude-plugin/plugin.json` 的版本，按鈕照官方兩步更新後用
   `$.command.run({ command: 'reload-plugins' })` 重新載入。改 repo 位置或 marketplace 名稱要改 `register.tsx` 的 `LATEST_URL`、`MARKETPLACE`。

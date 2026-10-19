@@ -2,7 +2,7 @@
 # 測 mod/tool/cli 的帳號腳本（macOS、Linux、WSL 共用）：用假的 claude 頂替，不會真的登入或呼叫模型。
 #   secret.sh：憑證存取（檔案模式；鑰匙圈只能在有桌面的機器上手動驗）
 #   resume.sh：憑證經由檔案描述元交出去、不在環境變數裡；上一個對話的變數清掉；路徑裡的引號原樣送到
-#   add-account.sh：貼上的憑證存起來，結果檔只說成功與否，不含憑證
+#   add-account.sh：貼上的憑證存起來，結果檔只說成功與否，不含憑證；找不到 claude 時先講，不收憑證
 #   open-linux.sh：沒有圖形桌面就結束碼 3；有就用找得到的終端機程式開
 set -uo pipefail
 cd "$(dirname "$0")"
@@ -51,6 +51,8 @@ echo "$out" | grep -qx "leftover=" && ok "上一個對話與桌面 app 代理的
 [ ! -e "$wrapper" ] && ok "一次性的小腳本執行後刪掉自己" || ng "小腳本還在"
 out=$(bash "$CLI/resume.sh" tok-404 sess-1 "$T" "$T/bin/claude" 個人 </dev/null 2>&1); rc=$?
 [ $rc = 1 ] && echo "$out" | grep -q '找不到「個人」的登入憑證' && ok "沒有憑證：說明怎麼做，不啟動 claude" || ng "沒憑證時的處理不對（$rc）：$out"
+out=$(bash "$CLI/resume.sh" - sess-1 "$T" "$T/bin/no-such-claude" 個人 </dev/null 2>&1); rc=$?
+[ $rc = 1 ] && echo "$out" | grep -q '找不到 Claude Code 的命令列程式：.*no-such-claude。回到 braid 面板再按一次' && ok "找不到 claude：說回面板再按一次" || ng "找不到 claude 時的處理不對（$rc）：$out"
 out=$(CLAUDE_CODE_OAUTH_TOKEN=stale bash "$CLI/resume.sh" - sess-2 "$T" "$T/bin/claude" 公司 acct-login </dev/null 2>/dev/null)
 echo "$out" | grep -qx "args=--resume sess-2 --fork-session" && echo "$out" | grep -qx "fdvar=" && echo "$out" | grep -qx "envtoken=none" \
   && echo "$out" | grep -qx "account=acct-login" && ok "憑證 id 是 -：不帶憑證，用 Claude Code 自己登入的帳號接著做" || ng "用本機登入接著做不對：$out"
@@ -82,6 +84,14 @@ echo "$out" | grep -q '假的 setup-token' && ok "先跑 claude setup-token" || 
 rm -f "$res"
 printf '\nnope\n\n' | BRAID_API_BASE="$BASE" bash "$CLI/add-account.sh" tok-8 "$res" "$T/bin/claude-setup" >/dev/null 2>&1
 [ "$(cat "$res")" = '{"ok":false,"reason":"canceled"}' ] && ! "$CLI/secret.sh" get tok-8 >/dev/null 2>&1 && ok "貼錯再按 Enter：取消，什麼都沒存" || ng "取消時的結果不對：$(cat "$res" 2>&1)"
+# 面板交來的 claude 不見了（完整路徑、或裸名稱在 PATH 上找不到）：開頭就講，不要使用者準備登入，也不收憑證
+for claude in "$T/bin/no-such-claude" braid-no-such-claude; do
+  rm -f "$res"
+  out=$(printf '\n%s\n\n' "$TOKEN" | bash "$CLI/add-account.sh" tok-5 "$res" "$claude" 2>&1); rc=$?
+  [ $rc = 1 ] && [ "$(cat "$res")" = '{"ok":false,"reason":"no-claude"}' ] && echo "$out" | grep -q "找不到 Claude Code 的命令列程式：$claude" \
+    && ! echo "$out" | grep -q '接下來會開瀏覽器' && ! "$CLI/secret.sh" get tok-5 >/dev/null 2>&1 \
+    && ok "找不到 claude（$(basename "$claude")）：開頭就講、結果檔寫 no-claude，不收憑證" || ng "找不到 claude 時的處理不對（$rc）：$(cat "$res" 2>&1) / $out"
+done
 
 echo "######## org.sh"
 [ "$(BRAID_API_BASE="$BASE" bash "$CLI/org.sh" tok-7)" = 0000aaaa-1111-2222-3333-444455556666 ] && ok "只印出組織 id" || ng "org.sh 輸出不對"

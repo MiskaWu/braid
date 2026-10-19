@@ -89,6 +89,8 @@ function world(on: On, opts: Opts = {}) {
     [`${BACKUPS}/20261016-140211/manifest.json`]: '{}',
     // 桌面 app 現在登入的帳號
     [`${APP}/config.json`]: JSON.stringify({ lastKnownAccountUuid: W }),
+    // 跑這個對話的 claude（CLAUDE_CODE_EXECPATH）
+    '/opt/claude': '',
     ...opts.files,
   }
   const mtimes: Record<string, number> = { ...opts.mtimes }
@@ -313,6 +315,17 @@ describe('帳號與用量', () => {
     await ui.unmount()
   })
 
+  test('哪裡都找不到 claude：不開視窗，提示並複製安裝指令', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL, 'account:tok-00000002': WORK2 }, env: { CLAUDE_CODE_EXECPATH: '', PATH: '/usr/bin' } })
+    await $.session.start(START)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    await ui.press({ key: 'go-tok-00000002' })
+    expect(w.runs.some(r => /open-wsl\.sh$/.test(r.argv[1] ?? ''))).toBe(false)
+    expect(w.toasts.at(-1)).toBe('braid：這台電腦找不到 Claude Code 的命令列程式（claude），沒辦法開新視窗接著做。請在終端機執行下面這行安裝：curl -fsSL https://claude.ai/install.sh | bash（已複製）')
+    expect(w.copies.at(-1)).toBe('curl -fsSL https://claude.ai/install.sh | bash')
+    await ui.unmount()
+  })
+
   test('先用 braid 新增過憑證的帳號，之後在桌面 app 換成它：併成一筆，名稱、顏色、憑證、切換順序都接過去', async ($, on) => {
     const tok = acct('tok-00000007', { email: 'me@gmail.example', orgId: OP, label: 'MiskaWu', color: '#8E6BD8', source: 'token', credential: 'file', credentialId: 'tok-00000007' })
     const w = world(on, {
@@ -481,6 +494,68 @@ describe('新增帳號', () => {
     expect([saved.label, saved.orgId, saved.credential, saved.credentialId, saved.source]).toEqual(['公司 2', OW, 'file', id, 'token'])
     expect(JSON.stringify(saved)).not.toMatch(/sk-ant/)
     expect(await shows(ui, /已新增「公司 2」/)).toBe(true)
+    await ui.unmount()
+  })
+
+  // 只裝桌面 app 的電腦：PATH 上沒有 claude，CLAUDE_CODE_EXECPATH 也不一定有。2026-10-19 有人在 Windows 按了 Enter 才看到
+  // 「無法辨識 'claude' 詞彙」——面板只看那個變數，沒有就交裸的 claude 給視窗。
+  const NO_EXEC = { CLAUDE_CODE_EXECPATH: '', PATH: '/usr/bin:/mnt/c/Users/u/AppData/Roaming/npm' }
+  const CCD = '/home/u/.claude/remote/ccd-cli'
+
+  test('PATH 上沒有 claude：用桌面 app 自帶的最新那份，交完整路徑；Windows 那邊的 claude 不算', async ($, on) => {
+    const w = world(on, {
+      store: { uses: USES_ALL },
+      env: NO_EXEC,
+      files: { '/mnt/c/Users/u/AppData/Roaming/npm/claude': '', [`${CCD}/2.1.30`]: '', [`${CCD}/2.1.299-686c67ec1014`]: '', [`${CCD}/2.1.293`]: '' },
+    })
+    await $.session.start(START)
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    await ui.press({ key: 'add' })
+    const wrapper = w.runs.at(-1)?.argv[2] ?? ''
+    expect(w.files[wrapper]).toMatch(new RegExp(`add-account\\.sh' 'tok-[0-9a-f]{8}' '[^']+' '${CCD}/2\\.1\\.299-686c67ec1014'\\n$`))
+    expect(await shows(ui, /已開登入視窗/)).toBe(true)
+    await ui.unmount()
+  })
+
+  test('macOS：桌面 app 自帶的在 Application Support/Claude/claude-code/<版本>/<雜湊>/claude', async ($, on) => {
+    const bundled = '/Users/u/Library/Application Support/Claude/claude-code/2.1.299/f0584be0fbaf/claude'
+    const w = world(on, { store: { uses: USES_ALL }, uname: 'Darwin', env: { ...NO_EXEC, WSL_DISTRO_NAME: '', HOME: '/Users/u', TMPDIR: '/var/T/' }, files: { [bundled]: '' } })
+    await $.session.start(START)
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    await ui.press({ key: 'add' })
+    const wrapper = Object.keys(w.files).find(f => /^\/var\/T\/braid-add-tok-[0-9a-f]{8}\.command$/.test(f)) ?? ''
+    expect(w.files[wrapper]).toContain(`'${bundled}'`)
+    await ui.unmount()
+  })
+
+  test('哪裡都找不到 claude：不開視窗，說要先裝，給安裝指令與複製鈕', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL }, env: NO_EXEC })
+    await $.session.start(START)
+    for (const surface of SURFACES) {
+      const ui = await $.ui.mount({ ...PANE, surface })
+      await ui.press({ key: 'add' })
+      expect(await shows(ui, /這台電腦找不到 Claude Code 的命令列程式（claude），新增帳號要用它開瀏覽器登入。請在終端機執行下面這行安裝/)).toBe(true)
+      expect(await shows(ui, /^curl -fsSL https:\/\/claude\.ai\/install\.sh \| bash$/)).toBe(true)
+      await ui.press({ key: 'add-copy' })
+      expect(w.copies.at(-1)).toBe('curl -fsSL https://claude.ai/install.sh | bash')
+      expect(await ui.find({ key: 'add-retry' })).toBeDefined()
+      await ui.press({ key: 'add-close' })
+      await ui.unmount()
+    }
+    expect(w.runs.some(r => /open-wsl\.sh$/.test(r.argv[1] ?? ''))).toBe(false)
+    expect(Object.keys(w.files).some(f => f.startsWith('/tmp/braid-add-'))).toBe(false)
+  })
+
+  test('登入視窗回報找不到 claude（面板找到之後才不見）：一樣給安裝指令', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL } })
+    await $.session.start(START)
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    await ui.press({ key: 'add' })
+    const id = /braid-add-(tok-[0-9a-f]{8})\.sh$/.exec(w.runs.at(-1)?.argv[2] ?? '')?.[1] ?? ''
+    w.files[`/tmp/braid-add-${id}.json`] = '{"ok":false,"reason":"no-claude"}'
+    await w.clock.advance(1500)
+    expect(await shows(ui, /找不到 Claude Code 的命令列程式/)).toBe(true)
+    expect(await ui.find({ key: 'add-copy' })).toBeDefined()
     await ui.unmount()
   })
 
@@ -1138,6 +1213,19 @@ describe('braid 的新版', () => {
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
     await ui.press({ key: 'upd-go' })
     expect(await shows(ui, /更新失敗（network unreachable）。可以在終端機執行：claude plugin marketplace update braid && claude plugin update braid@braid/)).toBe(true)
+    expect(w.reloads).toEqual([])
+    await ui.unmount()
+  })
+
+  test('找不到 claude：說要先裝或改用 /plugin，不跑、不重新載入', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL }, latest: '0.4.0', env: { CLAUDE_CODE_EXECPATH: '', PATH: '/usr/bin' } })
+    await $.session.start(START)
+    await w.clock.advance(5_000)
+    await $.command.run(RUN())
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    await ui.press({ key: 'upd-go' })
+    expect(await shows(ui, /找不到 Claude Code 的命令列程式（claude），沒辦法在這裡更新。.*；或在 \/plugin 裡更新 braid。/)).toBe(true)
+    expect(w.runs.some(r => r.argv[1] === 'plugin')).toBe(false)
     expect(w.reloads).toEqual([])
     await ui.unmount()
   })

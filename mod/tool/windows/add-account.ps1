@@ -35,6 +35,11 @@ function Read-Line([string]$Prompt, [switch]$Secret) {
     $secure = Read-Host $Prompt -AsSecureString
     return [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
 }
+# 面板交來的是它找到的完整路徑；Get-Command 只用在裸名稱（路徑裡的 [ ] 會被當萬用字元）
+function Test-Claude([string]$Path) {
+    if ([IO.Path]::IsPathRooted($Path)) { return Test-Path -LiteralPath $Path -PathType Leaf }
+    return [bool](Get-Command $Path -CommandType Application -ErrorAction SilentlyContinue)
+}
 function Cancel {
     Finish '{"ok":false,"reason":"canceled"}'
     Write-Host ''
@@ -45,6 +50,14 @@ function Cancel {
 try {
     Write-Host '== braid：新增帳號 ==' -ForegroundColor Cyan
     Write-Host ''
+    # 開視窗之後才不見（移除了、桌面 app 更新換掉舊版）就先講，不要等使用者準備好登入
+    if (-not (Test-Claude $claude)) {
+        Finish '{"ok":false,"reason":"no-claude"}'
+        Write-Host "找不到 Claude Code 的命令列程式：$claude" -ForegroundColor Yellow
+        Write-Host '回到 braid 面板再按一次：面板會重新找，真的沒裝會給安裝指令。'
+        [void](Read-Line '按 Enter 關閉')
+        exit 1
+    }
     Write-Host '接下來會開瀏覽器，請登入「要新增的那個帳號」。'
     Write-Host '你現在在 Claude 裡登入的帳號不會被登出。'
     Write-Host ''

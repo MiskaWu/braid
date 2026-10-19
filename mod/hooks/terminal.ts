@@ -107,3 +107,79 @@ export function newCredentialId(random: () => number): string {
   for (let i = 0; i < 8; i++) hex += Math.floor(random() * 16).toString(16)
   return `tok-${hex}`
 }
+
+// ── 找 claude 執行檔 ─────────────────────────────────────────
+// 新增帳號、接著做、面板內更新都要跑 claude。開出去的視窗不一定有使用者平常的 PATH
+// （WSL 是 wsl.exe -e bash，不讀 .bashrc），所以一律交完整路徑。
+// 只裝桌面 app 的電腦 PATH 上沒有 claude，但桌面 app 自己帶了一份，可以單獨執行。
+
+/** 去哪裡找：files 依序試；bundles 是版本資料夾的上一層，新版先試。 */
+export type ClaudeLookup = {
+  files: string[]
+  /** exe 是 null：版本那一項本身就是執行檔（WSL 的 ~/.claude/remote/ccd-cli/<版本>）；
+   *  否則找 <版本>/<exe> 與再下一層的 <版本>/<任意>/<exe>（Windows 是 <版本>\<雜湊>\claude.exe）。 */
+  bundles: { dir: string; exe: string | null }[]
+}
+
+export type ClaudeHints = {
+  /** CLAUDE_CODE_EXECPATH：跑這個對話的 claude；npm 安裝時是 node，不能拿來用 */
+  execPath?: string
+  path?: string
+  /** macOS、Linux 的 HOME；Windows 的 USERPROFILE */
+  home?: string
+  /** Windows 的 APPDATA */
+  appData?: string
+}
+
+export function claudeLookup(platform: BraidPlatform, hints: ClaudeHints): ClaudeLookup {
+  const win = platform === 'windows'
+  const sep = win ? '\\' : '/'
+  const join = (dir: string, name: string) => `${dir.replace(/[\\/]+$/, '')}${sep}${name}`
+  const files: string[] = []
+  const exec = hints.execPath?.trim()
+  if (exec && !/^(node|bun|deno)(\.exe)?$/i.test(exec.split(/[\\/]/).pop() ?? '')) files.push(exec)
+  const names = win ? ['claude.exe', 'claude.cmd'] : ['claude']
+  for (const dir of (hints.path ?? '').split(win ? ';' : ':')) {
+    const d = dir.trim().replace(/^"(.*)"$/, '$1')
+    // WSL 的 PATH 帶著 Windows 的資料夾；那邊的 claude 是 Windows 的，接不上 WSL 裡的對話
+    if (!d || (platform === 'wsl' && d.startsWith('/mnt/'))) continue
+    for (const n of names) files.push(join(d, n))
+  }
+  const home = hints.home
+  const bundles: ClaudeLookup['bundles'] = []
+  if (win) {
+    if (home) files.push(join(home, '.local\\bin\\claude.exe'))
+    if (hints.appData) {
+      files.push(join(hints.appData, 'npm\\claude.cmd'))
+      bundles.push({ dir: join(hints.appData, 'Claude\\claude-code'), exe: 'claude.exe' })
+    }
+  } else {
+    if (home) files.push(join(home, '.local/bin/claude'), join(home, '.claude/local/claude'))
+    files.push('/opt/homebrew/bin/claude', '/usr/local/bin/claude')
+    if (home && platform === 'mac') bundles.push({ dir: join(home, 'Library/Application Support/Claude/claude-code'), exe: 'claude' })
+    if (home) bundles.push({ dir: join(home, '.claude/remote/ccd-cli'), exe: null })
+  }
+  return { files: [...new Set(files)], bundles }
+}
+
+/** 版本資料夾由新到舊（2.1.299-686c67ec1014 看前面的數字）；不像版本的排最後。 */
+export function newestFirst(names: string[]): string[] {
+  const parts = (n: string) => /^\d+(\.\d+)*/.exec(n)?.[0].split('.').map(Number) ?? null
+  return [...names].sort((a, b) => {
+    const x = parts(a)
+    const y = parts(b)
+    if (!x || !y) return x ? -1 : y ? 1 : 0
+    for (let i = 0; i < Math.max(x.length, y.length); i++) {
+      const d = (y[i] ?? 0) - (x[i] ?? 0)
+      if (d) return d
+    }
+    return 0
+  })
+}
+
+/** 真的找不到 claude 時給使用者的安裝指令（官方的安裝程式）。 */
+export function claudeInstall(platform: BraidPlatform): { shell: string; command: string } {
+  return platform === 'windows'
+    ? { shell: 'PowerShell', command: 'irm https://claude.ai/install.ps1 | iex' }
+    : { shell: '終端機', command: 'curl -fsSL https://claude.ai/install.sh | bash' }
+}

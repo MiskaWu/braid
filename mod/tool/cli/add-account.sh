@@ -26,6 +26,14 @@ trap cancel INT HUP TERM
 
 echo "== braid：新增帳號 =="
 echo
+# 面板交來的是它找到的完整路徑；開視窗之後才不見（移除了、桌面 app 更新換掉舊版）就先講，不要等使用者準備好登入
+if ! command -v "$claude" >/dev/null 2>&1; then
+  finish '{"ok":false,"reason":"no-claude"}'
+  echo "找不到 Claude Code 的命令列程式：$claude"
+  echo "回到 braid 面板再按一次：面板會重新找，真的沒裝會給安裝指令。"
+  read -r -p '按 Enter 關閉…' _ || true
+  exit 1
+fi
 echo "接下來會開瀏覽器，請登入「要新增的那個帳號」。"
 echo "你現在在 Claude 裡登入的帳號不會被登出。"
 echo

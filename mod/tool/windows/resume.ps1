@@ -15,10 +15,16 @@
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 
+# 面板交來的是它找到的完整路徑；Get-Command 只用在裸名稱（路徑裡的 [ ] 會被當萬用字元）
+function Test-Claude([string]$Path) {
+    if ([IO.Path]::IsPathRooted($Path)) { return Test-Path -LiteralPath $Path -PathType Leaf }
+    return [bool](Get-Command $Path -CommandType Application -ErrorAction SilentlyContinue)
+}
 function Fail([string]$Message) {
     Write-Host ''
     Write-Host $Message -ForegroundColor Yellow
-    [void](Read-Host '按 Enter 關閉這個視窗')
+    # 標準輸入被導向（自動測試）時 Read-Host 不讀它，會一直等
+    if (-not [Console]::IsInputRedirected) { [void](Read-Host '按 Enter 關閉這個視窗') }
     exit 1
 }
 
@@ -35,6 +41,7 @@ if ($id -ne '-') {
 }
 if (-not (Test-Path -LiteralPath $env:BRAID_CWD)) { Fail "找不到工作資料夾：$($env:BRAID_CWD)" }
 Set-Location -LiteralPath $env:BRAID_CWD
+if (-not (Test-Claude $claude)) { Fail "找不到 Claude Code 的命令列程式：$claude。回到 braid 面板再按一次：面板會重新找，真的沒裝會給安裝指令。" }
 
 # 從 Claude 裡開的視窗會帶著上一個對話的變數，清掉以免新的對話認錯身分。
 # 桌面 app 會把 ANTHROPIC_BASE_URL 指向自己的代理，只有在那種情況才一起清。
