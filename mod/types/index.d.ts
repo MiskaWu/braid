@@ -27,7 +27,7 @@ export type BraidAccount = {
   lastSeen: number
 }
 
-export type BraidUses = { migrate: boolean; switch: boolean; sync: boolean }
+export type BraidUses = { migrate: boolean; switch: boolean; sync: boolean; policy: boolean }
 
 export type BraidSwitch = {
   on: boolean
@@ -37,10 +37,14 @@ export type BraidSwitch = {
   sevenDay: number | null
   /** 換帳號的順序（帳號 id），沒列到的排在後面 */
   order: string[]
-  /** false＝全部資料夾都能換到任何帳號（預設）；true＝restricted 裡的資料夾（含子資料夾）只換同組織的帳號。切回全部時清單留著 */
-  restrict: boolean
-  restricted: string[]
 }
+
+/** 歸屬表的一條：這個資料夾（含子資料夾）歸哪個帳號（帳號 id；「*」＝不分）。 */
+export type BraidRule = { folder: string; owner: string }
+export type BraidPolicy = { rules: BraidRule[] }
+
+/** 這個對話裡「這次就用目前帳號」：只算這一次，不寫回表。 */
+export type BraidOverride = { project: string; account: string }
 
 export type BraidSync = {
   /** 開著就自動同步：桌面 app 現在登入的是其中一個時，它的對話隨時複製到另一個 */
@@ -82,7 +86,7 @@ export type BraidUpdate = {
 /** 備份留多久：同步刪掉的對話備份留幾天、遷移工具的整份備份留最新幾份；null＝一直留著。 */
 export type BraidKeep = { deletedDays: number | null; toolCopies: number | null }
 
-export type BraidTab = 'accounts' | 'switch' | 'sync' | 'migrate'
+export type BraidTab = 'accounts' | 'switch' | 'sync' | 'policy' | 'migrate'
 
 export type BraidPlatform = 'wsl' | 'windows' | 'mac' | 'other'
 
@@ -134,6 +138,22 @@ declare module 'claude-code' {
       mirror: BraidMirror | null
       keep: BraidKeep
       update: BraidUpdate | null
+      policy: BraidPolicy
+      /** CLI 自己 /login 的帳號（~/.claude.json）：braid 沒有它的憑證也能用它接著做 */
+      cliLogin: string | null
+      override: BraidOverride | null
+      /** 要確認風險才接手的帳號（按了第一次，等第二次） */
+      confirming: string | null
+      /** 頁面清單（~/.claude/artifact-sources/index.json）讀進來的樣子 */
+      pages: { pending: number; list: { id: string; title: string; project: string; owner: string | null; url: string | null; status: string }[] } | null
+      /** 歸屬頁「其他資料夾」要歸給誰 */
+      newOwner: string | null
+      /** 這個對話是 braid 用一年期憑證開的（官方只保證 /login 的對話能發布頁面） */
+      viaToken: boolean
+      /** 這個對話裡按過「之後再說」的專案（不再問歸屬） */
+      skipAsk: string | null
+      /** 草稿：依 git 遠端分組的專案資料夾 */
+      draft: { key: string | null; folders: string[] }[] | null
       tz: number
     }
   }

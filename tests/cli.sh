@@ -51,6 +51,9 @@ echo "$out" | grep -qx "leftover=" && ok "上一個對話與桌面 app 代理的
 [ ! -e "$wrapper" ] && ok "一次性的小腳本執行後刪掉自己" || ng "小腳本還在"
 out=$(bash "$CLI/resume.sh" tok-404 sess-1 "$T" "$T/bin/claude" 個人 </dev/null 2>&1); rc=$?
 [ $rc = 1 ] && echo "$out" | grep -q '找不到「個人」的登入憑證' && ok "沒有憑證：說明怎麼做，不啟動 claude" || ng "沒憑證時的處理不對（$rc）：$out"
+out=$(CLAUDE_CODE_OAUTH_TOKEN=stale bash "$CLI/resume.sh" - sess-2 "$T" "$T/bin/claude" 公司 acct-login </dev/null 2>/dev/null)
+echo "$out" | grep -qx "args=--resume sess-2 --fork-session" && echo "$out" | grep -qx "fdvar=" && echo "$out" | grep -qx "envtoken=none" \
+  && echo "$out" | grep -qx "account=acct-login" && ok "憑證 id 是 -：不帶憑證，用 Claude Code 自己登入的帳號接著做" || ng "用本機登入接著做不對：$out"
 
 echo "######## add-account.sh"
 cat > "$T/bin/claude-setup" <<'EOF'

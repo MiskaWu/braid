@@ -16,6 +16,7 @@ import type {
   BraidCredential,
   BraidKeep,
   BraidMirror,
+  BraidPolicy,
   BraidPlatform,
   BraidUpdate,
   BraidSwitch,
@@ -28,9 +29,12 @@ import { backupLabel, desktopPaths, listToolBackups, listTrash, scanDesktop, typ
 import { manualPath, parseDryRun, planLaunch, toolArgs, type ToolRequest } from './launch'
 import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo } from './mirror'
 import { accountCard, syncFlow, usageStrip, type Window } from './visual'
+import { ANY, draftGroups, dropRule, normalizePolicy, projectOf, riskOf, riskText, ruleFor, sameSide, setRule, verdictFor, type FolderRemotes, type Verdict } from './policy'
+import { isNewPage, parseIndex, pendingFor, projectSlug, serializeIndex, titleOf, urlIn, type PageEntry, type PageIndex } from './pages'
 import {
   absorbTokenTwin,
   bandFor,
+  canHandoff,
   candidates,
   classifyOrg,
   DEFAULT_KEEP,
@@ -85,7 +89,7 @@ const PANE = 'braid'
 
 const platformAtom = atom({ plugin: 'braid', key: 'platform' } as const, null)
 const usesAtom = atom({ plugin: 'braid', key: 'uses' } as const, null)
-const draftUsesAtom = atom({ plugin: 'braid', key: 'draftUses' } as const, { migrate: false, switch: false, sync: false })
+const draftUsesAtom = atom({ plugin: 'braid', key: 'draftUses' } as const, { migrate: false, switch: false, sync: false, policy: false })
 const tabAtom = atom({ plugin: 'braid', key: 'tab' } as const, 'accounts')
 const accountsAtom = atom({ plugin: 'braid', key: 'accounts' } as const, {})
 const currentAtom = atom({ plugin: 'braid', key: 'current' } as const, null)
@@ -102,17 +106,27 @@ const snoozeAtom = atom({ plugin: 'braid', key: 'snooze' } as const, null)
 const mirrorAtom = atom({ plugin: 'braid', key: 'mirror' } as const, null)
 const keepAtom = atom({ plugin: 'braid', key: 'keep' } as const, DEFAULT_KEEP)
 const updateAtom = atom({ plugin: 'braid', key: 'update' } as const, null)
+const policyAtom = atom({ plugin: 'braid', key: 'policy' } as const, { rules: [] })
+const cliLoginAtom = atom({ plugin: 'braid', key: 'cliLogin' } as const, null)
+const overrideAtom = atom({ plugin: 'braid', key: 'override' } as const, null)
+const confirmingAtom = atom({ plugin: 'braid', key: 'confirming' } as const, null)
+const pagesAtom = atom({ plugin: 'braid', key: 'pages' } as const, null)
+const draftAtom = atom({ plugin: 'braid', key: 'draft' } as const, null)
+const newOwnerAtom = atom({ plugin: 'braid', key: 'newOwner' } as const, null)
+const skipAskAtom = atom({ plugin: 'braid', key: 'skipAsk' } as const, null)
+const viaTokenAtom = atom({ plugin: 'braid', key: 'viaToken' } as const, false)
 const tzAtom = atom({ plugin: 'braid', key: 'tz' } as const, 0)
 
 // ── 指令 ────────────────────────────────────────────────────
 
-type ActionName = 'migrate' | 'accounts' | 'switch' | 'sync'
+type ActionName = 'migrate' | 'accounts' | 'switch' | 'sync' | 'policy'
 type Action = { name: ActionName; aliases: readonly string[]; usage: string; summary: string }
 
 const ACTIONS: readonly Action[] = [
   { name: 'accounts', aliases: ['帳號'], usage: 'accounts', summary: '打開面板的帳號頁：這台電腦的帳號與用量、新增帳號' },
   { name: 'switch', aliases: ['切換'], usage: 'switch', summary: '打開面板的切換頁：用量快用完時換哪個帳號接著做' },
   { name: 'sync', aliases: ['同步'], usage: 'sync', summary: '打開面板的同步頁：桌面 app 的兩個帳號自動同步對話，額度用完換過去就能接著做' },
+  { name: 'policy', aliases: ['歸屬'], usage: 'policy', summary: '打開面板的歸屬頁：資料夾歸哪個帳號、待發布的頁' },
   {
     name: 'migrate',
     aliases: ['遷移'],
@@ -195,6 +209,19 @@ async function seenNow($: $): Promise<Seen | null> {
   }
 }
 
+/** CLI 自己 /login 的帳號：讀 ~/.claude.json（或 CLAUDE_CONFIG_DIR 底下的）。 */
+async function cliLoginSeen($: $): Promise<Seen | null> {
+  const dir = await $.env.get('CLAUDE_CONFIG_DIR')
+  const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
+  const file = dir ? `${dir}/.claude.json` : home ? `${home}/.claude.json` : null
+  if (!file) return null
+  try {
+    return seenFromClaudeJson(await $.fs.read(file))
+  } catch {
+    return null
+  }
+}
+
 // ── 存取：設定與帳號存在 $.store（跨對話），同時寫進 $.state 讓畫面重畫 ──
 
 async function loadStore($: $): Promise<void> {
@@ -210,6 +237,7 @@ async function loadStore($: $): Promise<void> {
   const snooze = await $.store.get('snooze')
   const mirror = normalizeMirror(await $.store.get('mirror'))
   const keep = normalizeKeep(await $.store.get('keep'))
+  const policy = normalizePolicy(await $.store.get('policy'))
   await update($, usesAtom, () => uses)
   await update($, switchAtom, () => sw)
   await update($, syncAtom, () => sy)
@@ -217,6 +245,13 @@ async function loadStore($: $): Promise<void> {
   await update($, snoozeAtom, () => (typeof snooze === 'string' ? snooze : null))
   await update($, mirrorAtom, () => mirror)
   await update($, keepAtom, () => keep)
+  await update($, policyAtom, () => policy)
+}
+
+async function putPolicy($: $, change: (p: BraidPolicy) => BraidPolicy): Promise<void> {
+  const policy = change(await read($, policyAtom))
+  await $.store.set('policy', policy)
+  await update($, policyAtom, () => policy)
 }
 
 async function putAccount($: $, a: BraidAccount): Promise<void> {
@@ -272,7 +307,9 @@ async function onUsage($: $, rateLimits: readonly RateLimit[]): Promise<void> {
   await refreshStatus($)
   // 快用完了：馬上再同步一次，換過去時連剛剛的對話都在（不在這個事件裡等，讀寫桌面 app 的資料夾要一點時間）
   const now = await $.clock.now()
-  if (bandFor(await read($, accountsAtom), id, usage, await read($, switchAtom), await $.session.cwd(), now, null)) $.clock.after(1, () => runMirror($, 'urgent'))
+  const here = await verdictHere($)
+  const owner = here && (here.kind === 'ok' || here.kind === 'mismatch') ? here.owner : null
+  if (bandFor(await read($, accountsAtom), id, usage, await read($, switchAtom), owner, await read($, cliLoginAtom), now, null)) $.clock.after(1, () => runMirror($, 'urgent'))
 }
 
 /** 狀態列：開了用量切換才顯示目前帳號與用量（5 小時、7 天）。 */
@@ -348,12 +385,14 @@ async function openPane($: $, tab?: BraidTab): Promise<void> {
   await $.ui.open({ id: PANE, title: 'braid', columns: 64 })
   const shown = tab ?? (await read($, tabAtom))
   if (shown !== 'accounts') await ensureDesktop($)
+  if (shown === 'policy') await refreshPages($)
 }
 
 async function setTab($: $, tab: BraidTab): Promise<void> {
   await update($, tabAtom, () => tab)
   await say($, null)
   if (tab !== 'accounts') await ensureDesktop($)
+  if (tab === 'policy') await refreshPages($)
 }
 
 function desktopIo($: $): DesktopIo {
@@ -755,7 +794,10 @@ async function forget($: $, id: string): Promise<void> {
 
 async function handoff($: $, id: string): Promise<void> {
   const account = (await read($, accountsAtom))[id]
-  if (!account?.credentialId) return
+  const cliLogin = await read($, cliLoginAtom)
+  if (!account || !canHandoff(account, cliLogin)) return
+  // braid 有憑證就帶憑證；CLI 自己 /login 的帳號不帶（憑證 id 寫「-」，腳本直接開 claude）
+  const credentialId = account.credential && account.credentialId ? account.credentialId : '-'
   const platform = (await read($, platformAtom)) ?? 'other'
   const plan = planTerminal(
     platform,
@@ -763,7 +805,7 @@ async function handoff($: $, id: string): Promise<void> {
     {
       kind: 'resume',
       account: account.id,
-      credentialId: account.credentialId,
+      credentialId,
       session: await $.session.id(),
       cwd: await $.session.cwd(),
       claude: await claudePath($),
@@ -781,6 +823,193 @@ async function handoff($: $, id: string): Promise<void> {
     $.ui.toast(`braid：這台電腦開不了新視窗。請在另一個終端機執行（已複製）：${plan.manual}`)
   }
   await update($, handoffAtom, () => ({ account: id, label: account.label, confirmed: false, noticed: false }))
+  await update($, confirmingAtom, () => null)
+}
+
+// ── 歸屬（依資料夾決定帳號）──────────────────────────────────
+
+/** 這個對話的資料夾在歸屬表裡的判斷；認不出這個對話的帳號時是 null。「這次就用目前帳號」算對得上。 */
+async function verdictHere($: $): Promise<Verdict | null> {
+  const id = await read($, currentAtom)
+  const accounts = await read($, accountsAtom)
+  const current = id ? accounts[id] : undefined
+  if (!current) return null
+  const cwd = await $.session.cwd()
+  return verdictFor(await read($, policyAtom), accounts, current, cwd)
+}
+
+/** 頁面清單與原始檔的資料夾：~/.claude/artifact-sources。 */
+async function pagesRoot($: $): Promise<string | null> {
+  const platform = await read($, platformAtom)
+  const home = platform === 'windows' ? await $.env.get('USERPROFILE') : await $.env.get('HOME')
+  if (!home) return null
+  const sep = platform === 'windows' ? '\\' : '/'
+  return [home, '.claude', 'artifact-sources'].join(sep)
+}
+
+async function readPages($: $): Promise<{ root: string; index: PageIndex } | null> {
+  const root = await pagesRoot($)
+  if (!root) return null
+  let text: string | null = null
+  try {
+    text = await $.fs.read(`${root}/index.json`)
+  } catch {
+    text = null
+  }
+  return { root, index: parseIndex(text) }
+}
+
+async function writePages($: $, root: string, index: PageIndex): Promise<void> {
+  await $.fs.write(`${root}/index.json`, serializeIndex(index))
+  await refreshPages($, index)
+}
+
+/** 面板讀的頁面清單：最近的在前，只帶畫面要的欄位。 */
+async function refreshPages($: $, given?: PageIndex): Promise<void> {
+  const index = given ?? (await readPages($))?.index
+  if (!index) return
+  const list = [...index.pages].sort((a, b) => b.at - a.at).map(p => ({ id: p.id, title: p.title, project: p.project, owner: p.owner, url: p.url, status: p.status }))
+  await update($, pagesAtom, () => ({ pending: index.pages.filter(p => p.status === 'pending').length, list }))
+}
+
+// braid 自己替使用者發布排隊的頁時，攔截的那一關要放行（發布的資料夾不一定是這個對話的資料夾）
+const publishingNow = new Set<string>()
+
+/** 新頁發布前比對歸屬：對得上照常發布並記下網址；對不上或還沒設定就擋下，存原始檔、排進待發布。 */
+async function guardArtifact($: $, e: Record<string, unknown>, next: (e: never) => Promise<unknown>): Promise<unknown> {
+  const input = e as Record<string, unknown>
+  const filePath = typeof input.file_path === 'string' ? input.file_path : null
+  if (!isNewPage(input) || (filePath && publishingNow.has(filePath))) return next(e as never)
+  const accounts = await read($, accountsAtom)
+  const here = await verdictHere($)
+  const cwd = await $.session.cwd()
+  const project = projectOf(cwd)
+  const me = await read($, currentAtom)
+  const allowed = !here || here.kind === 'ok' || here.kind === 'any'
+  if (allowed) {
+    const result = (await next(e as never)) as { text?: string; isError?: boolean; deny?: string }
+    const url = !result?.deny && !result?.isError ? urlIn(result?.text) : null
+    if (url) {
+      const pages = await readPages($)
+      if (pages) {
+        let html: string | null = null
+        try {
+          html = filePath ? await $.fs.read(filePath) : null
+        } catch {
+          html = null
+        }
+        const owner = here?.kind === 'ok' ? here.owner.id : me
+        pages.index.pages.push({ id: `p${Date.now().toString(36)}`, title: titleOf(input, html), project, source: null, input: {}, owner, by: me, status: 'published', url, at: Date.now() })
+        await writePages($, pages.root, pages.index)
+      }
+    }
+    return result
+  }
+  // 擋下：存原始檔、排進待發布
+  const pages = await readPages($)
+  const ownerId = here.kind === 'mismatch' ? here.owner.id : null
+  const ownerName = here.kind === 'mismatch' ? here.owner.label : null
+  let saved: string | null = null
+  let html: string | null = null
+  if (pages && filePath) {
+    try {
+      html = await $.fs.read(filePath)
+      const id = `p${Date.now().toString(36)}`
+      saved = `${pages.root}/${projectSlug(project)}/${id}${/\.md$/i.test(filePath) ? '.md' : '.html'}`
+      await $.fs.write(saved, html)
+      const rest = Object.fromEntries(Object.entries(input).filter(([k]) => !['tool', 'tool_use_id', 'consent', 'file_path', 'action'].includes(k)))
+      pages.index.pages.push({ id, title: titleOf(input, html), project, source: saved, input: rest, owner: ownerId, by: me, status: 'pending', url: null, at: Date.now() })
+      await writePages($, pages.root, pages.index)
+    } catch {
+      saved = null
+    }
+  }
+  const meName = me ? (accounts[me]?.label ?? '這個帳號') : '這個帳號'
+  const why =
+    here.kind === 'mismatch'
+      ? `這個資料夾歸「${ownerName}」，這個對話是「${meName}」，braid 先不讓新頁用「${meName}」發布（頁面會歸發布它的帳號，事後不能轉移）。`
+      : `這個資料夾還沒設定歸哪個帳號，braid 先不發布新頁（頁面會歸發布它的帳號，事後不能轉移）。`
+  const where = saved ? `原始檔已存到 ${saved}，排進「待發布」。` : '原始檔沒存成，請之後再發布一次。'
+  const how =
+    here.kind === 'mismatch'
+      ? `到「${ownerName}」登入的對話（例如桌面 app 換成「${ownerName}」）打開 /braid →「歸屬」按「發布」；確定要歸「${meName}」也可以在那裡選「就用這個帳號發布」。`
+      : '打開 /braid →「歸屬」設定這個資料夾歸誰，再按「發布」。'
+  return { deny: `${why}${where}${how}請把這段說明轉告使用者，不要改用其他方式發布。` }
+}
+
+/** 替使用者發布一張排隊的頁（在這個對話的帳號底下）。 */
+async function publishPending($: $, pageId: string): Promise<void> {
+  const pages = await readPages($)
+  const page = pages?.index.pages.find(p => p.id === pageId)
+  if (!pages || !page?.source) return
+  publishingNow.add(page.source)
+  try {
+    const r = (await $.tool.call({ tool: 'Artifact', ...page.input, file_path: page.source, consent: `使用者在 braid 面板按了「發布」：${page.title}` } as never)) as {
+      text?: string
+      deny?: string
+      isError?: boolean
+    }
+    const url = r.deny || r.isError ? null : urlIn(r.text)
+    if (!url) {
+      await say($, `發布失敗：${r.deny ?? r.text?.slice(0, 200) ?? '沒有回應'}`)
+      return
+    }
+    const fresh = (await readPages($))?.index ?? pages.index
+    const me = await read($, currentAtom)
+    await writePages($, pages.root, {
+      ...fresh,
+      pages: fresh.pages.map(p => (p.id === pageId ? { ...p, status: 'published' as const, url, by: me, at: Date.now() } : p)),
+    })
+    await say($, `已發布「${page.title}」：${url}`)
+  } catch (err) {
+    await say($, `發布失敗：${err instanceof Error ? err.message : String(err)}`)
+  } finally {
+    publishingNow.delete(page.source)
+  }
+}
+
+async function dropPending($: $, pageId: string): Promise<void> {
+  const pages = await readPages($)
+  if (!pages) return
+  await writePages($, pages.root, { ...pages.index, pages: pages.index.pages.map(p => (p.id === pageId ? { ...p, status: 'dropped' as const } : p)) })
+}
+
+/** 依 git 遠端擬歸屬表草稿：掃這個專案所在的資料夾（例如 ~/projects）底下每個專案。 */
+async function buildDraft($: $): Promise<void> {
+  const project = projectOf(await $.session.cwd())
+  const parent = project.replace(/[\\/][^\\/]+$/, '')
+  if (!parent || parent === project) return
+  const remoteOf = async (dir: string): Promise<string | null> => {
+    try {
+      const r = await $.process.run(['git', '-C', dir, 'remote', 'get-url', 'origin'], { timeoutMs: 10_000 })
+      return r.exitCode === 0 ? r.stdout.trim() || null : null
+    } catch {
+      return null
+    }
+  }
+  const items: FolderRemotes[] = []
+  let entries: { name: string; kind: string }[] = []
+  try {
+    entries = (await $.fs.list(parent)).filter(x => x.kind === 'dir' && !x.name.startsWith('.'))
+  } catch {
+    entries = []
+  }
+  for (const d of entries.slice(0, 60)) {
+    const dir = `${parent}/${d.name}`
+    const remote = await remoteOf(dir)
+    const inner: (string | null)[] = []
+    if (!remote) {
+      let subs: { name: string; kind: string }[] = []
+      try {
+        subs = (await $.fs.list(dir)).filter(x => x.kind === 'dir' && !x.name.startsWith('.'))
+      } catch {
+        subs = []
+      }
+      for (const sub of subs.slice(0, 30)) inner.push(await remoteOf(`${dir}/${sub.name}`))
+    }
+    items.push({ folder: dir, remote, inner })
+  }
+  await update($, draftAtom, () => draftGroups(items))
 }
 
 async function snooze($: $, key: string): Promise<void> {
@@ -841,7 +1070,7 @@ function chip(ui: UI, look: { label: string; color: string }) {
 
 const WHY_TEXT: Record<Why, string> = {
   ok: '可以接手',
-  'other-org': '這個資料夾只換同組織的帳號',
+  'other-side': '和這個資料夾的歸屬不同邊，要確認才接手',
   'no-credential': 'braid 沒有它的登入憑證，只能在桌面 app 手動換',
   busy: '也快用完了',
 }
@@ -894,6 +1123,7 @@ async function drawOnboarding($: $, ui: UI) {
     { id: 'migrate', title: '換帳號了，把舊對話搬過來', desc: '桌面 app 舊帳號在 Code 分頁的對話與環境，複製到現在的帳號。搬一次就好。' },
     { id: 'switch', title: '用量用完，換另一個帳號接著做', desc: '快到上限時提醒，一鍵用另一個帳號在新視窗接著同一段對話。要兩個以上的帳號。' },
     { id: 'sync', title: '幾個帳號長期一起用', desc: '桌面 app 的兩個帳號自動同步對話，用量用完換過去就能接著做（預設全部資料夾，也可以只挑幾個）。' },
+    { id: 'policy', title: '公司與個人分開', desc: '依資料夾決定歸哪個帳號：用錯帳號時提醒、一鍵換過去；新頁只用對的帳號發布。' },
   ]
   return (
     <Box flexDirection="column" gap={1}>
@@ -916,7 +1146,7 @@ async function drawOnboarding($: $, ui: UI) {
           onPress={async () => {
             await putUses($, draft)
             await update($, editingAtom, () => null)
-            await setTab($, draft.switch ? 'switch' : draft.sync ? 'sync' : draft.migrate ? 'migrate' : 'accounts')
+            await setTab($, draft.switch ? 'switch' : draft.sync ? 'sync' : draft.policy ? 'policy' : draft.migrate ? 'migrate' : 'accounts')
             await refreshStatus($)
           }}
         />
@@ -940,6 +1170,7 @@ async function drawAccounts($: $, ui: UI, width: number) {
   const sy = await read($, syncAtom)
   const syncedWith = (id: string) => !!uses?.sync && sy.on && !!current && sy.pair.includes(current) && sy.pair.includes(id)
   const sw = await read($, switchAtom)
+  const cliLogin = await read($, cliLoginAtom)
   const { Svg } = ui
 
   const block = (a: BraidAccount, isCurrent: boolean) => {
@@ -965,7 +1196,7 @@ async function drawAccounts($: $, ui: UI, width: number) {
         </Box>
       ) : (
         <Box key={`acts-${a.id}`} flexDirection="row" gap={1} flexWrap="wrap">
-          {!isCurrent && a.credential && <Button key={`go-${a.id}`} label="用它接著這段對話" variant="primary" onPress={() => handoff($, a.id)} />}
+          {!isCurrent && canHandoff(a, cliLogin) && <Button key={`go-${a.id}`} label="用它接著這段對話" variant="primary" onPress={() => handoff($, a.id)} />}
           <Button key={`edit-${a.id}`} label="改名稱與顏色" dimColor onPress={() => update($, editingAtom, () => `edit:${a.id}`)} />
           {!isCurrent && <Button key={`forget-${a.id}`} label="移除" dimColor onPress={() => update($, editingAtom, () => `forget:${a.id}`)} />}
         </Box>
@@ -976,6 +1207,8 @@ async function drawAccounts($: $, ui: UI, width: number) {
       ? null
       : a.credential
         ? { tone: 'good' as const, text: `可以一鍵接手（憑證存在${CREDENTIAL_TEXT[a.credential]}）` }
+        : a.id === cliLogin
+          ? { tone: 'good' as const, text: '可以一鍵接手（Claude Code 自己登入的帳號）' }
         : syncedWith(a.id)
           ? { tone: 'sync' as const, text: '在桌面 app 換成它就能接著做，對話會自動同步' }
           : { tone: 'none' as const, text: 'braid 沒有它的登入憑證，只能在桌面 app 手動換' }
@@ -1154,14 +1387,13 @@ async function drawAdd($: $, ui: UI) {
   )
 }
 
-// ── 一個一個加資料夾：同步頁（要同步的）與切換頁（只換同組織的）共用 ──
+// ── 一個一個加資料夾：同步頁（要同步的資料夾） ──
 
-type PickerTarget = 'sync' | 'switch'
+type PickerTarget = 'sync'
 type PickerRow = { path: string; note: string }
 
 async function changePicked($: $, target: PickerTarget, change: (list: string[]) => string[]): Promise<void> {
   if (target === 'sync') await putSync($, s => ({ ...s, folders: change(s.folders) }))
-  else await putSwitch($, s => ({ ...s, restricted: change(s.restricted) }))
 }
 
 async function addPicked($: $, target: PickerTarget, text: string): Promise<void> {
@@ -1213,13 +1445,11 @@ async function drawSwitch($: $, ui: UI) {
   const cwd = await $.session.cwd()
   const now = await $.clock.now()
   const order = orderedIds(accounts, sw.order)
-  const why = new Map(current ? candidates(accounts, current, sw, cwd, now).map(c => [c.account.id, c.why]) : [])
-  // 從清單加入的候選：桌面 app 各帳號對話的資料夾（含對話數），還沒限制的
-  const desktop = await read($, desktopAtom)
-  const totals = new Map<string, number>()
-  for (const prof of desktop?.profiles ?? []) for (const f of prof.folders) totals.set(f.path, (totals.get(f.path) ?? 0) + f.sessions)
-  const noteOf = (path: string) => (totals.get(path) ? `${totals.get(path)} 個對話` : '')
-  const choices = [...totals.keys()].filter(path => !sw.restricted.includes(path)).sort((x, y) => (totals.get(y) ?? 0) - (totals.get(x) ?? 0))
+  const here = await verdictHere($)
+  const owner = here && (here.kind === 'ok' || here.kind === 'mismatch') ? here.owner : null
+  const why = new Map(current ? candidates(accounts, current, sw, owner, await read($, cliLoginAtom), now).map(c => [c.account.id, c.why]) : [])
+  const uses = await read($, usesAtom)
+  void cwd
   return (
     <Box flexDirection="column" gap={1}>
       {pageHead(ui, 'sw-head', '切換', '用量快用完時，輸入框上方提醒你，一鍵換另一個帳號接著做。')}
@@ -1281,24 +1511,8 @@ async function drawSwitch($: $, ui: UI) {
       })}
 
       {sectionHead(ui, 'sw-scope-head', '資料夾')}
-      <Select
-        key="sw-scope"
-        label="範圍"
-        options={[
-          { value: 'all', label: '全部資料夾都能換到任何帳號（建議）' },
-          { value: 'restrict', label: '有些資料夾只換同組織的帳號' },
-        ]}
-        value={sw.restrict ? 'restrict' : 'all'}
-        onSelect={v => putSwitch($, s => ({ ...s, restrict: v === 'restrict' }))}
-      />
-      {sw.restrict &&
-        drawFolderPicker($, ui, 'switch', {
-          title: '只換同組織帳號的資料夾',
-          picked: sw.restricted.map(path => ({ path, note: noteOf(path) })),
-          choices: choices.map(path => ({ path, note: noteOf(path) })),
-          cwd,
-          hint: '例如公司專案：在這些資料夾（含子資料夾）不會換到個人帳號。',
-        })}
+      {fine(ui, uses?.policy ? '資料夾歸哪個帳號在「歸屬」頁設定：接手的帳號和資料夾歸屬不同邊時，要先確認風險。' : '全部資料夾都能換到任何帳號。要讓公司專案只用公司帳號，在「用法」打開「歸屬」。')}
+      {uses?.policy && <Button key="sw-to-policy" label="到歸屬頁" dimColor onPress={() => setTab($, 'policy')} />}
       {platform !== 'other' && fine(ui, '在桌面 app 按「接著做」，會開一個終端機視窗用另一個帳號接著。')}
     </Box>
   )
@@ -1523,6 +1737,151 @@ async function drawBackups($: $, ui: UI) {
   )
 }
 
+/** 路徑給人看：家目錄寫成 ~。 */
+async function tilde($: $, path: string): Promise<string> {
+  const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
+  return home && path.startsWith(home) ? `~${path.slice(home.length)}` : path
+}
+
+async function drawPolicy($: $, ui: UI) {
+  const { Box, Text, Button, Input, Select } = ui
+  const accounts = await read($, accountsAtom)
+  const current = await read($, currentAtom)
+  const cur = current ? accounts[current] : undefined
+  const policy = await read($, policyAtom)
+  const cwd = await $.session.cwd()
+  const project = projectOf(cwd)
+  const here = await verdictHere($)
+  const confirming = await read($, confirmingAtom)
+  const cliLogin = await read($, cliLoginAtom)
+  const ids = orderedIds(accounts, (await read($, switchAtom)).order)
+  const ownerOptions = [...ids.map(id => ({ value: id, label: `歸「${accounts[id]?.label ?? id}」` })), { value: ANY, label: '不分（哪個帳號都可以）' }]
+  const ownerName = (owner: string) => (owner === ANY ? '不分' : (accounts[owner]?.label ?? '已移除的帳號'))
+  const rule = ruleFor(policy, cwd)
+  const draft = await read($, draftAtom)
+  const pages = await read($, pagesAtom)
+  const newOwner = (await read($, newOwnerAtom)) ?? ids[0] ?? ANY
+  const name = project.split(/[\\/]/).filter(Boolean).pop() ?? project
+
+  let status: string
+  let tone: 'success' | 'warning' | undefined
+  if (!here || !cur) [status, tone] = ['認不出這個對話用的是哪個帳號。', 'warning']
+  else if (here.kind === 'unset' || here.kind === 'lost') [status, tone] = [`「${name}」還沒設定歸哪個帳號：新頁會先擋下，對話照常。`, 'warning']
+  else if (here.kind === 'any') [status, tone] = [`「${name}」不分帳號。`, undefined]
+  else if (here.kind === 'ok') [status, tone] = [`「${name}」歸「${here.owner.label}」，這個對話是「${cur.label}」：對得上。`, 'success']
+  else [status, tone] = [riskText(here.risk, here.owner.label, cur.label), 'warning']
+
+  const rows = await Promise.all(policy.rules.map(async r => ({ rule: r, shown: await tilde($, r.folder) })))
+  const pendingList = (pages?.list ?? []).filter(p => p.status === 'pending')
+  const published = (pages?.list ?? []).filter(p => p.status === 'published').slice(0, 5)
+  const viaToken = await read($, viaTokenAtom)
+  const mineSide = (owner: string | null) => !!owner && !!cur && owner !== ANY && !!accounts[owner] && sameSide(accounts[owner] as BraidAccount, cur)
+
+  return (
+    <Box flexDirection="column" gap={1}>
+      {pageHead(ui, 'pol-head', '歸屬', '資料夾歸哪個帳號：對話該用誰、頁面歸誰，都照這張表。')}
+
+      <Box key="pol-here" flexDirection="column" borderStyle="round" borderColor={tone} paddingX={1}>
+        <Text weight="semibold">{`這裡：${await tilde($, project)}`}</Text>
+        <Text color={tone}>{status}</Text>
+        <Select
+          key="pol-here-owner"
+          label="這個資料夾"
+          options={[...(rule ? [] : [{ value: '', label: '（還沒設定）' }]), ...ownerOptions]}
+          value={rule && rule.folder === project ? rule.owner : rule ? rule.owner : ''}
+          onSelect={v => (v ? putPolicy($, p => setRule(p, project, v)) : undefined)}
+        />
+        {rule && rule.folder !== project ? fine(ui, `套用的是上層的規則：${rule.folder}`) : null}
+        {here?.kind === 'mismatch' && canHandoff(here.owner, cliLogin) ? (
+          <Box flexDirection="row" marginTop={1}>
+            <Button key="pol-here-go" label={`用「${here.owner.label}」在新視窗接著做`} variant="primary" onPress={() => handoff($, here.owner.id)} />
+          </Box>
+        ) : null}
+      </Box>
+
+      {sectionHead(ui, 'pol-rules-head', '歸屬表', '含子資料夾；多條符合時取最具體的那條。')}
+      {rows.length === 0 && fine(ui, '還沒有規則。用上面設定這個資料夾，或用下面的「依 git 遠端快速設定」。')}
+      {rows.map(({ rule: r, shown }) => (
+        <Box key={`pol-row-${r.folder}`} flexDirection="row" gap={1} alignItems="center">
+          <Select key={`pol-rule-${r.folder}`} label={shown} options={ownerOptions} value={r.owner} onSelect={v => putPolicy($, p => setRule(p, r.folder, v))} />
+          <Button key={`pol-del-${r.folder}`} label="移除" dimColor onPress={() => putPolicy($, p => dropRule(p, r.folder))} />
+        </Box>
+      ))}
+      <Box key="pol-add" flexDirection="column">
+        <Select key="pol-new-owner" label="其他資料夾" options={ownerOptions} value={newOwner} onSelect={v => update($, newOwnerAtom, () => v)} />
+        <Input key="pol-new-path" label="資料夾路徑" value="" placeholder="例如 /home/me/work，按 Enter 加入" onSubmit={v => (normalizeFolder(v) ? putPolicy($, p => setRule(p, normalizeFolder(v) as string, newOwner)) : undefined)} />
+      </Box>
+
+      {sectionHead(ui, 'pol-draft-head', '依 git 遠端快速設定', '掃描這個專案旁邊的資料夾，依 git 遠端分組，一組選一次。已經有規則的不會改。')}
+      {!draft ? (
+        <Button key="pol-scan" label={`掃描「${await tilde($, project.replace(/[\\/][^\\/]+$/, ''))}」`} onPress={() => buildDraft($)} />
+      ) : (
+        draft.map((g, i) => {
+          const names = g.folders.map(f => f.split(/[\\/]/).pop() ?? f)
+          const todo = g.folders.filter(f => !policy.rules.some(r => r.folder === f))
+          return (
+            <Box key={`pol-g-${i}`} flexDirection="column">
+              <Text>
+                <Text weight="semibold">{g.key ?? '沒有 git 遠端'}</Text>
+                <Text dimColor>{`　${names.length} 個：${names.slice(0, 6).join('、')}${names.length > 6 ? '…' : ''}`}</Text>
+              </Text>
+              {todo.length === 0 ? (
+                fine(ui, '都設定好了。')
+              ) : g.key === null ? (
+                fine(ui, '沒有遠端，分不出歸屬：請在上面逐一設定，或用「其他資料夾」加。')
+              ) : (
+                <Select
+                  key={`pol-group-${i}`}
+                  label={`這 ${todo.length} 個`}
+                  options={[{ value: '', label: '（先不設）' }, ...ownerOptions]}
+                  value=""
+                  onSelect={v => (v ? putPolicy($, p => todo.reduce((acc, f) => setRule(acc, f, v), p)) : undefined)}
+                />
+              )}
+            </Box>
+          )
+        })
+      )}
+
+      {sectionHead(ui, 'pol-pages-head', '待發布的頁', '歸屬對不上或還沒設定時，新頁先存在 ~/.claude/artifact-sources，等對的帳號發布。')}
+      {pendingList.length === 0 && fine(ui, '沒有排隊的頁。')}
+      {pendingList.map(p => {
+        const mine = mineSide(p.owner)
+        return (
+          <Box key={`pg-${p.id}`} flexDirection="column" borderStyle="round" paddingX={1}>
+            <Text weight="semibold">{p.title}</Text>
+            {fine(ui, `${p.project.split(/[\\/]/).pop() ?? p.project} · ${p.owner ? `歸「${ownerName(p.owner)}」` : '歸屬還沒設定'}`)}
+            <Box flexDirection="row" gap={1} flexWrap="wrap">
+              {mine && !viaToken && <Button key={`pg-pub-${p.id}`} label="發布" variant="primary" onPress={() => publishPending($, p.id)} />}
+              {!mine &&
+                !viaToken &&
+                cur &&
+                (confirming === `pub:${p.id}` ? (
+                  <Button key={`pg-mine-yes-${p.id}`} label={`確定歸「${cur.label}」並發布`} onPress={() => publishPending($, p.id)} />
+                ) : (
+                  <Button key={`pg-mine-${p.id}`} label={`就用「${cur.label}」發布…`} dimColor onPress={() => update($, confirmingAtom, () => `pub:${p.id}`)} />
+                ))}
+              <Button key={`pg-drop-${p.id}`} label="丟掉" dimColor onPress={() => dropPending($, p.id)} />
+            </Box>
+            {viaToken
+              ? fine(ui, '這個視窗用 braid 的一年期憑證，官方只保證 /login 的對話能發布：請在那個帳號 /login 的對話（例如桌面 app 換成它）打開這頁按「發布」。')
+              : !mine && p.owner && accounts[p.owner]
+                ? fine(ui, `要歸「${ownerName(p.owner)}」：在它 /login 的對話（例如桌面 app 換成它）打開這頁按「發布」。`)
+                : null}
+          </Box>
+        )
+      })}
+      {published.length > 0 && sectionHead(ui, 'pol-pub-head', '最近發布的頁')}
+      {published.map(p => (
+        <Text key={`pd-${p.id}`}>
+          {p.title}
+          <Text dimColor>{`　歸「${p.owner ? ownerName(p.owner) : '?'}」　${p.url ?? ''}`}</Text>
+        </Text>
+      ))}
+    </Box>
+  )
+}
+
 async function drawMigrate($: $, ui: UI) {
   const { Box, Text, Button } = ui
   const platform = await read($, platformAtom)
@@ -1579,15 +1938,28 @@ export const register: Register = on => {
     // 不然新版讀到舊版的形狀（例如 0.3.1 的桌面資料沒有 trash）畫面就壞了（0.3.2 更新後面板空白）
     await update($, desktopAtom, () => null)
     await update($, updateAtom, () => null) // 更新提示也從頭來：載入新版之後由 checkUpdate 重新判斷
+    // 這個對話裡的一次性狀態（這次就用目前帳號、等確認的、按過之後再說的）與讀進來的清單，重新載入時從頭來
+    await update($, overrideAtom, () => null)
+    await update($, confirmingAtom, () => null)
+    await update($, skipAskAtom, () => null)
+    await update($, draftAtom, () => null)
+    await update($, pagesAtom, () => null)
     const platform = await detectPlatform($)
     await update($, platformAtom, () => platform)
     const tz = await localTz($, platform)
     await update($, tzAtom, () => tz)
     await loadStore($)
+    // CLI 自己 /login 的帳號（~/.claude.json）：braid 沒有它的憑證，也能用它在新視窗接著做
+    const login = await cliLoginSeen($)
+    // 已經認得的帳號不動（同一個帳號也是桌面 app 的帳號時，來源要留「桌面」）；沒見過的才加進清單
+    const knownAccounts = await read($, accountsAtom)
+    if (login && !knownAccounts[login.id]) await putAccount($, upsertSeen(knownAccounts, login, await $.clock.now()))
+    await update($, cliLoginAtom, () => login?.id ?? null)
     // 上面丟掉的桌面資料在背景重讀：面板開著時重新載入，才不會一直停在「讀取中」
     const uses = await read($, usesAtom)
     if (uses?.sync || uses?.migrate) $.clock.after(1, () => ensureDesktop($))
     const seen = await seenNow($)
+    await update($, viaTokenAtom, () => seen?.source === 'token')
     if (seen) {
       const accounts = await read($, accountsAtom)
       // 先前用 braid 新增憑證的同一個帳號（tok-…，信箱相同）：併成一筆，憑證掛到認出來的帳號上
@@ -1639,6 +2011,7 @@ export const register: Register = on => {
       case 'accounts':
       case 'switch':
       case 'sync':
+      case 'policy':
         await openPane($, action.name)
         return { text: '已打開 braid 面板。' }
     }
@@ -1651,6 +2024,12 @@ export const register: Register = on => {
     await update($, handoffAtom, v => (v ? { ...v, confirmed: true } : v))
     return { drop: `這段對話已經交給「${handed.label}」在新視窗接著做（那邊是複製出來的新對話）。確定要在這裡繼續，就再送一次。` }
   })
+
+  // ── 發布新頁前比對歸屬（開了「歸屬」才管）。判斷出錯時寧可不發布：頁面歸錯帳號事後不能轉移 ──
+  on('tool.call', { tool: 'Artifact' }, async ($, e, next) => {
+    if (!(await read($, usesAtom))?.policy) return next(e)
+    return (await guardArtifact($, e as unknown as Record<string, unknown>, next as never)) as never
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: 'braid 判斷這張頁該歸哪個帳號時出錯，先不發布。請打開 /braid →「歸屬」看看，或在「用法」關掉「歸屬」。' }))
 
   // ── 輸入框上方：交給另一個帳號之後的提醒、用量快到門檻時提示換帳號 ──
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -1674,46 +2053,117 @@ export const register: Register = on => {
       )
     }
 
-    if (!uses?.switch) return next(e)
     const now = await $.clock.now()
-    const band = bandFor(accounts, current, await read($, liveAtom), await read($, switchAtom), await $.session.cwd(), now, await read($, snoozeAtom))
-    if (!band || !current) return next(e)
-    const cur = accounts[current] as BraidAccount
-    const reset = fmtReset(band.resetsAt, now, await read($, tzAtom))
-    const head = band.kind === 'out' ? `${cur.label} ${WINDOW_NAMES[band.window]}用量用完了` : `${cur.label} ${WINDOW_NAMES[band.window]}用量 ${band.pct}%`
-    const best = band.best
-    // 桌面 app 的這個帳號有在自動同步：對話已經複製到另一個帳號，在 app 換過去就能接著做
+    const cur = current ? accounts[current] : undefined
+    const cwd = await $.session.cwd()
+    const project = projectOf(cwd)
+    const here = uses?.policy ? await verdictHere($) : null
+    const override = await read($, overrideAtom)
+    const confirming = await read($, confirmingAtom)
+    const cliLogin = await read($, cliLoginAtom)
+    const overridden = !!override && override.project === project && override.account === current
     const sy = await read($, syncAtom)
     const m = await read($, mirrorAtom)
-    const synced = uses.sync && sy.on && m && m.active === current && m.to && !m.problem ? mirrorName(accounts, m.to, m.toOrg) : null
-    const detail = best
-      ? synced
-        ? `「${best.label}」可以在新視窗接著這段對話；或在桌面 app 換成「${synced}」，對話都已同步過去。`
-        : `「${best.label}」可以接手：在新視窗接著這段對話。`
-      : synced
-        ? `在桌面 app 換成「${synced}」就能接著做，對話都已同步過去。`
-        : band.manual
-          ? `可以在桌面 app 換成「${band.manual.label}」；在 braid 開啟同步，對話就會自動跟過去。`
-          : '沒有其他帳號可以接手；在 braid 面板可以新增。'
-    return (
-      <Box flexDirection="column">
-        <Text wrap="truncate">
-          <Text color="warning" bold>
-            braid
-          </Text>{' '}
-          {head}
-          {reset ? `，${reset} 重置` : ''}。<Text dimColor>{detail}</Text>
-        </Text>
-        <Box flexDirection="row" gap={1}>
-          {best ? (
-            <Button key="band-handoff" label={`用「${best.label}」接著做`} variant="primary" onPress={() => handoff($, best.id)} />
-          ) : (
-            <Button key="band-open" label="打開 braid" onPress={() => openPane($, 'switch')} />
-          )}
-          <Button key="band-snooze" label={reset ? `${reset} 前別再提醒` : '先別提醒'} role="dismiss" onPress={() => snooze($, band.snoozeKey)} />
+    // 桌面 app 的這個帳號有在自動同步：對話已經複製到另一個帳號，在 app 換過去就能接著做
+    const syncedTo = uses?.sync && sy.on && m && m.active === current && m.to && !m.problem ? m.to : null
+
+    // 歸屬對不上：說清楚風險，一鍵用對的帳號接著做；真的要用目前帳號，按兩次（只算這一次）
+    if (here?.kind === 'mismatch' && cur && !overridden) {
+      const ownerOk = canHandoff(here.owner, cliLogin)
+      const strong = here.risk === 'personal-via-work'
+      return (
+        <Box flexDirection="column">
+          <Text wrap="wrap">
+            <Text color={strong ? 'error' : 'warning'} bold>
+              braid
+            </Text>{' '}
+            {riskText(here.risk, here.owner.label, cur.label)}
+          </Text>
+          <Box flexDirection="row" gap={1} flexWrap="wrap">
+            {ownerOk && <Button key="pol-go" label={`用「${here.owner.label}」在新視窗接著做`} variant="primary" onPress={() => handoff($, here.owner.id)} />}
+            {confirming === 'override' ? (
+              <Button key="pol-stay-yes" label={`確定這次用「${cur.label}」`} onPress={() => update($, overrideAtom, () => ({ project, account: cur.id }))} />
+            ) : (
+              <Button key="pol-stay" label="這次就用目前帳號…" dimColor onPress={() => update($, confirmingAtom, () => 'override')} />
+            )}
+          </Box>
+          {syncedTo === here.owner.id || (e.surface === 'desktop' && !ownerOk) ? (
+            <Text dimColor>{`或在桌面 app 換成「${here.owner.label}」${syncedTo === here.owner.id ? '，對話已同步過去' : ''}。`}</Text>
+          ) : null}
         </Box>
-      </Box>
-    )
+      )
+    }
+
+    // 用量快用完：換帳號接著做；只剩跟資料夾歸屬不同邊的帳號時，先確認風險（第 9 格）
+    const owner = here && (here.kind === 'ok' || here.kind === 'mismatch') ? here.owner : null
+    const band = uses?.switch ? bandFor(accounts, current, await read($, liveAtom), await read($, switchAtom), owner, cliLogin, now, await read($, snoozeAtom)) : null
+    if (band && cur) {
+      const reset = fmtReset(band.resetsAt, now, await read($, tzAtom))
+      const head = band.kind === 'out' ? `${cur.label} ${WINDOW_NAMES[band.window]}用量用完了` : `${cur.label} ${WINDOW_NAMES[band.window]}用量 ${band.pct}%`
+      const best = band.best
+      const risky = !best ? band.risky : null
+      const synced = syncedTo ? mirrorName(accounts, syncedTo, m?.toOrg ?? null) : null
+      const detail = best
+        ? synced
+          ? `「${best.label}」可以在新視窗接著這段對話；或在桌面 app 換成「${synced}」，對話都已同步過去。`
+          : `「${best.label}」可以接手：在新視窗接著這段對話。`
+        : risky && owner
+          ? riskText(riskOf(owner, risky), owner.label, risky.label)
+          : synced
+            ? `在桌面 app 換成「${synced}」就能接著做，對話都已同步過去。`
+            : band.manual
+              ? `可以在桌面 app 換成「${band.manual.label}」；在 braid 開啟同步，對話就會自動跟過去。`
+              : '沒有其他帳號可以接手；在 braid 面板可以新增。'
+      return (
+        <Box flexDirection="column">
+          <Text wrap="wrap">
+            <Text color="warning" bold>
+              braid
+            </Text>{' '}
+            {head}
+            {reset ? `，${reset} 重置` : ''}。<Text dimColor>{detail}</Text>
+          </Text>
+          <Box flexDirection="row" gap={1}>
+            {best ? (
+              <Button key="band-handoff" label={`用「${best.label}」接著做`} variant="primary" onPress={() => handoff($, best.id)} />
+            ) : risky ? (
+              confirming === risky.id ? (
+                <Button key="band-risky-yes" label={`確定用「${risky.label}」接著做`} variant="primary" onPress={() => handoff($, risky.id)} />
+              ) : (
+                <Button key="band-risky" label={`用「${risky.label}」接著做…`} onPress={() => update($, confirmingAtom, () => risky.id)} />
+              )
+            ) : (
+              <Button key="band-open" label="打開 braid" onPress={() => openPane($, 'switch')} />
+            )}
+            <Button key="band-snooze" label={reset ? `${reset} 前別再提醒` : '先別提醒'} role="dismiss" onPress={() => snooze($, band.snoozeKey)} />
+          </Box>
+        </Box>
+      )
+    }
+
+    // 還沒設定歸屬：直接選歸誰（寫回表）；不擋對話，只有發布新頁會先擋下
+    if ((here?.kind === 'unset' || here?.kind === 'lost') && (await read($, skipAskAtom)) !== project) {
+      const name = project.split(/[\\/]/).filter(Boolean).pop() ?? project
+      const owners = orderedIds(accounts, (await read($, switchAtom)).order)
+      return (
+        <Box flexDirection="column">
+          <Text wrap="wrap">
+            <Text color="suggestion" bold>
+              braid
+            </Text>{' '}
+            {`「${name}」歸哪個帳號？對話與頁面都照這個決定，之後可以在「歸屬」頁改。`}
+          </Text>
+          <Box flexDirection="row" gap={1} flexWrap="wrap">
+            {owners.map(id => (
+              <Button key={`ask-${id}`} label={`歸「${accounts[id]?.label ?? id}」`} onPress={() => putPolicy($, p => setRule(p, project, id))} />
+            ))}
+            <Button key="ask-any" label="不分" dimColor onPress={() => putPolicy($, p => setRule(p, project, ANY))} />
+            <Button key="ask-later" label="之後再說" role="dismiss" onPress={() => update($, skipAskAtom, () => project)} />
+          </Box>
+        </Box>
+      )
+    }
+    return next(e)
   })
 
   // ── 輸入框下方那行：桌面版在 app 自己的提示旁邊接一條迷你量表（終端機照舊，用狀態列的文字） ──
@@ -1768,12 +2218,22 @@ export const register: Register = on => {
       { id: 'accounts', label: '帳號' },
       ...(uses.switch ? [{ id: 'switch' as const, label: '切換' }] : []),
       ...(uses.sync ? [{ id: 'sync' as const, label: '同步' }] : []),
+      ...(uses.policy ? [{ id: 'policy' as const, label: '歸屬' }] : []),
       ...(uses.migrate ? [{ id: 'migrate' as const, label: '遷移' }] : []),
     ]
     const saved = await read($, tabAtom)
     const tab = tabs.some(t => t.id === saved) ? saved : 'accounts'
     const notice = await read($, noticeAtom)
-    const drawTab = () => (tab === 'switch' ? drawSwitch($, ui) : tab === 'sync' ? drawSync($, ui) : tab === 'migrate' ? drawMigrate($, ui) : drawAccounts($, ui, e.props.bodyColumns))
+    const drawTab = () =>
+      tab === 'switch'
+        ? drawSwitch($, ui)
+        : tab === 'sync'
+          ? drawSync($, ui)
+          : tab === 'policy'
+            ? drawPolicy($, ui)
+            : tab === 'migrate'
+              ? drawMigrate($, ui)
+              : drawAccounts($, ui, e.props.bodyColumns)
     // 一頁畫壞了就說出來、給重讀的按鈕，不要讓整個面板變成空白
     const body = await drawTab().catch((err: unknown) => (
       <Box key="pane-error" flexDirection="column" gap={1}>

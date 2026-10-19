@@ -47,6 +47,14 @@ echo "$out" | grep -q "^cwd=.*braid-cli-test-$$\\\\中文 資料夾$" && ok "中
 echo "$out" | grep -qx "token=$TOKEN" && ok "憑證從認證管理員取出，放進那個視窗的 claude" || ng "憑證沒送到：$out"
 echo "$out" | grep -qx "account=acct-1" && ok "新的對話知道自己是哪個帳號" || ng "帳號 id 不對：$out"
 echo "$out" | grep -qx "leftover=" && ok "上一個對話與 braid 自己的參數變數都清掉了" || ng "還帶著變數：$out"
+rm -f "$W/out.txt"
+BRAID_ACCOUNT=acct-login BRAID_CREDENTIAL=- BRAID_SESSION=sess-2 BRAID_CWD="$(wslpath -w "$W/中文 資料夾")" BRAID_CLAUDE="$(wslpath -w "$W/claude.cmd")" BRAID_LABEL='公司' CLAUDE_CODE_OAUTH_TOKEN=stale \
+  WSLENV="BRAID_ACCOUNT:BRAID_CREDENTIAL:BRAID_SESSION:BRAID_CWD:BRAID_CLAUDE:BRAID_LABEL:CLAUDE_CODE_OAUTH_TOKEN${WSLENV:+:$WSLENV}" \
+  ps -File "$(wslpath -w ../mod/tool/windows/resume.ps1)" </dev/null >/dev/null 2>&1
+out=$(iconv -f cp950 -t utf-8 "$W/out.txt" 2>/dev/null || cat "$W/out.txt")
+out=$(printf '%s' "$out" | tr -d '\r')
+echo "$out" | grep -qx "args=--resume sess-2 --fork-session" && echo "$out" | grep -qx "token=" && echo "$out" | grep -qx "account=acct-login" \
+  && ok "憑證 id 是 -：不帶憑證，用 Claude Code 自己登入的帳號接著做" || ng "用本機登入接著做不對：$out"
 
 echo "######## add-account.ps1"
 cat > "$W/claude-setup.cmd" <<'EOF'

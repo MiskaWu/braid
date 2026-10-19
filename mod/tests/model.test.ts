@@ -12,7 +12,6 @@ import {
   defaultLabel,
   effectivePct,
   fmtReset,
-  isRestricted,
   meter,
   expiredFiles,
   extraToolBackups,
@@ -38,6 +37,8 @@ import {
 } from '../hooks/model'
 import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo, type SessionSpec } from '../hooks/mirror'
 import { accountCard, fit, initial, slotOf, syncFlow } from '../hooks/visual'
+import { ANY, cleanFolder, draftGroups, normalizePolicy, projectOf, remoteKey, riskOf, ruleFor, setRule, sideOf, verdictFor } from '../hooks/policy'
+import { isNewPage, parseIndex, projectSlug, titleOf, urlIn } from '../hooks/pages'
 import { newCredentialId, planTerminal, removeFile, removeToolBackup, secretDelete, wrapperText } from '../hooks/terminal'
 
 // 2026-10-16 14:00（UTC+8）
@@ -71,15 +72,14 @@ const ACCOUNTS = { work, work2, home }
 describe('讀回儲存的資料', () => {
   test('壞掉或舊版的值換成預設，不讓畫面掛掉', async () => {
     expect(normalizeUses('x')).toBe(null)
-    expect(normalizeUses({ migrate: true, switch: 'yes' })).toEqual({ migrate: true, switch: false, sync: false })
+    expect(normalizeUses({ migrate: true, switch: 'yes' })).toEqual({ migrate: true, switch: false, sync: false, policy: false })
     expect(normalizeSwitch(null)).toEqual(DEFAULT_SWITCH)
-    expect(normalizeSwitch({ on: false, fiveHour: 'x', sevenDay: null, order: ['a', 3], restrict: 'yes', restricted: ['/a', '', 3] })).toEqual({
+    // 舊版的資料夾限制（restrict／restricted）不再讀：資料夾歸屬改由歸屬表決定
+    expect(normalizeSwitch({ on: false, fiveHour: 'x', sevenDay: null, order: ['a', 3], restrict: true, restricted: ['/a'] })).toEqual({
       on: false,
       fiveHour: 90,
       sevenDay: null,
       order: ['a'],
-      restrict: false,
-      restricted: ['/a'],
     })
     // 舊版的 folders／otherFolders 不再讀：回到預設的「全部資料夾都能換到任何帳號」
     expect(normalizeSwitch({ folders: { '/a': 'same-org' }, otherFolders: 'same-org' })).toEqual(DEFAULT_SWITCH)
@@ -180,43 +180,35 @@ describe('用量', () => {
 })
 
 describe('換帳號的規則', () => {
-  const sw: BraidSwitch = { ...DEFAULT_SWITCH, restrict: true, restricted: ['/work', 'C:\\proj'] }
-
-  test('預設不限制；設了才看清單，子資料夾跟著，名稱只是開頭相同的不算', async () => {
-    expect(isRestricted(DEFAULT_SWITCH, '/work/server')).toBe(false)
-    expect(isRestricted({ ...sw, restrict: false }, '/work/server')).toBe(false) // 切回全部時清單留著但不生效
-    expect([isRestricted(sw, '/work'), isRestricted(sw, '/work/server/api'), isRestricted(sw, '/workshop'), isRestricted(sw, '/side/blog')]).toEqual([true, true, false, false])
-    expect(isRestricted(sw, 'C:\\proj\\a')).toBe(true)
-  })
-
   test('順序：設定的在前，其餘照最近出現排', async () => {
     expect(orderedIds(ACCOUNTS, ['home'])).toEqual(['home', 'work', 'work2'])
     expect(orderedIds(ACCOUNTS, ['gone'])).toEqual(['work', 'work2', 'home'])
   })
 
-  test('限制的資料夾不換到其他組織的帳號；組織不明也不算同組織', async () => {
-    const list = candidates({ ...ACCOUNTS, tok: account('tok', { credential: 'file', credentialId: 'tok' }) }, 'work', sw, '/work/server', NOW)
+  test('資料夾歸公司：同組織的帳號可以接手；個人與組織不明的帳號要先確認（不同邊）', async () => {
+    const list = candidates({ ...ACCOUNTS, tok: account('tok', { credential: 'file', credentialId: 'tok' }) }, 'work', DEFAULT_SWITCH, work, null, NOW)
     expect(list.map(c => [c.account.id, c.why])).toEqual([
       ['work2', 'ok'],
-      ['home', 'other-org'],
-      ['tok', 'other-org'],
+      ['home', 'other-side'],
+      ['tok', 'other-side'],
     ])
   })
 
-  test('沒限制的資料夾：哪個組織都可以；沒有憑證的、也快用完的都說明原因', async () => {
+  test('沒設定歸屬：哪個帳號都可以；沒有憑證的、也快用完的說明原因；CLI 自己登入的帳號沒有憑證也能接手', async () => {
     const busy = { ...work2, usage: { fiveHour: { pct: 95, resetsAt: iso(NOW + H) }, sevenDay: null, at: NOW } }
-    const list = candidates({ work, work2: busy, home, desk: account('desk', { lastSeen: -1 }) }, 'work', sw, '/side/blog', NOW)
+    const list = candidates({ work, work2: busy, home, desk: account('desk', { lastSeen: -1 }), login: account('login', { lastSeen: -2 }) }, 'work', DEFAULT_SWITCH, null, 'login', NOW)
     expect(list.map(c => [c.account.id, c.why])).toEqual([
       ['work2', 'busy'],
       ['home', 'ok'],
       ['desk', 'no-credential'],
+      ['login', 'ok'],
     ])
   })
 })
 
 describe('輸入框上方的提示', () => {
   const live = (five: number, seven = 10) => ({ fiveHour: { pct: five, resetsAt: iso(NOW + 2 * H) }, sevenDay: { pct: seven, resetsAt: iso(NOW + 96 * H) }, at: NOW })
-  const at = (pct: number, seven?: number, snooze: string | null = null, sw: BraidSwitch = DEFAULT_SWITCH) => bandFor(ACCOUNTS, 'work', live(pct, seven), sw, '/work', NOW, snooze)
+  const at = (pct: number, seven?: number, snooze: string | null = null, sw: BraidSwitch = DEFAULT_SWITCH) => bandFor(ACCOUNTS, 'work', live(pct, seven), sw, null, null, NOW, snooze)
 
   test('沒到門檻不出現；關掉也不出現', async () => {
     expect(at(89)).toBe(null)
@@ -241,8 +233,13 @@ describe('輸入框上方的提示', () => {
   })
 
   test('沒有可以一鍵接手的：給可以在桌面 app 手動換的帳號', async () => {
-    const band = bandFor({ work, desk: account('desk', { orgId: 'org-w' }) }, 'work', live(92), DEFAULT_SWITCH, '/work', NOW, null)
+    const band = bandFor({ work, desk: account('desk', { orgId: 'org-w' }) }, 'work', live(92), DEFAULT_SWITCH, null, null, NOW, null)
     expect([band?.best, band?.manual?.id]).toEqual([null, 'desk'])
+  })
+
+  test('資料夾歸公司、只剩個人帳號能接：不當成「一鍵接手」，而是要確認的那個（規格第 9 格）', async () => {
+    const band = bandFor({ work, home }, 'work', live(100), DEFAULT_SWITCH, work, null, NOW, null)
+    expect([band?.best, band?.risky?.id]).toEqual([null, 'home'])
   })
 })
 
@@ -729,5 +726,101 @@ describe('桌面版的圖', () => {
   test('版本比大小：照數字，不照字母；讀不懂的不算新', async () => {
     expect([isNewer('0.3.10', '0.3.9'), isNewer('0.4.0', '0.3.4'), isNewer('0.3.4', '0.3.4'), isNewer('0.3.3', '0.3.4'), isNewer('1.0', '0.9.9')]).toEqual([true, true, false, false, true])
     expect([isNewer(null, '0.3.4'), isNewer('beta', '0.3.4'), isNewer('0.4.0', null)]).toEqual([false, false, false])
+  })
+})
+
+describe('歸屬表', () => {
+  // 分得出公司或個人的帳號：公司信箱、個人信箱
+  const work = account('work', { orgId: 'org-w', label: '公司', email: 'me@corp.example' })
+  const work2 = account('work2', { orgId: 'org-w', label: '公司 2', email: 'me2@corp.example' })
+  const home = account('home', { orgId: 'org-h', label: '個人', email: 'me@gmail.com' })
+  const policy = normalizePolicy({
+    rules: [
+      { folder: '/p/acme/', owner: 'work' },
+      { folder: '/p/acme/sandbox', owner: 'home' },
+      { folder: 'C:\\code', owner: ANY },
+      { folder: '', owner: 'x' },
+      { folder: '/p/bad' },
+    ],
+  })
+
+  test('讀回：去掉結尾斜線、壞的略過；同一個資料夾只留最後一條', async () => {
+    expect(policy.rules).toEqual([
+      { folder: '/p/acme', owner: 'work' },
+      { folder: '/p/acme/sandbox', owner: 'home' },
+      { folder: 'C:\\code', owner: ANY },
+    ])
+    expect(setRule(policy, '/p/acme/', 'home').rules.filter(r => r.folder === '/p/acme')).toEqual([{ folder: '/p/acme', owner: 'home' }])
+    expect([cleanFolder('/'), cleanFolder('C:\\'), cleanFolder(' /a/b// ')]).toEqual(['/', 'C:\\', '/a/b'])
+  })
+
+  test('含子資料夾、取最具體的；worktree 跟著它的專案；開頭相同但不是子資料夾的不算；Windows 路徑也行', async () => {
+    expect(ruleFor(policy, '/p/acme/server/api')?.owner).toBe('work')
+    expect(ruleFor(policy, '/p/acme/sandbox/x')?.owner).toBe('home')
+    expect(ruleFor(policy, '/p/acme/.claude/worktrees/feat-x/src')?.owner).toBe('work')
+    expect(projectOf('/p/braid/.claude/worktrees/fix-1')).toBe('/p/braid')
+    expect(ruleFor(policy, '/p/acme-old')).toBe(null)
+    expect(ruleFor(policy, 'C:\\code\\app')?.owner).toBe(ANY)
+  })
+
+  test('四種組合：對得上、公司專案用個人帳號、個人專案用公司帳號；不分；還沒設定；歸屬帳號被移除', async () => {
+    const accounts = { work, work2, home }
+    const p = { rules: [{ folder: '/w', owner: 'work' }, { folder: '/me', owner: 'home' }, { folder: '/any', owner: ANY }, { folder: '/gone', owner: 'x' }] }
+    expect(verdictFor(p, accounts, work, '/w/a').kind).toBe('ok')
+    expect(verdictFor(p, accounts, work2, '/w/a').kind).toBe('ok') // 同組織的第二個帳號也算公司
+    expect(verdictFor(p, accounts, home, '/w/a')).toMatchObject({ kind: 'mismatch', risk: 'work-via-personal' })
+    expect(verdictFor(p, accounts, work, '/me/blog')).toMatchObject({ kind: 'mismatch', risk: 'personal-via-work' })
+    expect(verdictFor(p, accounts, home, '/me/blog').kind).toBe('ok')
+    expect(verdictFor(p, accounts, home, '/any/x').kind).toBe('any')
+    expect(verdictFor(p, accounts, home, '/other')).toEqual({ kind: 'unset', project: '/other' })
+    expect(verdictFor(p, accounts, home, '/gone/x').kind).toBe('lost')
+  })
+
+  test('哪一邊：組織名稱寫個人、或常見個人信箱是個人；其他信箱是公司；都沒有不知道', async () => {
+    expect([sideOf(work), sideOf(home), sideOf({ email: null, orgName: null }), sideOf({ email: 'a@corp.example', orgName: "Me's Individual Org personal" })]).toEqual(['work', 'personal', 'unknown', 'personal'])
+    expect([riskOf(work, home), riskOf(home, work), riskOf(work, account('x', { email: null }))]).toEqual(['work-via-personal', 'personal-via-work', 'other'])
+  })
+
+  test('git 遠端：取主機與擁有者；工作區看底下 repo 最多的；沒有遠端的另成一組放最後', async () => {
+    expect([remoteKey('git@github.com:Me/braid.git'), remoteKey('https://gitlab.example.com/team/x.git'), remoteKey('ssh://git@host:2222/grp/x.git'), remoteKey('nope'), remoteKey(null)]).toEqual([
+      'github.com/me',
+      'gitlab.example.com/team',
+      'host/grp',
+      null,
+      null,
+    ])
+    const groups = draftGroups([
+      { folder: '/p/a', remote: 'git@github.com:me/a.git', inner: [] },
+      { folder: '/p/b', remote: 'git@github.com:me/b.git', inner: [] },
+      { folder: '/p/ws', remote: null, inner: ['git@corp.example:team/x.git', 'git@corp.example:team/y.git', 'git@gitlab.com:other/z.git'] },
+      { folder: '/p/notes', remote: null, inner: [] },
+    ])
+    expect(groups).toEqual([
+      { key: 'github.com/me', folders: ['/p/a', '/p/b'] },
+      { key: 'corp.example/team', folders: ['/p/ws'] },
+      { key: null, folders: ['/p/notes'] },
+    ])
+  })
+})
+
+describe('頁面清單', () => {
+  test('什麼算新頁：沒帶網址的發布、從類型新建；更新、讀、列清單、上傳素材都不算', async () => {
+    expect([isNewPage({ file_path: 'a.html' }), isNewPage({ action: 'publish', type_url: 't' }), isNewPage({ file_path: 'a.html', url: 'u' }), isNewPage({ action: 'read', url: 'u' }), isNewPage({ action: 'list' }), isNewPage({ url: 'u', asset: true, file_path: 'x.png' })]).toEqual([
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+    ])
+  })
+
+  test('讀回清單：壞掉的檔是空清單、缺欄位的略過；網址、標題、資料夾名稱', async () => {
+    expect(parseIndex('{壞').pages).toEqual([])
+    expect(parseIndex(JSON.stringify({ pages: [{ id: 'a', project: '/p', status: 'weird' }, { id: 'b' }] })).pages.map(p => [p.id, p.status, p.title])).toEqual([['a', 'pending', '（沒有標題）']])
+    expect(urlIn('Published: https://claude.ai/code/artifact/abc-123 (private)')).toBe('https://claude.ai/code/artifact/abc-123')
+    expect(urlIn('no url')).toBe(null)
+    expect([titleOf({ title: 'T' }, null), titleOf({ file_path: '/x/report.html' }, '<title> 報告 </title>'), titleOf({ file_path: '/x/report.html' }, null)]).toEqual(['T', '報告', 'report'])
+    expect([projectSlug('/home/me/projects/acme'), projectSlug('C:\\work\\my app'), projectSlug('/')]).toEqual(['acme', 'my-app', 'project'])
   })
 })

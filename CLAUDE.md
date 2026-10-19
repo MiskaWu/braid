@@ -28,6 +28,8 @@ mod/                              plugin 本體（從 marketplace 安裝時只�
   hooks/desktop.ts                讀桌面 app 的側欄資料與備份（收一組讀檔函式，不收 $）
   hooks/mirror.ts                 自動同步的核心：把側欄紀錄複製到沒登入的帳號（收一組讀寫檔函式，不收 $）
   hooks/visual.ts                 桌面版面板的圖（帳號卡、用量條、同步卡）：給資料回 SVG 字串的純函式
+  hooks/policy.ts                 歸屬表：資料夾 → 帳號、對得上與否與風險方向、git 遠端分組（純邏輯）
+  hooks/pages.ts                  頁面清單（~/.claude/artifact-sources/index.json）的格式與判斷（純邏輯）
   types/index.d.ts                $.state 的契約
   tests/                          claude plugin test：model.test.ts（純邏輯）、braid.test.tsx（終端機與桌面兩種畫面）
   tool/spec.json                  兩個平台共用的遷移規則
@@ -131,6 +133,13 @@ tests/                            工具的測試（Node＋classic-level 造資�
   帳號色是 Claude 設計系統的類別色前五個（`model.ts` 的 `SLOTS`，用 dataviz 驗證器在深淺兩種底色驗過；改顏色或順序要重跑）。
   桌面 app 面板的底色是 `#1a1a19`，和設計系統的深色底一樣。設計稿的預覽方法：把產生器的輸出放進 462px 寬的頁面，
   用 Playwright 分別以深、淺色截圖來看。
+- **歸屬只有一張表**：資料夾 → 帳號（`$.store` 的 `policy`），「對得上」看同一個帳號或同一個組織。切換頁的舊資料夾限制
+  （restrict／restricted）已拆掉，換帳號候選改看歸屬（`candidates` 的 `other-side`＝可以但要確認）。
+  新頁攔截掛 Artifact 的 `tool.call`，判斷出錯時寧可不發布（`.catch` 回 deny）：頁面歸錯帳號事後不能轉移。
+  braid 自己替使用者發布排隊的頁時用 `publishingNow` 放行。待發布清單用檔案（`~/.claude/artifact-sources/index.json`），
+  因為發布用終端機是另一個 `CLAUDE_CONFIG_DIR`，讀不到這邊的 `$.store`。官方只保證 `/login` 的對話能發布，
+  braid 用一年期憑證開的視窗（`BRAID_ACCOUNT`）不給「發布」。CLI 自己 `/login` 的帳號（`~/.claude.json`）
+  沒有 braid 的憑證也能「接著做」：腳本收到憑證 id「-」就不帶憑證直接開 claude。
 - **用量顯示**：狀態列（`$.ui.status`）只能放文字，寫 5 小時與 7 天；桌面版另外在輸入框下方那行（`PromptHint`）
   先拿 `next(e)` 畫好的 app 提示，再在旁邊接 `usageStrip` 的 SVG 量表，不蓋掉 app 自己的提示。
 - **更新**：官方是 `/plugin` 裡打開 marketplace 的自動更新（第三方預設關，`marketplace.json` 不能替使用者開）。

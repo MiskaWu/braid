@@ -6,6 +6,7 @@
 #
 # 用法：resume.sh <憑證 id> <session id> <工作資料夾> <claude 執行檔> [帳號名稱] [帳號 id]
 #   帳號 id 交給新的對話（BRAID_ACCOUNT），braid 才知道那邊量到的用量是哪個帳號的；沒給就用憑證 id。
+#   憑證 id 是「-」：不帶憑證，用 Claude Code 自己登入的帳號（/login 的那個）接著做。
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 id=${1:-} sid=${2:-} cwd=${3:-} claude=${4:-claude} label=${5:-另一個帳號} account=${6:-${1:-}}
@@ -17,8 +18,11 @@ fail() {
   exit 1
 }
 
-token=$("$here/secret.sh" get "$id" 2>/dev/null) && [ -n "$token" ] \
-  || fail "找不到「$label」的登入憑證。請在 Claude 輸入 /braid，到帳號頁重新新增這個帳號。"
+token=
+if [ "$id" != - ]; then
+  token=$("$here/secret.sh" get "$id" 2>/dev/null) && [ -n "$token" ] \
+    || fail "找不到「$label」的登入憑證。請在 Claude 輸入 /braid，到帳號頁重新新增這個帳號。"
+fi
 cd "$cwd" 2>/dev/null || fail "找不到工作資料夾：$cwd"
 command -v "$claude" >/dev/null 2>&1 || fail "找不到 Claude Code：$claude"
 
@@ -33,5 +37,6 @@ unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID CLAUDE_CODE_HOST_
 echo "用「$label」接著這段對話：複製一份新的對話接著做，原本的保留不動。"
 echo
 export BRAID_ACCOUNT="$account"
+if [ -z "$token" ]; then exec "$claude" --resume "$sid" --fork-session; fi
 export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3
 exec "$claude" --resume "$sid" --fork-session 3< <(printf '%s' "$token")

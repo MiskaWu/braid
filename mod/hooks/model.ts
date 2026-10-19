@@ -27,8 +27,8 @@ export const COLOR_NAMES: Record<string, string> = Object.fromEntries(SLOTS.map(
 // 0.3.4 以前的顏色換成新配色裡最接近的那個（紫色沒有對應，併到桃紅）
 const LEGACY_COLORS: Record<string, string> = { '#3b6fe0': '#2a78d6', '#14a38e': '#1baf7a', '#d9822b': '#eb6834', '#8e6bd8': '#e87ba4', '#c2417a': '#e87ba4' }
 
-export const DEFAULT_USES: BraidUses = { migrate: false, switch: false, sync: false }
-export const DEFAULT_SWITCH: BraidSwitch = { on: true, fiveHour: 90, sevenDay: 95, order: [], restrict: false, restricted: [] }
+export const DEFAULT_USES: BraidUses = { migrate: false, switch: false, sync: false, policy: false }
+export const DEFAULT_SWITCH: BraidSwitch = { on: true, fiveHour: 90, sevenDay: 95, order: [] }
 export const DEFAULT_SYNC: BraidSync = { on: false, pair: [], all: true, folders: [] }
 export const DEFAULT_KEEP: BraidKeep = { deletedDays: 30, toolCopies: 5 }
 export const KEEP_DAYS_CHOICES = [7, 30, 90] as const
@@ -44,7 +44,7 @@ const num = (x: unknown, fallback: number): number => (typeof x === 'number' && 
 
 export function normalizeUses(x: unknown): BraidUses | null {
   if (!isObj(x)) return null
-  return { migrate: x.migrate === true, switch: x.switch === true, sync: x.sync === true }
+  return { migrate: x.migrate === true, switch: x.switch === true, sync: x.sync === true, policy: x.policy === true }
 }
 
 export function normalizeSwitch(x: unknown): BraidSwitch {
@@ -54,8 +54,6 @@ export function normalizeSwitch(x: unknown): BraidSwitch {
     fiveHour: num(x.fiveHour, DEFAULT_SWITCH.fiveHour),
     sevenDay: x.sevenDay === null ? null : num(x.sevenDay, DEFAULT_SWITCH.sevenDay ?? 95),
     order: Array.isArray(x.order) ? x.order.filter((v): v is string => typeof v === 'string') : [],
-    restrict: x.restrict === true,
-    restricted: Array.isArray(x.restricted) ? x.restricted.filter((v): v is string => typeof v === 'string' && v !== '') : [],
   }
 }
 
@@ -339,12 +337,6 @@ export function parseTz(text: string): number {
 
 // ── 換帳號 ──
 
-/** 這個資料夾（含子資料夾）是不是設成只換同組織的帳號。預設不限制。 */
-export function isRestricted(sw: BraidSwitch, cwd: string): boolean {
-  if (!sw.restrict) return false
-  return sw.restricted.some(f => cwd === f || cwd.startsWith(f.endsWith('/') || f.endsWith('\\') ? f : `${f}/`) || cwd.startsWith(`${f}\\`))
-}
-
 /** 依設定的順序排帳號；沒排到的照最近出現的時間排在後面。 */
 export function orderedIds(accounts: Record<string, BraidAccount>, order: readonly string[]): string[] {
   const listed = order.filter(id => accounts[id])
@@ -355,7 +347,11 @@ export function orderedIds(accounts: Record<string, BraidAccount>, order: readon
   return [...listed, ...rest]
 }
 
-export type Why = 'ok' | 'other-org' | 'no-credential' | 'busy'
+/**
+ * 能不能接手：ok；跟這個資料夾的歸屬不同邊（other-side，可以但要先確認風險）；
+ * braid 沒有憑證、也不是 CLI 自己登入的帳號（no-credential，只能在桌面 app 換）；也快用完（busy）。
+ */
+export type Why = 'ok' | 'other-side' | 'no-credential' | 'busy'
 
 export type Candidate = { account: BraidAccount; why: Why }
 
@@ -367,21 +363,33 @@ export function isBusy(usage: BraidUsage | null, sw: BraidSwitch, now: number): 
   return (five !== null && five >= sw.fiveHour) || (sw.sevenDay !== null && seven !== null && seven >= sw.sevenDay)
 }
 
+/** 能在新視窗接著做：braid 有它的憑證，或它就是 CLI 自己 /login 的帳號（不帶憑證直接開）。 */
+export function canHandoff(a: BraidAccount, cliLogin: string | null): boolean {
+  return a.credential !== null || (cliLogin !== null && a.id === cliLogin)
+}
+
+const sameSide = (a: BraidAccount, b: BraidAccount) => a.id === b.id || (!!a.orgId && !!b.orgId && a.orgId === b.orgId)
+
 /**
- * 其他帳號依順序，各自能不能接手、不能的話為什麼。
- * 只換同組織的資料夾：組織不明的帳號（braid 新增、使用者沒說是哪個組織）一律不算同組織。
+ * 其他帳號依順序，各自能不能接手、不能的話為什麼。owner 是這個資料夾的歸屬帳號（歸屬表；沒設定或不分是 null）：
+ * 跟它不同邊的帳號標成 other-side——額度用完時可以暫用，但要先確認風險（規格第 9 格）。
  */
-export function candidates(accounts: Record<string, BraidAccount>, currentId: string, sw: BraidSwitch, cwd: string, now: number): Candidate[] {
-  const current = accounts[currentId]
-  const sameOrgOnly = isRestricted(sw, cwd)
+export function candidates(
+  accounts: Record<string, BraidAccount>,
+  currentId: string,
+  sw: BraidSwitch,
+  owner: BraidAccount | null,
+  cliLogin: string | null,
+  now: number,
+): Candidate[] {
   return orderedIds(accounts, sw.order)
     .filter(id => id !== currentId)
     .map(id => {
       const account = accounts[id] as BraidAccount
       let why: Why = 'ok'
-      if (sameOrgOnly && (!account.orgId || !current?.orgId || account.orgId !== current.orgId)) why = 'other-org'
-      else if (!account.credential) why = 'no-credential'
+      if (!canHandoff(account, cliLogin)) why = 'no-credential'
       else if (isBusy(account.usage, sw, now)) why = 'busy'
+      else if (owner && !sameSide(owner, account)) why = 'other-side'
       return { account, why }
     })
 }
@@ -395,6 +403,8 @@ export type Band = {
   snoozeKey: string
   /** 可以一鍵接著做的帳號 */
   best: BraidAccount | null
+  /** 只剩跟資料夾歸屬不同邊的帳號能接：要先確認風險 */
+  risky: BraidAccount | null
   /** 沒有 braid 的憑證、但可以在桌面 app 手動換過去的帳號 */
   manual: BraidAccount | null
 }
@@ -405,7 +415,8 @@ export function bandFor(
   currentId: string | null,
   live: BraidUsage | null,
   sw: BraidSwitch,
-  cwd: string,
+  owner: BraidAccount | null,
+  cliLogin: string | null,
   now: number,
   snooze: string | null,
 ): Band | null {
@@ -420,11 +431,12 @@ export function bandFor(
   if (!hit) return null
   const snoozeKey = `${currentId}|${hit.window}|${hit.resetsAt ?? ''}|${hit.kind}`
   if (snooze === snoozeKey) return null
-  const list = candidates(accounts, currentId, sw, cwd, now)
+  const list = candidates(accounts, currentId, sw, owner, cliLogin, now)
   return {
     ...hit,
     snoozeKey,
     best: list.find(c => c.why === 'ok')?.account ?? null,
+    risky: list.find(c => c.why === 'other-side')?.account ?? null,
     manual: list.find(c => c.why === 'no-credential')?.account ?? null,
   }
 }
