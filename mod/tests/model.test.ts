@@ -13,6 +13,10 @@ import {
   fmtReset,
   isRestricted,
   meter,
+  expiredFiles,
+  extraToolBackups,
+  fmtBytes,
+  normalizeKeep,
   mirrorTarget,
   nameOf,
   normalizeAccount,
@@ -31,7 +35,7 @@ import {
   usageFrom,
 } from '../hooks/model'
 import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo, type SessionSpec } from '../hooks/mirror'
-import { newCredentialId, planTerminal, removeFile, secretDelete, wrapperText } from '../hooks/terminal'
+import { newCredentialId, planTerminal, removeFile, removeToolBackup, secretDelete, wrapperText } from '../hooks/terminal'
 
 // 2026-10-16 14:00（UTC+8）
 const NOW = Date.parse('2026-10-16T06:00:00Z')
@@ -595,5 +599,44 @@ describe('自動同步：複製側欄紀錄', () => {
     expect(parseSpec(JSON.stringify({ sessions: { ...SPEC, dropKeys: 'x' } }))).toBe(null)
     expect(parseSpec(JSON.stringify({ sessions: { ...SPEC, filePrefix: '' } }))).toBe(null)
     expect(parseSpec('{')).toBe(null)
+  })
+})
+
+describe('備份保留', () => {
+  test('整份備份：新到舊留最新幾份（同一秒的第二份算比較新），不像備份的名稱不碰；null 全部留著', async () => {
+    const names = ['20261003-090000', 'before-auto-sync', '20261001-090000', '20261003-090000-2', '20261003-090000-10', '20261002-090000']
+    // 同一秒的第 10 份比第 2 份新（照數字，不照字母）
+    expect(extraToolBackups(names, 2)).toEqual(['20261003-090000', '20261002-090000', '20261001-090000'])
+    expect(extraToolBackups(names, 10)).toEqual([])
+    expect(extraToolBackups(names, null)).toEqual([])
+  })
+
+  test('同步刪掉的備份：超過幾天的才清；null 全部留著；讀不到時間的不清', async () => {
+    const day = 86_400_000
+    const files = [
+      { path: 'a', mtimeMs: NOW - 31 * day },
+      { path: 'b', mtimeMs: NOW - 29 * day },
+      { path: 'c', mtimeMs: 0 },
+    ]
+    expect(expiredFiles(files, 30, NOW)).toEqual(['a'])
+    expect(expiredFiles(files, null, NOW)).toEqual([])
+  })
+
+  test('設定：預設 30 天、5 份；null＝一直留著；壞值回預設', async () => {
+    expect(normalizeKeep(undefined)).toEqual({ deletedDays: 30, toolCopies: 5 })
+    expect(normalizeKeep({ deletedDays: null, toolCopies: 3 })).toEqual({ deletedDays: null, toolCopies: 3 })
+    expect(normalizeKeep({ deletedDays: -1, toolCopies: 2.5 })).toEqual({ deletedDays: 30, toolCopies: 5 })
+    expect([fmtBytes(7), fmtBytes(2048), fmtBytes(5 * 1024 * 1024)]).toEqual(['7 B', '2 KB', '5.0 MB'])
+  })
+
+  test('刪整份備份：只收備份名稱、路徑自己組；名稱不對就丟錯', async () => {
+    expect(removeToolBackup('wsl', '/mnt/c/Users/u/braid-backups/', '20261001-090000')).toEqual(['rm', '-rf', '--', '/mnt/c/Users/u/braid-backups/20261001-090000'])
+    expect(removeToolBackup('windows', 'C:\\Users\\u\\braid-backups', '20261001-090000-2')).toEqual([
+      'powershell.exe',
+      '-NoProfile',
+      '-Command',
+      "Remove-Item -LiteralPath 'C:\\Users\\u\\braid-backups\\20261001-090000-2' -Recurse -Force -ErrorAction SilentlyContinue",
+    ])
+    for (const bad of ['..', '../x', 'sync-deleted', '20261001-090000/../..', '']) expect(() => removeToolBackup('wsl', '/b', bad)).toThrow(/不是備份資料夾/)
   })
 })

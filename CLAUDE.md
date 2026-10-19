@@ -82,6 +82,9 @@ tests/                            工具的測試（Node＋classic-level 造資�
   刪除只依作用中帳號資料夾裡明確的 `deleted_<id>`（app 刪對話時寫，內容是刪除時間），刪前先備份到
   `braid-backups/sync-deleted/`、刪後留同樣時間的 `deleted_<id>`；目標那筆最後活動晚於刪除時間就不刪。
   app 刪對話本身會停程序、刪 worktree 與分支（共用的），WSL 的對話檔不刪（`holdsLocalTranscripts` 只認 local）。
+- **清舊備份只落在兩個地方**：`sync-deleted/<帳號>/<組織>/` 裡的檔（看修改時間）與 `braid-backups/<時間>`
+  資料夾（留最新幾份）。遞迴刪除只經過 `terminal.ts` 的 `removeToolBackup`：它只收資料夾名稱、自己組路徑、
+  名稱不符 `TOOL_BACKUP_NAME` 就丟錯，不要另外寫一條收完整路徑的遞迴刪除。保留天數與份數由使用者在面板選（`$.store` 的 `keep`）。
 - **只複製、不搬移，寫入前備份**；重跑必須是安全的（已有的略過）。
 - **格式認不得就停**：Local Storage 版本不在 `spec.json` 的 `supportedVersions`、LevelDB 校驗不過，
   一律放棄寫環境並說明，不猜。

@@ -4,6 +4,7 @@
 import type { FsEntry } from 'claude-code'
 
 import type { BraidBackup, BraidDesktop, BraidFolder, BraidPlatform, BraidProfile } from '../types'
+import { TOOL_BACKUP_NAME } from './model'
 
 export type DesktopIo = {
   list: (path: string) => Promise<readonly FsEntry[]>
@@ -88,9 +89,34 @@ async function readProfile(io: DesktopIo, dir: string, sep: string, account: str
   return { account, org, sessions, lastActivity, folders }
 }
 
+/** 遷移工具的整份備份：備份資料夾底下名稱像時間、裡面有 manifest.json 的資料夾。 */
+export async function listToolBackups(io: DesktopIo, backups: DesktopPaths['backups']): Promise<string[]> {
+  const out: string[] = []
+  for (const b of await list(io, backups.local)) {
+    if (b.kind !== 'dir' || !TOOL_BACKUP_NAME.test(b.name)) continue
+    if (await io.exists(`${backups.local}${backups.sep}${b.name}${backups.sep}manifest.json`)) out.push(b.name)
+  }
+  return out
+}
+
+/** 同步刪掉的對話備份：<備份資料夾>/sync-deleted/<帳號>/<組織>/ 底下的檔案。 */
+export async function listTrash(io: DesktopIo, backups: DesktopPaths['backups']): Promise<{ path: string; mtimeMs: number; size: number }[]> {
+  const root = `${backups.local}${backups.sep}sync-deleted`
+  const out: { path: string; mtimeMs: number; size: number }[] = []
+  for (const a of await list(io, root)) {
+    if (a.kind !== 'dir') continue
+    for (const o of await list(io, `${root}${backups.sep}${a.name}`)) {
+      if (o.kind !== 'dir') continue
+      const dir = `${root}${backups.sep}${a.name}${backups.sep}${o.name}`
+      for (const f of await list(io, dir)) if (f.kind === 'file') out.push({ path: `${dir}${backups.sep}${f.name}`, mtimeMs: f.mtimeMs, size: f.size })
+    }
+  }
+  return out
+}
+
 export async function scanDesktop(io: DesktopIo, env: DesktopEnv, platform: BraidPlatform): Promise<BraidDesktop> {
   const paths = await desktopPaths(io, env, platform)
-  if (!paths) return { profiles: [], backups: [], error: platform === 'other' ? 'no-desktop' : 'no-paths' }
+  if (!paths) return { profiles: [], backups: [], backupRoot: null, trash: { count: 0, bytes: 0 }, error: platform === 'other' ? 'no-desktop' : 'no-paths' }
   const sep = platform === 'windows' ? '\\' : '/'
   const root = `${paths.appData}${sep}claude-code-sessions`
   const profiles: BraidProfile[] = []
@@ -102,15 +128,17 @@ export async function scanDesktop(io: DesktopIo, env: DesktopEnv, platform: Brai
       if (p.sessions > 0) profiles.push(p)
     }
   }
-  const backups: BraidBackup[] = []
-  for (const b of await list(io, paths.backups.local)) {
-    if (b.kind !== 'dir' || !/^\d{8}-\d{6}(-\d+)?$/.test(b.name)) continue
-    if (!(await io.exists(`${paths.backups.local}${paths.backups.sep}${b.name}${paths.backups.sep}manifest.json`))) continue
-    const toolSep = platform === 'mac' ? '/' : '\\'
-    backups.push({ name: b.name, dir: `${paths.backups.win}${toolSep}${b.name}` })
-  }
+  const toolSep = platform === 'mac' ? '/' : '\\'
+  const backups: BraidBackup[] = (await listToolBackups(io, paths.backups)).map(name => ({ name, dir: `${paths.backups.win}${toolSep}${name}` }))
   backups.sort((x, y) => y.name.localeCompare(x.name))
-  return { profiles: profiles.sort((x, y) => y.lastActivity - x.lastActivity), backups, error: null }
+  const trash = await listTrash(io, paths.backups)
+  return {
+    profiles: profiles.sort((x, y) => y.lastActivity - x.lastActivity),
+    backups,
+    backupRoot: paths.backups.win,
+    trash: { count: trash.length, bytes: trash.reduce((n, f) => n + f.size, 0) },
+    error: null,
+  }
 }
 
 /** 備份資料夾名稱 20261016-140211 → 10/16 14:02。 */

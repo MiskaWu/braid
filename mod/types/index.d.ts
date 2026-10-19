@@ -71,6 +71,9 @@ export type BraidMirror = {
   detail: string | null
 }
 
+/** 備份留多久：同步刪掉的對話備份留幾天、遷移工具的整份備份留最新幾份；null＝一直留著。 */
+export type BraidKeep = { deletedDays: number | null; toolCopies: number | null }
+
 export type BraidTab = 'accounts' | 'switch' | 'sync' | 'migrate'
 
 export type BraidPlatform = 'wsl' | 'windows' | 'mac' | 'other'
@@ -79,7 +82,14 @@ export type BraidPlatform = 'wsl' | 'windows' | 'mac' | 'other'
 export type BraidFolder = { path: string; sessions: number; lastActivity: number }
 export type BraidProfile = { account: string; org: string; sessions: number; lastActivity: number; folders: BraidFolder[] }
 export type BraidBackup = { name: string; dir: string }
-export type BraidDesktop = { profiles: BraidProfile[]; backups: BraidBackup[]; error: string | null }
+/** 備份資料夾（給人看的寫法）、遷移工具的整份備份、同步刪掉的對話備份有幾筆多大。 */
+export type BraidDesktop = {
+  profiles: BraidProfile[]
+  backups: BraidBackup[]
+  backupRoot: string | null
+  trash: { count: number; bytes: number }
+  error: string | null
+}
 
 /** 新增帳號的進度：開視窗登入 → 等結果檔 → 填名稱。 */
 export type BraidAdd =
@@ -114,6 +124,7 @@ declare module 'claude-code' {
       handoff: BraidHandoff | null
       snooze: string | null
       mirror: BraidMirror | null
+      keep: BraidKeep
       tz: number
     }
   }

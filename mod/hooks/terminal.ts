@@ -7,6 +7,7 @@
 //   Windows：參數放在環境變數（中文路徑不經過命令列的編碼），新視窗繼承後由 PowerShell 腳本讀。
 // 憑證從不經過這裡：腳本自己從鑰匙圈或認證管理員取。
 import type { BraidPlatform } from '../types'
+import { TOOL_BACKUP_NAME } from './model'
 
 export type Job =
   | { kind: 'resume'; account: string; credentialId: string; session: string; cwd: string; claude: string; label: string }
@@ -86,6 +87,18 @@ export function secretDelete(platform: BraidPlatform, root: string, credentialId
 export function removeFile(platform: BraidPlatform, path: string): string[] {
   if (platform === 'windows') return ['powershell.exe', '-NoProfile', '-Command', `Remove-Item -LiteralPath ${psq(path)} -Force -ErrorAction SilentlyContinue`]
   return ['rm', '-f', '--', path]
+}
+
+/**
+ * 刪掉一份遷移工具的整份備份（資料夾）。只收備份資料夾的名稱、路徑由這裡組，名稱不像備份就丟錯：
+ * 遞迴刪除只會落在 <備份資料夾>/<時間> 這一層。
+ */
+export function removeToolBackup(platform: BraidPlatform, root: string, name: string): string[] {
+  if (!TOOL_BACKUP_NAME.test(name)) throw new Error(`不是備份資料夾：${name}`)
+  if (platform === 'windows') {
+    return ['powershell.exe', '-NoProfile', '-Command', `Remove-Item -LiteralPath ${psq(`${root.replace(/[\\/]+$/, '')}\\${name}`)} -Recurse -Force -ErrorAction SilentlyContinue`]
+  }
+  return ['rm', '-rf', '--', `${root.replace(/\/+$/, '')}/${name}`]
 }
 
 /** 新增帳號時給憑證的 id：tok- 加 8 個十六進位字。 */

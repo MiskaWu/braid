@@ -14,6 +14,7 @@ import type {
   BraidAccount,
   BraidAdd,
   BraidCredential,
+  BraidKeep,
   BraidMirror,
   BraidPlatform,
   BraidSwitch,
@@ -22,30 +23,38 @@ import type {
   BraidUsage,
   BraidUses,
 } from '../types'
-import { backupLabel, desktopPaths, scanDesktop, type DesktopEnv, type DesktopIo, type DesktopPaths } from './desktop'
+import { backupLabel, desktopPaths, listToolBackups, listTrash, scanDesktop, type DesktopEnv, type DesktopIo, type DesktopPaths } from './desktop'
 import { manualPath, parseDryRun, planLaunch, toolArgs, type ToolRequest } from './launch'
 import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo } from './mirror'
 import {
   bandFor,
   candidates,
   classifyOrg,
+  DEFAULT_KEEP,
   DEFAULT_SWITCH,
   DEFAULT_SYNC,
   defaultLabel,
   effectivePct,
+  expiredFiles,
+  extraToolBackups,
   FIVE_HOUR_CHOICES,
+  fmtBytes,
   fmtReset,
   meter,
   mirrorTarget,
   nameOf,
   normalizeAccount,
   normalizeFolder,
+  normalizeKeep,
   normalizeMirror,
   normalizeSwitch,
   normalizeSync,
   normalizeUses,
   orderedIds,
   isOrgId,
+  KEEP_COPIES_CHOICES,
+  KEEP_DAYS_CHOICES,
+  lookOf,
   PALETTE,
   COLOR_NAMES,
   parseTz,
@@ -61,7 +70,7 @@ import {
   type Seen,
   type Why,
 } from './model'
-import { newCredentialId, planTerminal, removeFile, secretDelete, type TerminalPlan } from './terminal'
+import { newCredentialId, planTerminal, removeFile, removeToolBackup, secretDelete, type TerminalPlan } from './terminal'
 
 type $ = EngineInterface
 type UI = Pick<ElementTable<'terminal'>, 'Box' | 'Text' | 'Button' | 'Input' | 'Select'>
@@ -85,6 +94,7 @@ const noticeAtom = atom({ plugin: 'braid', key: 'notice' } as const, null)
 const handoffAtom = atom({ plugin: 'braid', key: 'handoff' } as const, null)
 const snoozeAtom = atom({ plugin: 'braid', key: 'snooze' } as const, null)
 const mirrorAtom = atom({ plugin: 'braid', key: 'mirror' } as const, null)
+const keepAtom = atom({ plugin: 'braid', key: 'keep' } as const, DEFAULT_KEEP)
 const tzAtom = atom({ plugin: 'braid', key: 'tz' } as const, 0)
 
 // ── 指令 ────────────────────────────────────────────────────
@@ -192,12 +202,14 @@ async function loadStore($: $): Promise<void> {
   }
   const snooze = await $.store.get('snooze')
   const mirror = normalizeMirror(await $.store.get('mirror'))
+  const keep = normalizeKeep(await $.store.get('keep'))
   await update($, usesAtom, () => uses)
   await update($, switchAtom, () => sw)
   await update($, syncAtom, () => sy)
   await update($, accountsAtom, () => accounts)
   await update($, snoozeAtom, () => (typeof snooze === 'string' ? snooze : null))
   await update($, mirrorAtom, () => mirror)
+  await update($, keepAtom, () => keep)
 }
 
 async function putAccount($: $, a: BraidAccount): Promise<void> {
@@ -229,6 +241,14 @@ async function putSync($: $, change: (sy: BraidSync) => BraidSync): Promise<void
   const sy = change(await read($, syncAtom))
   await $.store.set('sync', sy)
   await update($, syncAtom, () => sy)
+}
+
+async function putKeep($: $, change: (k: BraidKeep) => BraidKeep): Promise<void> {
+  const keep = change(await read($, keepAtom))
+  await $.store.set('keep', keep)
+  await update($, keepAtom, () => keep)
+  await runPrune($, true) // 改短了就馬上清，畫面上的筆數跟著更新
+  await ensureDesktop($, true)
 }
 
 const say = ($: $, text: string | null) => update($, noticeAtom, () => text)
@@ -430,9 +450,42 @@ async function mirrorOnce($: $, platform: BraidPlatform, now: number): Promise<B
   }
 }
 
+// ── 清舊備份：同步刪掉的對話備份超過幾天、遷移工具的整份備份超過幾份就刪（使用者在面板選） ──
+
+let pruning = false
+const PRUNE_EVERY_MS = 6 * 3600_000
+
+async function runPrune($: $, force = false): Promise<void> {
+  if (pruning) return
+  const platform = await read($, platformAtom)
+  if (!platform || platform === 'other') return
+  const now = await $.clock.now()
+  const last = await $.store.get('pruneAt')
+  if (!force && typeof last === 'number' && now - last < PRUNE_EVERY_MS) return
+  pruning = true
+  try {
+    await $.store.set('pruneAt', now)
+    pathsCache ??= await desktopPaths(desktopIo($), await desktopEnv($), platform)
+    if (!pathsCache) return
+    const keep = await read($, keepAtom)
+    const io = desktopIo($)
+    const bk = pathsCache.backups
+    for (const path of expiredFiles(await listTrash(io, bk), keep.deletedDays, now)) await $.process.run(removeFile(platform, path), { timeoutMs: 15_000 })
+    for (const name of extraToolBackups(await listToolBackups(io, bk), keep.toolCopies)) await $.process.run(removeToolBackup(platform, bk.local, name), { timeoutMs: 60_000 })
+  } catch {
+    // 清不掉下次再清；備份多留不會壞事
+  } finally {
+    pruning = false
+  }
+}
+
 /** 同步對象的顯示名稱：沒當過目前帳號的桌面帳號，用它的組織去借 braid 新增帳號的名稱（nameOf）。 */
 function mirrorName(accounts: Record<string, BraidAccount>, id: string, org: string | null): string {
-  return nameOf(accounts, id, org ? [{ account: id, org, sessions: 0, lastActivity: 0, folders: [] }] : [])
+  return mirrorLook(accounts, id, org).label
+}
+
+function mirrorLook(accounts: Record<string, BraidAccount>, id: string, org: string | null): { label: string; color: string } {
+  return lookOf(accounts, id, org ? [{ account: id, org, sessions: 0, lastActivity: 0, folders: [] }] : [])
 }
 
 // ── 新增帳號 ────────────────────────────────────────────────
@@ -626,6 +679,55 @@ async function snooze($: $, key: string): Promise<void> {
 }
 
 // ── 畫面：共用的小元件 ───────────────────────────────────────
+// 每頁同一套層次：頁首（標題＋一句話）→ 區塊標題 → 內容；說明一律是小字淡色，帳號一律是色點＋名稱。
+
+function pageHead(ui: UI, key: string, title: string, sub: string) {
+  const { Box, Text } = ui
+  return (
+    <Box key={key} flexDirection="column">
+      <Text size="title" weight="bold">
+        {title}
+      </Text>
+      <Text size="footnote" dimColor>
+        {sub}
+      </Text>
+    </Box>
+  )
+}
+
+function sectionHead(ui: UI, key: string, title: string, sub?: string) {
+  const { Box, Text } = ui
+  return (
+    <Box key={key} flexDirection="column">
+      <Text size="heading" weight="semibold">
+        {title}
+      </Text>
+      {sub ? (
+        <Text size="footnote" dimColor>
+          {sub}
+        </Text>
+      ) : null}
+    </Box>
+  )
+}
+
+function fine(ui: UI, text: string, key?: string) {
+  const { Text } = ui
+  return (
+    <Text key={key} size="footnote" dimColor>
+      {text}
+    </Text>
+  )
+}
+
+function chip(ui: UI, look: { label: string; color: string }) {
+  const { Text } = ui
+  return (
+    <Text>
+      <Text color={look.color}>●</Text> <Text weight="semibold">{look.label}</Text>
+    </Text>
+  )
+}
 
 const WHY_TEXT: Record<Why, string> = {
   ok: '可以接手',
@@ -761,7 +863,11 @@ async function drawAccounts($: $, ui: UI, width: number) {
           <Text dimColor>{a.orgName ? `  ${a.orgName}` : ''}</Text>
           {isCurrent ? <Text color="success">  這個對話在用</Text> : null}
         </Text>
-        {a.email ? <Text dimColor>{a.email}</Text> : null}
+        {a.email ? (
+          <Text size="footnote" dimColor>
+            {a.email}
+          </Text>
+        ) : null}
         {isCurrent ? (
           <Box flexDirection="column">
             {meterLine(ui, `m5-${a.id}`, '5 小時', usage?.fiveHour ?? null, a.color, barWidth, now, tz)}
@@ -769,12 +875,14 @@ async function drawAccounts($: $, ui: UI, width: number) {
             {!usage && <Text dimColor>Claude 回覆一次之後就會有用量。</Text>}
           </Box>
         ) : (
-          <Text dimColor>
+          <Text size="footnote" dimColor tabular>
             {usage ? `5 小時 ${five ?? '—'}% · 7 天 ${seven ?? '—'}%（${ago(now - usage.at)}的數字）` : '還沒有用量紀錄'}
           </Text>
         )}
         {!isCurrent && (
-          <Text dimColor>{a.credential ? `可以一鍵接手（憑證存在${CREDENTIAL_TEXT[a.credential]}）` : 'braid 沒有它的登入憑證，只能在桌面 app 手動換'}</Text>
+          <Text size="footnote" dimColor>
+            {a.credential ? `可以一鍵接手（憑證存在${CREDENTIAL_TEXT[a.credential]}）` : 'braid 沒有它的登入憑證，只能在桌面 app 手動換'}
+          </Text>
         )}
         {editRow}
       </Box>
@@ -785,9 +893,10 @@ async function drawAccounts($: $, ui: UI, width: number) {
   const others = orderedIds(accounts, []).filter(id => id !== current).map(id => accounts[id] as BraidAccount)
   return (
     <Box flexDirection="column" gap={1}>
-      <Text bold>目前使用</Text>
+      {pageHead(ui, 'acc-head', '帳號', '這台電腦認得的帳號與各自的用量；有憑證的帳號可以一鍵接著這段對話。')}
+      {sectionHead(ui, 'acc-cur-head', '目前使用')}
       {cur ? block(cur, true) : <Text dimColor>認不出這個對話用的是哪個帳號。</Text>}
-      <Text bold>其他帳號</Text>
+      {sectionHead(ui, 'acc-other-head', '其他帳號')}
       {others.length === 0 && <Text dimColor>還沒有其他帳號。在桌面 app 用別的帳號開過對話、或按下面的按鈕新增，就會出現在這裡。</Text>}
       {others.map(a => block(a, false))}
       {await drawAdd($, ui)}
@@ -961,6 +1070,8 @@ async function drawSwitch($: $, ui: UI) {
   const choices = [...totals.keys()].filter(path => !sw.restricted.includes(path)).sort((x, y) => (totals.get(y) ?? 0) - (totals.get(x) ?? 0))
   return (
     <Box flexDirection="column" gap={1}>
+      {pageHead(ui, 'sw-head', '切換', '用量快用完時，輸入框上方提醒你，一鍵換另一個帳號接著做。')}
+      {sectionHead(ui, 'sw-alert-head', '提醒')}
       <Select
         key="sw-on"
         label="用量切換"
@@ -985,9 +1096,9 @@ async function drawSwitch($: $, ui: UI) {
         value={sw.sevenDay === null ? 'off' : String(sw.sevenDay)}
         onSelect={v => putSwitch($, s => ({ ...s, sevenDay: v === 'off' ? null : Number(v) }))}
       />
-      <Text dimColor>到門檻時，輸入框上方會出現提示，按了才換。</Text>
+      {fine(ui, '到門檻時，輸入框上方會出現提示，按了才換。')}
 
-      <Text bold>換到哪個帳號（由上往下找）</Text>
+      {sectionHead(ui, 'sw-order-head', '換到哪個帳號', '由上往下找第一個能接手的。')}
       {order.length < 2 && <Text dimColor>要兩個以上的帳號才換得過去，到「帳號」頁新增。</Text>}
       {order.map((id, i) => {
         const a = accounts[id] as BraidAccount
@@ -996,7 +1107,7 @@ async function drawSwitch($: $, ui: UI) {
           <Box key={`ord-${id}`} flexDirection="row" gap={1}>
             <Text wrap="truncate">
               {`${i + 1}. `}
-              <Text color={a.color}>●</Text> {a.label} <Text dimColor>{note}</Text>
+              <Text color={a.color}>●</Text> <Text weight="semibold">{a.label}</Text> <Text dimColor>{note}</Text>
             </Text>
             {i > 0 && (
               <Button
@@ -1017,9 +1128,10 @@ async function drawSwitch($: $, ui: UI) {
         )
       })}
 
+      {sectionHead(ui, 'sw-scope-head', '資料夾')}
       <Select
         key="sw-scope"
-        label="資料夾"
+        label="範圍"
         options={[
           { value: 'all', label: '全部資料夾都能換到任何帳號（建議）' },
           { value: 'restrict', label: '有些資料夾只換同組織的帳號' },
@@ -1035,7 +1147,7 @@ async function drawSwitch($: $, ui: UI) {
           cwd,
           hint: '例如公司專案：在這些資料夾（含子資料夾）不會換到個人帳號。',
         })}
-      {platform !== 'other' && <Text dimColor>在桌面 app 按「接著做」，會開一個終端機視窗用另一個帳號接著。</Text>}
+      {platform !== 'other' && fine(ui, '在桌面 app 按「接著做」，會開一個終端機視窗用另一個帳號接著。')}
     </Box>
   )
 }
@@ -1069,7 +1181,7 @@ async function drawSync($: $, ui: UI) {
   }
   const drawSyncAll = () => (
     <Box key="sy-all-box" flexDirection="column">
-      <Text dimColor>{`目前兩個帳號共 ${rows.length} 個資料夾，對話與環境全部互相帶過去。`}</Text>
+      {fine(ui, `目前兩個帳號共 ${rows.length} 個資料夾，之後新出現的也算。`)}
       {crossOrg && <Text color="warning">這兩個帳號可能不在同一個組織：全部同步會連個人專案的對話也一起帶過去，反過來也一樣。要分開，改成「只同步我挑的資料夾」。</Text>}
     </Box>
   )
@@ -1083,6 +1195,10 @@ async function drawSync($: $, ui: UI) {
     })
   return (
     <Box flexDirection="column" gap={1}>
+      {pageHead(ui, 'sy-head', '同步', '桌面 app 的兩個帳號自動同步側欄對話；額度用完，在 app 換過去就能接著做。')}
+      {drawMirrorStatus($, ui, sy, accounts, await read($, mirrorAtom), await $.clock.now())}
+
+      {sectionHead(ui, 'sy-set-head', '設定')}
       <Select
         key="sy-on"
         label="同步"
@@ -1093,7 +1209,7 @@ async function drawSync($: $, ui: UI) {
         value={sy.on ? 'on' : 'off'}
         onSelect={v => putSync($, s => ({ ...s, on: v === 'on' }))}
       />
-      {!current && <Text dimColor>認不出這個對話用的是哪個帳號，請在桌面 app 的對話裡打開 braid。</Text>}
+      {!current && fine(ui, '認不出這個對話用的是哪個帳號，請在桌面 app 的對話裡打開 braid。')}
       {current && (
         <Select
           key="sy-partner"
@@ -1103,9 +1219,9 @@ async function drawSync($: $, ui: UI) {
           onSelect={v => putSync($, s => ({ ...s, pair: v ? [current, v] : [] }))}
         />
       )}
-      {hint && <Text dimColor>{hint}</Text>}
+      {hint && fine(ui, hint)}
       {partner && (
-        <Box flexDirection="column" gap={1}>
+        <Box key="sy-scope-box" flexDirection="column" gap={1}>
           <Select
             key="sy-scope"
             label="同步範圍"
@@ -1119,45 +1235,113 @@ async function drawSync($: $, ui: UI) {
           {sy.all ? drawSyncAll() : drawSyncPicked()}
         </Box>
       )}
-      {sy.on && sy.pair.length === 2 && drawMirrorStatus($, ui, sy, accounts, await read($, mirrorAtom), await $.clock.now())}
+
       {partner && (
-        <Box key="sy-env-box" flexDirection="column">
-          <Text bold>已儲存的環境</Text>
-          <Text dimColor>環境存在 app 的內部資料庫，app 開著時寫不進去，所以不自動同步。要帶過來時按這裡：開獨立視窗，先結束 Claude，寫入前備份。</Text>
+        <Box key="sy-env-box" flexDirection="column" gap={1}>
+          {sectionHead(ui, 'sy-env-head', '已儲存的環境', '存在 app 的內部資料庫，app 開著時寫不進去，所以不自動同步。要帶過來時按這裡：開獨立視窗，先結束 Claude，寫入前備份。')}
           {request && <Button key="sy-env" label={`從「${partnerName}」帶環境過來…`} onPress={async () => say($, await launchTool($, request))} />}
         </Box>
       )}
-      <Text dimColor>
-        自動同步：桌面 app 開著時，braid 大約每分鐘把現在登入的帳號的對話複製到另一個帳號，用量快用完時再馬上同步一次。換帳號後側欄就是最新的，不用結束 Claude。刪除也跟著走：在一邊刪掉的對話，另一邊的側欄紀錄也會刪掉（刪掉之後又在那邊用過的不刪）。
-      </Text>
+
+      {await drawBackups($, ui)}
+
+      <Box key="sy-how" flexDirection="column">
+        {sectionHead(ui, 'sy-how-head', '怎麼運作')}
+        {fine(ui, '・桌面 app 開著時，大約每分鐘把現在登入的帳號的對話複製到另一個帳號；用量快用完時再馬上同步一次。', 'how-1')}
+        {fine(ui, '・只寫沒登入的那個帳號：app 換帳號時才會重讀，所以不用結束 Claude。', 'how-2')}
+        {fine(ui, '・刪除也跟著走；刪掉之後又在另一邊用過的不刪。被刪的那筆先存到備份。', 'how-3')}
+        {fine(ui, '・對話內容本來就是電腦上同一個檔，兩邊看到的是同一份。', 'how-4')}
+      </Box>
     </Box>
   )
 }
 
-/** 同步頁的狀態：桌面 app 現在登入誰、複製到哪、上次的結果；沒做成就說為什麼。 */
+/** 同步頁最上面的狀態卡：開著沒、從哪個帳號複製到哪個（帳號顏色）、上次結果；沒做成就說為什麼。 */
 function drawMirrorStatus($: $, ui: UI, sy: BraidSync, accounts: Record<string, BraidAccount>, m: BraidMirror | null, now: number) {
   const { Box, Text, Button } = ui
   const name = (id: string, org: string | null = null) => mirrorName(accounts, id, org)
-  let line: string
-  let warn = false
-  if (!m) line = '還沒同步過，馬上開始。'
-  else if (m.problem === 'no-desktop') [line, warn] = ['找不到桌面 app 的資料夾。', true]
-  else if (m.problem === 'no-active') [line, warn] = ['讀不到桌面 app 現在登入哪個帳號。', true]
-  else if (m.problem === 'no-spec') [line, warn] = ['讀不到同步規則（tool/spec.json），請重新安裝 braid。', true]
-  else if (m.problem === 'no-target' && m.to) [line, warn] = [`「${name(m.to)}」還沒在桌面 app 用過 Code 分頁：先在 app 登入它、開一個對話，之後才同步得過去。`, true]
-  else if (m.problem === 'failed') [line, warn] = [`上次同步失敗：${m.detail ?? '原因不明'}`, true]
-  else if (m.active && !sy.pair.includes(m.active)) line = `桌面 app 現在登入的是「${name(m.active)}」，不在這一對裡，先不同步。`
-  else if (!m.to) line = sy.all || sy.folders.length > 0 ? '等下一次同步。' : '還沒挑要同步的資料夾。'
-  else {
-    const counts = [m.created && `新增 ${m.created}`, m.updated && `更新 ${m.updated}`, m.deleted && `刪除 ${m.deleted}`].filter(Boolean)
-    const what = counts.length > 0 ? counts.join('、') : '已經一樣了'
-    line = `桌面 app 現在登入「${m.active ? name(m.active) : ''}」，對話會自動複製到「${name(m.to, m.toOrg)}」：換過去就看得到，不用結束 Claude。上次同步 ${ago(now - m.at)}（${what}）。`
+  const card = (tone: 'success' | 'warning' | undefined, title: string, lines: (string | null)[], flow: boolean) => (
+    <Box key="sy-status" flexDirection="column" borderStyle="round" borderColor={tone} paddingX={1}>
+      <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
+        <Text color={tone} weight="semibold">
+          {title}
+        </Text>
+        {sy.on && sy.pair.length === 2 && <Button key="sy-now" label="現在同步" onPress={() => runMirror($, 'now')} />}
+      </Box>
+      {flow && m?.active && m.to ? (
+        <Box key="sy-flow" flexDirection="row">
+          <Text>
+            {chip(ui, mirrorLook(accounts, m.active, null))}
+            <Text dimColor>{'  →  '}</Text>
+            {chip(ui, mirrorLook(accounts, m.to, m.toOrg))}
+          </Text>
+        </Box>
+      ) : null}
+      {lines.filter((l): l is string => l !== null).map((l, i) => fine(ui, l, `sy-line-${i}`))}
+    </Box>
+  )
+  if (!sy.on || sy.pair.length !== 2) return card(undefined, '○ 沒開', ['打開下面的「同步」、選一個帳號，對話就會自動跟過去。'], false)
+  if (!m) return card('success', '● 自動同步中', ['還沒同步過，馬上開始。'], false)
+  const problem: Record<NonNullable<BraidMirror['problem']>, string> = {
+    'no-desktop': '找不到桌面 app 的資料夾。',
+    'no-active': '讀不到桌面 app 現在登入哪個帳號。',
+    'no-spec': '讀不到同步規則（tool/spec.json），請重新安裝 braid。',
+    'no-target': `「${m.to ? name(m.to) : ''}」還沒在桌面 app 用過 Code 分頁：先在 app 登入它、開一個對話，之後才同步得過去。`,
+    failed: `上次同步失敗：${m.detail ?? '原因不明'}`,
   }
+  if (m.problem) return card('warning', '⚠ 沒同步成', [problem[m.problem]], false)
+  if (m.active && !sy.pair.includes(m.active)) return card(undefined, '○ 暫停', [`桌面 app 現在登入的是「${name(m.active)}」，不在這一對裡，先不同步。`], false)
+  if (!m.to) return card(undefined, '○ 暫停', [sy.all || sy.folders.length > 0 ? '等下一次同步。' : '還沒挑要同步的資料夾。'], false)
+  const counts = [m.created && `新增 ${m.created}`, m.updated && `更新 ${m.updated}`, m.deleted && `刪除 ${m.deleted}`].filter(Boolean)
+  return card(
+    'success',
+    '● 自動同步中',
+    [`對話會自動複製到「${name(m.to, m.toOrg)}」：換過去就看得到，不用結束 Claude。`, `上次同步 ${ago(now - m.at)}：${counts.length > 0 ? counts.join('、') : '已經一樣了'}`],
+    true,
+  )
+}
+
+/** 備份：保留多久（使用者選）、現在有多少、整份備份可以還原。同步頁與遷移頁共用。 */
+async function drawBackups($: $, ui: UI) {
+  const { Box, Text, Button, Select } = ui
+  const desktop = await read($, desktopAtom)
+  if (!desktop || desktop.error) return null
+  const keep = await read($, keepAtom)
   return (
-    <Box key="sy-status" flexDirection="column">
-      <Text bold>狀態</Text>
-      <Text color={warn ? 'warning' : undefined}>{line}</Text>
-      <Button key="sy-now" label="現在同步" onPress={() => runMirror($, 'now')} />
+    <Box key="bk-box" flexDirection="column" gap={1}>
+      {sectionHead(ui, 'bk-head', '備份', desktop.backupRoot ? `都放在 ${desktop.backupRoot}` : undefined)}
+      <Box key="bk-days-box" flexDirection="column">
+        <Select
+          key="keep-days"
+          label="同步刪掉的對話"
+          options={[
+            ...KEEP_DAYS_CHOICES.map(n => ({ value: String(n), label: n === DEFAULT_KEEP.deletedDays ? `留 ${n} 天（建議）` : `留 ${n} 天` })),
+            { value: 'forever', label: '一直留著' },
+          ]}
+          value={keep.deletedDays === null ? 'forever' : String(keep.deletedDays)}
+          onSelect={v => putKeep($, k => ({ ...k, deletedDays: v === 'forever' ? null : Number(v) }))}
+        />
+        {fine(ui, `目前 ${desktop.trash.count} 筆、${fmtBytes(desktop.trash.bytes)}。同步刪掉一段對話前，先把它的側欄紀錄存一份。`)}
+      </Box>
+      <Box key="bk-copies-box" flexDirection="column">
+        <Select
+          key="keep-copies"
+          label="遷移與帶環境的整份備份"
+          options={[
+            ...KEEP_COPIES_CHOICES.map(n => ({ value: String(n), label: n === DEFAULT_KEEP.toolCopies ? `留最新 ${n} 份（建議）` : `留最新 ${n} 份` })),
+            { value: 'all', label: '全部留著' },
+          ]}
+          value={keep.toolCopies === null ? 'all' : String(keep.toolCopies)}
+          onSelect={v => putKeep($, k => ({ ...k, toolCopies: v === 'all' ? null : Number(v) }))}
+        />
+        {fine(ui, `目前 ${desktop.backups.length} 份。工具寫入前會整份備份一次，可以還原。`)}
+      </Box>
+      {desktop.backups.slice(0, 5).map(b => (
+        <Box key={`bk-${b.name}`} flexDirection="row" gap={1} alignItems="center">
+          <Text tabular>{backupLabel(b.name)}</Text>
+          <Button key={`restore-${b.name}`} label="還原…" dimColor onPress={async () => say($, await launchTool($, { restore: b.dir }))} />
+        </Box>
+      ))}
     </Box>
   )
 }
@@ -1175,13 +1359,13 @@ async function drawMigrate($: $, ui: UI) {
   const sources = desktop.profiles.filter(p => p.account !== current)
   return (
     <Box flexDirection="column" gap={1}>
-      <Text>換帳號後，舊帳號在 Code 分頁的對話和已儲存的環境會不見。這裡把它們複製到現在登入的帳號。</Text>
-      <Text bold>搬到這裡</Text>
+      {pageHead(ui, 'mig-head', '遷移', '換帳號後，舊帳號在 Code 分頁的對話和已儲存的環境會不見。這裡把它們複製到現在登入的帳號。')}
+      {sectionHead(ui, 'mig-to-head', '搬到這裡')}
       <Text>
         {cur?.source === 'desktop' ? `${cur.label}${cur.email ? `（${cur.email}）` : ''}` : '桌面 app 現在登入的帳號'}
         <Text dimColor>　工具寫入前會顯示信箱讓你確認</Text>
       </Text>
-      <Text bold>這台電腦上其他帳號的資料</Text>
+      {sectionHead(ui, 'mig-from-head', '這台電腦上其他帳號的資料')}
       {desktop.error && <Text color="warning">讀不到桌面 app 的資料。</Text>}
       {!desktop.error && sources.length === 0 && <Text dimColor>沒有其他帳號的對話。</Text>}
       {sources.map(p => (
@@ -1197,14 +1381,8 @@ async function drawMigrate($: $, ui: UI) {
           </Box>
         </Box>
       ))}
-      <Text dimColor>開始之後：勾選要搬的資料夾與環境 → 結束 Claude（系統匣或選單列）→ 確認信箱、輸入 Y → 搬完問你要不要重開。</Text>
-      {desktop.backups.length > 0 && <Text bold>備份</Text>}
-      {desktop.backups.slice(0, 5).map(b => (
-        <Box key={`bk-${b.name}`} flexDirection="row" gap={1}>
-          <Text>{backupLabel(b.name)}</Text>
-          <Button key={`restore-${b.name}`} label="還原…" dimColor onPress={async () => say($, await launchTool($, { restore: b.dir }))} />
-        </Box>
-      ))}
+      {fine(ui, '開始之後：勾選要搬的資料夾與環境 → 結束 Claude（系統匣或選單列）→ 確認信箱、輸入 Y → 搬完問你要不要重開。')}
+      {await drawBackups($, ui)}
       <Button key="rescan" label="重新讀取" dimColor onPress={() => ensureDesktop($, true)} />
     </Box>
   )
@@ -1233,8 +1411,14 @@ export const register: Register = on => {
     }
     // 自動同步：開始後先做一次，之後每分鐘一次（沒開同步時 runMirror 直接回來）
     mirrorTimer?.cancel()
-    mirrorTimer = $.clock.every(MIRROR_EVERY_MS, () => runMirror($, 'tick'))
-    $.clock.after(3_000, () => runMirror($, 'tick'))
+    mirrorTimer = $.clock.every(MIRROR_EVERY_MS, async () => {
+      await runMirror($, 'tick')
+      await runPrune($)
+    })
+    $.clock.after(3_000, async () => {
+      await runMirror($, 'tick')
+      await runPrune($)
+    })
     try {
       await onUsage($, (await $.session.usage()).rateLimits)
     } catch {

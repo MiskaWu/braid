@@ -55,7 +55,7 @@ type Opts = {
   failRm?: boolean
 }
 
-const entry = (name: string, kind: FsEntry['kind'], mtimeMs = NOW): FsEntry => ({ name, kind, size: 1, mtimeMs, isLink: false })
+const entry = (name: string, kind: FsEntry['kind'], mtimeMs = NOW, size = 1): FsEntry => ({ name, kind, size, mtimeMs, isLink: false })
 
 // tool/spec.json 的 sessions 段（測試讀不到外掛的真檔，照抄一份）
 const SPEC = JSON.stringify({
@@ -132,6 +132,10 @@ function world(on: On, opts: Opts = {}) {
     if (argv[0] === 'uname') return out(`${opts.uname ?? 'Linux'}\n`)
     if (argv[0] === 'bash' && opts.failBash) return { value: { exitCode: 1, stdout: '', stderr: opts.failBash, isStdoutTruncated: false, isStderrTruncated: false } }
     if (argv[0] === 'date') return out('+0800\n')
+    if (argv[0] === 'rm' && argv[1] === '-rf' && argv[2] === '--') {
+      for (const f of Object.keys(files)) if (f.startsWith(`${argv[3]}/`)) delete files[f]
+      return out('')
+    }
     if (argv[0] === 'rm' && argv[2] === '--') {
       if (opts.failRm) return { value: { exitCode: 1, stdout: '', stderr: 'busy', isStdoutTruncated: false, isStderrTruncated: false } }
       delete files[argv[3] ?? '']
@@ -153,12 +157,15 @@ function world(on: On, opts: Opts = {}) {
     return { value: undefined }
   })
   on('fs.exists', ($, e) => ({ value: e.path in files || e.path in dirs }))
-  // 目錄：上面列的，加上檔案表裡直接在它底下的檔（含寫進去的）
+  // 目錄：上面列的，加上檔案表裡在它底下的檔（含寫進去的）與子資料夾
   on('fs.list', ($, e) => {
     const listed = new Map((dirs[e.path] ?? []).map(d => [d.name, d]))
     for (const f of Object.keys(files)) {
-      const cut = f.lastIndexOf('/')
-      if (f.slice(0, cut) === e.path) listed.set(f.slice(cut + 1), entry(f.slice(cut + 1), 'file', mtimes[f] ?? NOW))
+      if (!f.startsWith(`${e.path}/`)) continue
+      const rest = f.slice(e.path.length + 1)
+      const cut = rest.indexOf('/')
+      if (cut < 0) listed.set(rest, entry(rest, 'file', mtimes[f] ?? NOW, files[f]?.length ?? 1))
+      else if (!listed.has(rest.slice(0, cut))) listed.set(rest.slice(0, cut), entry(rest.slice(0, cut), 'dir'))
     }
     return { value: [...listed.values()] }
   })
@@ -657,7 +664,10 @@ describe('同步', () => {
     // 狀態：說清楚從哪到哪、不用結束 Claude
     await $.command.run(RUN('同步'))
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-    expect(await shows(ui, /桌面 app 現在登入「公司」，對話會自動複製到「個人」：換過去就看得到，不用結束 Claude。上次同步 剛剛（新增 2）/)).toBe(true)
+    expect(await shows(ui, /自動同步中/)).toBe(true)
+    expect(await ui.find({ key: 'sy-flow' })).toBeDefined() // 公司 → 個人，帶帳號顏色
+    expect(await shows(ui, /對話會自動複製到「個人」：換過去就看得到，不用結束 Claude/)).toBe(true)
+    expect(await shows(ui, /上次同步 剛剛：新增 2/)).toBe(true)
     await ui.unmount()
   })
 
@@ -703,7 +713,9 @@ describe('同步', () => {
     expect(w.runs.some(r => r.argv.join(' ') === `rm -f -- ${target}/local_x.json`)).toBe(true)
     await $.command.run(RUN('同步'))
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-    expect(await shows(ui, /上次同步 剛剛（刪除 1）/)).toBe(true)
+    expect(await shows(ui, /上次同步 剛剛：刪除 1/)).toBe(true)
+    expect(await ui.find({ key: 'keep-days' })).toBeDefined()
+    expect(await shows(ui, /目前 1 筆/)).toBe(true) // 備份區塊數得到剛存的那筆
     await ui.unmount()
   })
 
@@ -799,6 +811,17 @@ describe('同步', () => {
     await ui.unmount()
   })
 
+  test('沒開同步：狀態卡說怎麼打開，沒有「現在同步」', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL } })
+    await $.session.start(START)
+    await $.command.run(RUN('同步'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await shows(ui, /○ 沒開/)).toBe(true)
+    expect(await ui.find({ key: 'sy-now' })).toBeUndefined()
+    await ui.unmount()
+    void w
+  })
+
   test('純 Linux：說明 CLI 的對話不分帳號、不需要同步', async ($, on) => {
     const w = world(on, { env: { WSL_DISTRO_NAME: '' }, store: { uses: USES_ALL } })
     await $.session.start(START)
@@ -807,6 +830,60 @@ describe('同步', () => {
     expect(await shows(ui, /CLI 的對話不分帳號/)).toBe(true)
     await ui.unmount()
   })
+})
+
+describe('備份保留', () => {
+  const TRASH_DIR = `${BACKUPS}/sync-deleted/${P}/${OP}`
+  const DAY = 24 * H
+  const manifest = (name: string) => ({ [`${BACKUPS}/${name}/manifest.json`]: '{}', [`${BACKUPS}/${name}/sessions/local_1.json`]: '{}' })
+
+  test('預設：同步刪掉的備份留 30 天、整份備份留最新 5 份；開始後清掉超過的，其他的（含不像備份的資料夾）不碰', async ($, on) => {
+    const names = ['20261001-090000', '20261002-090000', '20261003-090000', '20261004-090000', '20261005-090000', '20261005-090000-2']
+    const w = world(on, {
+      store: { uses: USES_ALL },
+      files: {
+        ...Object.assign({}, ...names.map(manifest)),
+        [`${BACKUPS}/before-auto-sync/x.json`]: '{}',
+        [`${TRASH_DIR}/local_old.json`]: '{}',
+        [`${TRASH_DIR}/local_new.json`]: '{}',
+      },
+      mtimes: { [`${TRASH_DIR}/local_old.json`]: NOW - 40 * DAY, [`${TRASH_DIR}/local_new.json`]: NOW - 10 * DAY },
+    })
+    await $.session.start(START)
+    await w.clock.advance(3_000)
+    expect(w.files[`${TRASH_DIR}/local_old.json`]).toBeUndefined()
+    expect(w.files[`${TRASH_DIR}/local_new.json`]).toBeDefined()
+    // 加上原本就有的 20261016-140211 共 7 份：留最新 5 份，最舊的兩份清掉
+    expect([w.files[`${BACKUPS}/20261001-090000/manifest.json`], w.files[`${BACKUPS}/20261002-090000/manifest.json`]]).toEqual([undefined, undefined])
+    expect(['20261003-090000', '20261005-090000-2', '20261016-140211'].every(n => w.files[`${BACKUPS}/${n}/manifest.json`] !== undefined)).toBe(true)
+    expect(w.files[`${BACKUPS}/before-auto-sync/x.json`]).toBeDefined()
+    expect(w.runs.filter(r => r.argv[0] === 'rm' && r.argv[1] === '-rf').map(r => r.argv[3])).toEqual([`${BACKUPS}/20261002-090000`, `${BACKUPS}/20261001-090000`])
+  })
+
+  test('在面板改：存起來、馬上照新的清；選「一直留著」「全部留著」就不清', async ($, on) => {
+    const w = world(on, {
+      store: { uses: USES_ALL, sync: SYNC_ON },
+      files: { [`${TRASH_DIR}/local_a.json`]: '{"x":1}', ...manifest('20261010-090000') },
+      mtimes: { [`${TRASH_DIR}/local_a.json`]: NOW - 10 * DAY },
+    })
+    await $.session.start(START)
+    await $.command.run(RUN('同步'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect((await ui.find({ key: 'keep-days' }))?.props.value).toBe('30')
+    expect((await ui.find({ key: 'keep-copies' }))?.props.value).toBe('5')
+    expect(await shows(ui, /目前 1 筆、7 B/)).toBe(true)
+    expect(await shows(ui, /目前 2 份/)).toBe(true)
+    await ui.select({ key: 'keep-days', value: '7' })
+    expect(w.store.get('keep')).toEqual({ deletedDays: 7, toolCopies: 5 })
+    expect(w.files[`${TRASH_DIR}/local_a.json`]).toBeUndefined()
+    expect(await shows(ui, /目前 0 筆/)).toBe(true)
+    await ui.select({ key: 'keep-copies', value: '3' })
+    await ui.select({ key: 'keep-copies', value: 'all' })
+    await ui.select({ key: 'keep-days', value: 'forever' })
+    expect(w.store.get('keep')).toEqual({ deletedDays: null, toolCopies: null })
+    await ui.unmount()
+  })
+
 })
 
 describe('遷移頁', () => {
@@ -882,3 +959,4 @@ describe('手機', () => {
     await ui.unmount()
   })
 })
+

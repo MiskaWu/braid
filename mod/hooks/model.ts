@@ -2,6 +2,7 @@
 // 三種用法共用同一份帳號清單：遷移與同步看桌面 app 的側欄資料，用量切換看每個帳號的用量與憑證。
 import type {
   BraidAccount,
+  BraidKeep,
   BraidMirror,
   BraidMirrorProblem,
   BraidProfile,
@@ -25,6 +26,9 @@ export const COLOR_NAMES: Record<string, string> = {
 export const DEFAULT_USES: BraidUses = { migrate: false, switch: false, sync: false }
 export const DEFAULT_SWITCH: BraidSwitch = { on: true, fiveHour: 90, sevenDay: 95, order: [], restrict: false, restricted: [] }
 export const DEFAULT_SYNC: BraidSync = { on: false, pair: [], all: true, folders: [] }
+export const DEFAULT_KEEP: BraidKeep = { deletedDays: 30, toolCopies: 5 }
+export const KEEP_DAYS_CHOICES = [7, 30, 90] as const
+export const KEEP_COPIES_CHOICES = [3, 5, 10] as const
 export const FIVE_HOUR_CHOICES = [80, 90, 95] as const
 export const SEVEN_DAY_CHOICES = [90, 95] as const
 
@@ -61,6 +65,43 @@ export function normalizeSync(x: unknown): BraidSync {
     all: x.all === true || (x.all === undefined && folders.length === 0),
     folders,
   }
+}
+
+const positive = (x: unknown, fallback: number | null): number | null =>
+  x === null ? null : typeof x === 'number' && Number.isInteger(x) && x > 0 ? x : fallback
+
+export function normalizeKeep(x: unknown): BraidKeep {
+  if (!isObj(x)) return { ...DEFAULT_KEEP }
+  return { deletedDays: positive(x.deletedDays, DEFAULT_KEEP.deletedDays), toolCopies: positive(x.toolCopies, DEFAULT_KEEP.toolCopies) }
+}
+
+/** 遷移工具的整份備份資料夾名稱：20261016-140211，同一秒的第二份 20261016-140211-2。 */
+export const TOOL_BACKUP_NAME = /^\d{8}-\d{6}(-\d+)?$/
+
+/** 要清掉的整份備份：新到舊排，留最新 copies 份；名稱不像備份的一律不碰。copies 是 null 就全部留著。 */
+export function extraToolBackups(names: readonly string[], copies: number | null): string[] {
+  if (copies === null) return []
+  const key = (n: string) => {
+    const [d = '', t = '', k = '1'] = n.split('-')
+    return `${d}${t}${k.padStart(6, '0')}`
+  }
+  return names
+    .filter(n => TOOL_BACKUP_NAME.test(n))
+    .sort((a, b) => key(b).localeCompare(key(a)))
+    .slice(copies)
+}
+
+/** 要清掉的同步刪除備份：存進去超過 days 天的。days 是 null 就全部留著。 */
+export function expiredFiles(files: readonly { path: string; mtimeMs: number }[], days: number | null, now: number): string[] {
+  if (days === null) return []
+  return files.filter(f => f.mtimeMs > 0 && now - f.mtimeMs > days * 86_400_000).map(f => f.path)
+}
+
+/** 位元組寫成給人看的大小。 */
+export function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
 }
 
 const PROBLEMS: readonly BraidMirrorProblem[] = ['no-desktop', 'no-active', 'no-spec', 'no-target', 'failed']
@@ -399,9 +440,14 @@ export const short = (id: string) => `${id.slice(0, 8)}…`
  * 認得真正 id 的其他帳號不借（同組織的另一個帳號），對到不只一個也不借；都沒有就寫「帳號 1111aaaa…」。
  */
 export function nameOf(accounts: Record<string, BraidAccount>, id: string, profiles: readonly BraidProfile[] = []): string {
+  return lookOf(accounts, id, profiles).label
+}
+
+/** 顯示用的名稱與顏色（規則同 nameOf）；認不得的帳號用主題的淡色。 */
+export function lookOf(accounts: Record<string, BraidAccount>, id: string, profiles: readonly BraidProfile[] = []): { label: string; color: string } {
   const known = accounts[id]
-  if (known) return known.label
+  if (known) return { label: known.label, color: known.color }
   const org = profiles.find(p => p.account === id)?.org
   const same = org ? Object.values(accounts).filter(a => a.id.startsWith('tok-') && a.orgId === org) : []
-  return same.length === 1 && same[0] ? same[0].label : `帳號 ${short(id)}`
+  return same.length === 1 && same[0] ? { label: same[0].label, color: same[0].color } : { label: `帳號 ${short(id)}`, color: 'inactive' }
 }
