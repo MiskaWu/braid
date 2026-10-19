@@ -513,3 +513,22 @@ export function ownerHero(d: {
   const alt = `${d.project} → ${d.owner ? d.owner.label : d.state === 'any' ? '不分' : '還沒設定'}；${label}`
   return { source: svg(w, h, b), alt, height: h }
 }
+
+/** 備份的兩格統計：同步刪掉的對話（筆數、大小、留多久）、整份備份（份數、留幾份）。 */
+export function backupTiles(d: { trash: { count: number; size: string; keep: string }; tool: { count: number; keep: string } }, w = 420): { source: string; alt: string; height: number } {
+  const h = 70
+  const gap = 10
+  const tw = (w - gap) / 2
+  const tile = (x: number, title: string, big: string, unit: string, sub: string) => {
+    let b = `<rect x="${x}" y="0" width="${tw}" height="${h}" rx="10" class="panel"/>`
+    b += txt(x + 12, 20, 't3', 11, title)
+    b += txt(x + 12, 46, 't1', 22, big, 'font-weight="700"')
+    b += txt(x + 12 + textWidth(big, 22) + 4, 46, 't2', 12, unit)
+    b += txt(x + 12, 62, 't3', 11, fit(sub, 11, tw - 20))
+    return b
+  }
+  let body = tile(0, '同步刪掉的對話', String(d.trash.count), `筆 · ${d.trash.size}`, d.trash.keep)
+  body += tile(tw + gap, '遷移與帶環境的整份備份', String(d.tool.count), '份', d.tool.keep)
+  const alt = `同步刪掉的對話：${d.trash.count} 筆、${d.trash.size}，${d.trash.keep}；整份備份：${d.tool.count} 份，${d.tool.keep}`
+  return { source: svg(w, h, body), alt, height: h }
+}

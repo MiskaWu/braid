@@ -36,7 +36,7 @@ import {
   usageFrom,
 } from '../hooks/model'
 import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo, type SessionSpec } from '../hooks/mirror'
-import { accountCard, fit, header, initial, ownerHero, rankRow, slotOf, switchHero, syncFlow, useIcon } from '../hooks/visual'
+import { accountCard, backupTiles, fit, header, initial, ownerHero, rankRow, slotOf, switchHero, syncFlow, useIcon } from '../hooks/visual'
 import { ANY, cleanFolder, draftGroups, normalizePolicy, projectOf, remoteKey, riskOf, ruleFor, setRule, sideOf, verdictFor } from '../hooks/policy'
 import { isNewPage, parseIndex, projectSlug, titleOf, urlIn } from '../hooks/pages'
 import { newCredentialId, planTerminal, removeFile, removeToolBackup, secretDelete, wrapperText } from '../hooks/terminal'
@@ -847,6 +847,13 @@ describe('桌面版的圖（第二批）', () => {
     expect(parts[3]?.alt).toBe('A&B <x> → A&B <x>；對不上：這個對話是「個人」')
     expect(ownerHero({ project: 'p', owner: null, me: { label: '個人', color: '#e87ba4' }, state: 'unset' }).alt).toBe('p → 還沒設定；這個對話是「個人」')
     expect(switchHero({ account: { label: 'a', color: '#2a78d6' }, windows: [], thresholds: [], next: null }).alt).toMatch(/下一個接手：沒有/)
+  })
+
+  test('備份的兩格統計：筆數、大小、留多久都在說明文字裡', async () => {
+    const t = backupTiles({ trash: { count: 5, size: '262 KB', keep: '留 30 天' }, tool: { count: 1, keep: '留最新 5 份' } })
+    expect(t.alt).toBe('同步刪掉的對話：5 筆、262 KB，留 30 天；整份備份：1 份，留最新 5 份')
+    expect(t.source).toContain('>5<')
+    expect(t.source.length).toBeLessThan(131072)
   })
 
   test('用法插圖：四種都有，說明文字給看不到圖的人', async () => {

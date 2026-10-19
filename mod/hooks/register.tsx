@@ -28,7 +28,7 @@ import type {
 import { backupLabel, desktopPaths, listToolBackups, listTrash, scanDesktop, type DesktopEnv, type DesktopIo, type DesktopPaths } from './desktop'
 import { manualPath, parseDryRun, planLaunch, toolArgs, type ToolRequest } from './launch'
 import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo } from './mirror'
-import { accountCard, header, ownerHero, rankRow, switchHero, syncFlow, usageStrip, useIcon, type Window } from './visual'
+import { accountCard, backupTiles, header, ownerHero, rankRow, switchHero, syncFlow, usageStrip, useIcon, type Window } from './visual'
 import { ANY, draftGroups, dropRule, normalizePolicy, projectOf, riskOf, riskText, ruleFor, sameSide, setRule, verdictFor, type FolderRemotes, type Verdict } from './policy'
 import { isNewPage, parseIndex, pendingFor, projectSlug, serializeIndex, titleOf, urlIn, type PageEntry, type PageIndex } from './pages'
 import {
@@ -1589,8 +1589,8 @@ async function drawSync($: $, ui: UI) {
   }
   const drawSyncAll = () => (
     <Box key="sy-all-box" flexDirection="column">
-      {fine(ui, `目前兩個帳號共 ${rows.length} 個資料夾，之後新出現的也算。`)}
-      {crossOrg && <Text color="warning">這兩個帳號可能不在同一個組織：全部同步會連個人專案的對話也一起帶過去，反過來也一樣。要分開，改成「只同步我挑的資料夾」。</Text>}
+      {fine(ui, `共 ${rows.length} 個資料夾，之後新的也算。`)}
+      {crossOrg && <Text color="warning">⚠ 不同組織：全部同步會讓個人與公司的對話互相帶過去。</Text>}
     </Box>
   )
   const drawSyncPicked = () =>
@@ -1603,7 +1603,7 @@ async function drawSync($: $, ui: UI) {
     })
   return (
     <Box flexDirection="column" gap={1}>
-      {pageHead(ui, 'sy-head', '同步', '桌面 app 的兩個帳號自動同步側欄對話；額度用完，在 app 換過去就能接著做。')}
+      {pageHead(ui, 'sy-head', '同步', '兩個帳號的側欄自動保持一致，額度用完換過去就能接著做。')}
       {drawMirrorStatus($, ui, sy, accounts, await read($, mirrorAtom), await $.clock.now())}
 
       {sectionHead(ui, 'sy-set-head', '設定')}
@@ -1645,9 +1645,12 @@ async function drawSync($: $, ui: UI) {
       )}
 
       {partner && (
-        <Box key="sy-env-box" flexDirection="column" gap={1}>
-          {sectionHead(ui, 'sy-env-head', '已儲存的環境', 'app 開著時寫不進去，所以不自動同步。要帶過來時會開獨立視窗、先結束 Claude，寫入前備份。')}
-          {request && <Button key="sy-env" label={`從「${partnerName}」帶環境過來…`} onPress={async () => say($, await launchTool($, request))} />}
+        <Box key="sy-env-box" flexDirection="row" justifyContent="space-between" alignItems="center" gap={1} borderStyle="round" paddingX={1}>
+          <Box flexDirection="column" flexShrink={1}>
+            <Text weight="semibold">已儲存的環境</Text>
+            {fine(ui, '不自動同步：app 開著時寫不進去，帶過來時會請你先結束 Claude。')}
+          </Box>
+          {request && <Button key="sy-env" label="帶過來…" onPress={async () => say($, await launchTool($, request))} />}
         </Box>
       )}
 
@@ -1714,7 +1717,7 @@ function drawMirrorStatus($: $, ui: UI, sy: BraidSync, accounts: Record<string, 
     const flow = syncFlow({
       tone: 'on',
       title: '自動同步中',
-      summary: `自動同步中：從「${from.label}」複製到「${to.label}」；${last}`,
+      summary: `自動同步中：從「${from.label}」複製到「${to.label}」，換過去就看得到，不用結束 Claude；${last}`,
       from: { label: from.label, color: from.color, caption: 'app 登入中' },
       to: { label: to.label, color: to.color, caption: '換過去就看得到' },
       chips: [ago(now - m.at), ...(counts.length > 0 ? counts : ['已經一樣了'])],
@@ -1723,7 +1726,6 @@ function drawMirrorStatus($: $, ui: UI, sy: BraidSync, accounts: Record<string, 
     return (
       <Box key="sy-status" flexDirection="column" borderStyle="round" borderColor="success" paddingX={1} paddingY={1}>
         <Svg source={flow.source} alt={flow.alt} isInteractive />
-        {fine(ui, `對話會自動複製到「${to.label}」：換過去就看得到，不用結束 Claude。`)}
         <Box flexDirection="row" marginTop={1}>
           <Button key="sy-now" label="現在同步" onPress={() => runMirror($, 'now')} />
         </Box>
@@ -1744,9 +1746,24 @@ async function drawBackups($: $, ui: UI) {
   const desktop = await read($, desktopAtom)
   if (!desktop || desktop.error) return null
   const keep = await read($, keepAtom)
+  const help = await read($, helpAtom)
+  const open = !ui.Svg || help === 'backup-keep'
+  const tiles = ui.Svg
+    ? backupTiles({
+        trash: { count: desktop.trash.count, size: fmtBytes(desktop.trash.bytes), keep: keep.deletedDays === null ? '一直留著' : `留 ${keep.deletedDays} 天` },
+        tool: { count: desktop.backups.length, keep: keep.toolCopies === null ? '全部留著' : `留最新 ${keep.toolCopies} 份` },
+      })
+    : null
+  const Svg = ui.Svg
   return (
     <Box key="bk-box" flexDirection="column" gap={1}>
-      {sectionHead(ui, 'bk-head', '備份', desktop.backupRoot ? `都放在 ${desktop.backupRoot}` : undefined)}
+      {sectionHead(ui, 'bk-head', '備份', ui.Svg ? undefined : desktop.backupRoot ? `都放在 ${desktop.backupRoot}` : undefined)}
+      {tiles && Svg ? <Svg source={tiles.source} alt={tiles.alt} /> : null}
+      {ui.Svg && (
+        <Button key="bk-keep-toggle" label={open ? '保留設定 ▾' : '保留設定 ▸'} plain dimColor onPress={() => update($, helpAtom, h => (h === 'backup-keep' ? null : 'backup-keep'))} />
+      )}
+      {open && desktop.backupRoot && ui.Svg ? fine(ui, `都放在 ${desktop.backupRoot}`) : null}
+      {open && (
       <Box key="bk-days-box" flexDirection="column">
         <Select
           key="keep-days"
@@ -1758,8 +1775,10 @@ async function drawBackups($: $, ui: UI) {
           value={keep.deletedDays === null ? 'forever' : String(keep.deletedDays)}
           onSelect={v => putKeep($, k => ({ ...k, deletedDays: v === 'forever' ? null : Number(v) }))}
         />
-        {fine(ui, `目前 ${desktop.trash.count} 筆、${fmtBytes(desktop.trash.bytes)}。同步刪掉一段對話前，先把它的側欄紀錄存一份。`)}
+        {!ui.Svg && fine(ui, `目前 ${desktop.trash.count} 筆、${fmtBytes(desktop.trash.bytes)}。同步刪掉一段對話前，先把它的側欄紀錄存一份。`)}
       </Box>
+      )}
+      {open && (
       <Box key="bk-copies-box" flexDirection="column">
         <Select
           key="keep-copies"
@@ -1771,8 +1790,9 @@ async function drawBackups($: $, ui: UI) {
           value={keep.toolCopies === null ? 'all' : String(keep.toolCopies)}
           onSelect={v => putKeep($, k => ({ ...k, toolCopies: v === 'all' ? null : Number(v) }))}
         />
-        {fine(ui, `目前 ${desktop.backups.length} 份。工具寫入前會整份備份一次，可以還原。`)}
+        {!ui.Svg && fine(ui, `目前 ${desktop.backups.length} 份。工具寫入前會整份備份一次，可以還原。`)}
       </Box>
+      )}
       {desktop.backups.slice(0, 5).map(b => (
         <Box key={`bk-${b.name}`} flexDirection="row" gap={1} alignItems="center">
           <Text tabular>{backupLabel(b.name)}</Text>

@@ -620,8 +620,8 @@ describe('同步', () => {
     expect(await w.store.get('sync')).toEqual({ on: true, pair: [W, P], all: true, folders: [] })
     expect((await ui.find({ key: 'sy-scope' }))?.props.value).toBe('all')
     expect(await ui.find({ key: 'sy-when' })).toBeUndefined() // 開了就自動，不用選時機
-    expect(await shows(ui, /目前兩個帳號共 2 個資料夾/)).toBe(true)
-    expect(await shows(ui, /可能不在同一個組織/)).toBe(true) // 公司與個人
+    expect(await shows(ui, /共 2 個資料夾/)).toBe(true)
+    expect(await shows(ui, /不同組織：全部同步會讓個人與公司的對話互相帶過去/)).toBe(true) // 公司與個人
     expect(await ui.find({ key: 'sy-add' })).toBeUndefined()
     await ui.press({ key: 'sy-env' })
     expect(w.runs.at(-1)?.argv.slice(2)).toEqual(['-From', P, '-Projects', 'all', '-Presets', 'all'])
@@ -676,8 +676,8 @@ describe('同步', () => {
     await $.session.start(START)
     await $.command.run(RUN('同步'))
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-    expect(await shows(ui, /目前兩個帳號共/)).toBe(true)
-    expect(await shows(ui, /可能不在同一個組織/)).toBe(false)
+    expect(await shows(ui, /共 \d+ 個資料夾/)).toBe(true)
+    expect(await shows(ui, /不同組織/)).toBe(false)
     await ui.unmount()
     void w
   })
@@ -713,7 +713,7 @@ describe('同步', () => {
     await $.command.run(RUN('同步'))
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
     expect(await seen(ui, /自動同步中：從「公司」複製到「個人」/)).toBe(true) // 桌面版是兩個帳號之間的圖
-    expect(await shows(ui, /對話會自動複製到「個人」：換過去就看得到，不用結束 Claude/)).toBe(true)
+    expect(await seen(ui, /複製到「個人」，換過去就看得到，不用結束 Claude/)).toBe(true)
     expect(await seen(ui, /上次同步 剛剛：新增 2/)).toBe(true)
     await ui.unmount()
     const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
@@ -765,8 +765,7 @@ describe('同步', () => {
     await $.command.run(RUN('同步'))
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
     expect(await seen(ui, /上次同步 剛剛：刪除 1/)).toBe(true)
-    expect(await ui.find({ key: 'keep-days' })).toBeDefined()
-    expect(await shows(ui, /目前 1 筆/)).toBe(true) // 備份區塊數得到剛存的那筆
+    expect(await seen(ui, /同步刪掉的對話：1 筆/)).toBe(true) // 備份統計數得到剛存的那筆
     await ui.unmount()
   })
 
@@ -859,7 +858,7 @@ describe('同步', () => {
     const options = ((await ui.find({ key: 'sy-partner' }))?.props.options ?? []) as { value: string; label: string }[]
     expect(options.find(o => o.value === P)?.label).toBe('MiskaWu')
     expect(options.some(o => o.value === 'tok-00000009')).toBe(false) // braid 新增的帳號不是桌面 app 帳號，不列
-    expect(await shows(ui, /對話會自動複製到「MiskaWu」/)).toBe(true)
+    expect(await seen(ui, /複製到「MiskaWu」/)).toBe(true)
     await ui.unmount()
   })
 
@@ -1164,7 +1163,7 @@ describe('更新之後', () => {
     await $.session.start(START)
     await $.command.run(RUN('同步'))
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-    expect(await ui.find({ key: 'keep-days' })).toBeDefined()
+    expect(await ui.find({ key: 'bk-keep-toggle' })).toBeDefined()
     expect(await ui.find({ key: 'pane-error' })).toBeUndefined()
     await ui.unmount()
     void w
@@ -1183,7 +1182,7 @@ describe('更新之後', () => {
     // 攔下來的那次讀取不算在測試工具的追蹤裡，它不知道要重畫；實際的 app 讀取都經過它，會自己重畫
     await ui.redraw()
     expect(await ui.find({ key: 'pane-error' })).toBeUndefined()
-    expect(await ui.find({ key: 'keep-days' })).toBeDefined()
+    expect(await ui.find({ key: 'bk-keep-toggle' })).toBeDefined()
     await ui.unmount()
     void w
   })
@@ -1226,14 +1225,16 @@ describe('備份保留', () => {
     await $.session.start(START)
     await $.command.run(RUN('同步'))
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await ui.find({ key: 'keep-days' })).toBeUndefined() // 桌面版：保留設定先收著
+    await ui.press({ key: 'bk-keep-toggle' })
     expect((await ui.find({ key: 'keep-days' }))?.props.value).toBe('30')
     expect((await ui.find({ key: 'keep-copies' }))?.props.value).toBe('5')
-    expect(await shows(ui, /目前 1 筆、7 B/)).toBe(true)
-    expect(await shows(ui, /目前 2 份/)).toBe(true)
+    expect(await seen(ui, /同步刪掉的對話：1 筆、7 B，留 30 天/)).toBe(true)
+    expect(await seen(ui, /整份備份：2 份，留最新 5 份/)).toBe(true)
     await ui.select({ key: 'keep-days', value: '7' })
     expect(w.store.get('keep')).toEqual({ deletedDays: 7, toolCopies: 5 })
     expect(w.files[`${TRASH_DIR}/local_a.json`]).toBeUndefined()
-    expect(await shows(ui, /目前 0 筆/)).toBe(true)
+    expect(await seen(ui, /同步刪掉的對話：0 筆/)).toBe(true)
     await ui.select({ key: 'keep-copies', value: '3' })
     await ui.select({ key: 'keep-copies', value: 'all' })
     await ui.select({ key: 'keep-days', value: 'forever' })
