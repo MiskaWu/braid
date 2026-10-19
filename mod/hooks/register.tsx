@@ -1105,12 +1105,16 @@ export const register: Register = on => {
       const account = upsertSeen(await read($, accountsAtom), seen, await $.clock.now())
       await putAccount($, account)
       await update($, currentAtom, () => account.id)
-      const last = await $.store.get('lastAccount')
-      if (typeof last === 'string' && last !== account.id) {
-        await update($, changedFromAtom, () => last)
-        if ((await read($, usesAtom))?.sync) await ensureDesktop($) // 提示裡要叫得出另一個帳號的名字
+      // 換帳號後問要不要同步：只記桌面 app 的帳號。CLI 自己的登入、「接著做」開的視窗也會開對話，
+      // 一起記的話，中間開過一個，桌面 app 真的換帳號時就認成從那個帳號換過來，漏問（10-19 修）
+      if (seen.source === 'desktop') {
+        const last = await $.store.get('lastDesktopAccount')
+        if (typeof last === 'string' && last !== account.id) {
+          await update($, changedFromAtom, () => last)
+          if ((await read($, usesAtom))?.sync) await ensureDesktop($) // 提示裡要叫得出另一個帳號的名字
+        }
+        await $.store.set('lastDesktopAccount', account.id)
       }
-      await $.store.set('lastAccount', account.id)
     }
     try {
       await onUsage($, (await $.session.usage()).rateLimits)

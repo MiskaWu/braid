@@ -201,7 +201,7 @@ describe('帳號與用量', () => {
     await $.session.start(START)
     const saved = (await w.store.get(`account:${W}`)) as { label: string; email: string; orgId: string; source: string }
     expect([saved.label, saved.email, saved.orgId, saved.source]).toEqual(['公司', 'me@corp.example', OW, 'desktop'])
-    expect(await w.store.get('lastAccount')).toBe(W)
+    expect(await w.store.get('lastDesktopAccount')).toBe(W)
     await $.session.measure(measure(62) as never)
     expect(((await w.store.get(`account:${W}`)) as { usage: { fiveHour: { pct: number } } }).usage.fiveHour.pct).toBe(62)
     expect(w.statuses.at(-1)).toBe('braid · 公司 62%')
@@ -578,7 +578,7 @@ describe('同步', () => {
   test('全部資料夾：同組織的兩個帳號不警告；換帳號後的提示說「所有資料夾」', async ($, on) => {
     const work2 = acct(P, { email: 'me2@corp.example', orgId: OW, label: '公司 2' })
     const sync = { on: true, pair: [W, P], all: true, folders: [], when: 'on-switch' }
-    const w = world(on, { store: { uses: USES_ALL, sync, lastAccount: P, [`account:${P}`]: work2 } })
+    const w = world(on, { store: { uses: USES_ALL, sync, lastDesktopAccount: P, [`account:${P}`]: work2 } })
     await $.session.start(START)
     const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
     expect(await shows(band, /要把所有資料夾的對話帶過來嗎/)).toBe(true)
@@ -595,7 +595,7 @@ describe('同步', () => {
   test('桌面 app 的舊帳號沒當過目前帳號：用組織對到的、braid 新增的帳號名稱來叫它', async ($, on) => {
     const tok = acct('tok-00000009', { orgId: OP, label: 'MiskaWu', source: 'token', credential: 'file', credentialId: 'tok-00000009' })
     const sync = { on: true, pair: [W, P], all: true, folders: [], when: 'on-switch' }
-    const w = world(on, { store: { uses: USES_ALL, sync, lastAccount: P, 'account:tok-00000009': tok } })
+    const w = world(on, { store: { uses: USES_ALL, sync, lastDesktopAccount: P, 'account:tok-00000009': tok } })
     await $.session.start(START)
     const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
     expect(await shows(band, /從「MiskaWu」換到「公司」了/)).toBe(true)
@@ -611,9 +611,9 @@ describe('同步', () => {
 
   test('換帳號後第一次打開：問要不要從另一個帳號帶過來；按了開工具，按「這次不用」就不再問', async ($, on) => {
     const sync = { on: true, pair: [W, P], folders: ['/w/server', '/side/blog'], when: 'on-switch' }
-    const w = world(on, { store: { uses: USES_ALL, sync, lastAccount: P, [`account:${P}`]: PERSONAL } })
+    const w = world(on, { store: { uses: USES_ALL, sync, lastDesktopAccount: P, [`account:${P}`]: PERSONAL } })
     await $.session.start(START)
-    expect(await w.store.get('lastAccount')).toBe(W)
+    expect(await w.store.get('lastDesktopAccount')).toBe(W)
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     expect(await shows(ui, /從「個人」換到「公司」了。要把同步的 2 個資料夾/)).toBe(true)
     await ui.press({ key: 'sync-go' })
@@ -622,9 +622,20 @@ describe('同步', () => {
     await ui.unmount()
   })
 
+  test('「接著做」開的視窗或 CLI 自己的登入不算換帳號：不改記住的桌面帳號，桌面 app 真的換帳號時照樣會問', async ($, on) => {
+    const sync = { on: true, pair: [W, P], all: true, folders: [], when: 'on-switch' }
+    // 用個人帳號「接著做」開的視窗（BRAID_ACCOUNT）
+    const w = world(on, { env: { BRAID_ACCOUNT: 'tok-00000002' }, store: { uses: USES_ALL, sync, lastDesktopAccount: W, 'account:tok-00000002': WORK2 } })
+    await $.session.start(START)
+    expect(w.store.get('lastDesktopAccount')).toBe(W)
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect(await band.find({ key: 'sync-go' })).toBeUndefined()
+    await band.unmount()
+  })
+
   test('沒換帳號、或設成只在按的時候：不問', async ($, on) => {
     const sync = { on: true, pair: [W, P], folders: ['/w/server'], when: 'manual' }
-    const w = world(on, { store: { uses: USES_ALL, sync, lastAccount: P } })
+    const w = world(on, { store: { uses: USES_ALL, sync, lastDesktopAccount: P } })
     await $.session.start(START)
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     expect(await ui.find({ key: 'sync-go' })).toBeUndefined()
