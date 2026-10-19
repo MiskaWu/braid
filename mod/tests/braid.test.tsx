@@ -275,7 +275,7 @@ describe('第一次打開：選用法', () => {
     expect(await ui.find({ key: 'tab-switch' })).toBeDefined()
     expect(await ui.find({ key: 'tab-migrate' })).toBeDefined()
     expect(await ui.find({ key: 'tab-sync' })).toBeUndefined()
-    expect(await shows(ui, /換到哪個帳號/)).toBe(true) // 選了用量切換，直接到切換頁
+    expect(await shows(ui, /接手順序/)).toBe(true) // 選了用量切換，直接到切換頁
     await ui.unmount()
   })
 })
@@ -296,8 +296,8 @@ describe('帳號與用量', () => {
       expect(await seen(ui, /這個對話/)).toBe(true)
       expect(await seen(ui, /5 小時 12%.*2 小時前的數字/)).toBe(true)
       expect(await seen(ui, /braid 沒有它的登入憑證/)).toBe(true)
-      // 桌面版畫成圖、終端機是文字
-      expect((await ui.findAll({ type: 'Svg' })).length).toBe(surface === 'desktop' ? 2 : 0)
+      // 桌面版畫成圖（頁首＋兩張帳號卡）、終端機是文字
+      expect((await ui.findAll({ type: 'Svg' })).length).toBe(surface === 'desktop' ? 3 : 0)
       await ui.unmount()
     }
   })
@@ -595,7 +595,7 @@ describe('切換設定', () => {
       const ui = await $.ui.mount({ ...PANE, surface })
       expect(await ui.find({ key: 'sw-scope' })).toBeUndefined()
       expect(await shows(ui, /全部資料夾都能換到任何帳號/)).toBe(true)
-      expect(await shows(ui, /可以接手/)).toBe(true)
+      expect(await seen(ui, /可以接手/)).toBe(true)
       await ui.unmount()
     }
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })

@@ -27,7 +27,7 @@ mod/                              plugin 本體（從 marketplace 安裝時只�
   hooks/terminal.ts               帳號腳本（接著做、新增帳號）開新視窗的方式（純函式）
   hooks/desktop.ts                讀桌面 app 的側欄資料與備份（收一組讀檔函式，不收 $）
   hooks/mirror.ts                 自動同步的核心：把側欄紀錄複製到沒登入的帳號（收一組讀寫檔函式，不收 $）
-  hooks/visual.ts                 桌面版面板的圖（帳號卡、用量條、同步卡）：給資料回 SVG 字串的純函式
+  hooks/visual.ts                 桌面版面板的圖（頁首、帳號卡、用量條、切換總覽與名次列、同步卡、歸屬總覽、用法插圖）：給資料回 SVG 字串的純函式
   hooks/policy.ts                 歸屬表：資料夾 → 帳號、對得上與否與風險方向、git 遠端分組（純邏輯）
   hooks/pages.ts                  頁面清單（~/.claude/artifact-sources/index.json）的格式與判斷（純邏輯）
   types/index.d.ts                $.state 的契約
@@ -140,6 +140,9 @@ tests/                            工具的測試（Node＋classic-level 造資�
   因為發布用終端機是另一個 `CLAUDE_CONFIG_DIR`，讀不到這邊的 `$.store`。官方只保證 `/login` 的對話能發布，
   braid 用一年期憑證開的視窗（`BRAID_ACCOUNT`）不給「發布」。CLI 自己 `/login` 的帳號（`~/.claude.json`）
   沒有 braid 的憑證也能「接著做」：腳本收到憑證 id「-」就不帶憑證直接開 claude。
+- **桌面版版面**：可以點的一定是原生的 Button／Select／Input（Button 只能包文字，不能包圖），圖（Svg）只負責呈現狀態。
+  每頁同一套：頁首圖 → 分頁按鈕 → 頁首（標題＋一句話）→ 總覽圖 → 區塊；長說明收進可展開的「說明」（`helpAtom`）。
+  設計稿先在暫存資料夾用產生器輸出拼 462px 寬的假面板、Playwright 深淺色截圖看過再接進來。
 - **用量顯示**：狀態列（`$.ui.status`）只能放文字，寫 5 小時與 7 天；桌面版另外在輸入框下方那行（`PromptHint`）
   先拿 `next(e)` 畫好的 app 提示，再在旁邊接 `usageStrip` 的 SVG 量表，不蓋掉 app 自己的提示。
 - **更新**：官方是 `/plugin` 裡打開 marketplace 的自動更新（第三方預設關，`marketplace.json` 不能替使用者開）。

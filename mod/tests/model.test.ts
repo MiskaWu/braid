@@ -36,7 +36,7 @@ import {
   usageFrom,
 } from '../hooks/model'
 import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo, type SessionSpec } from '../hooks/mirror'
-import { accountCard, fit, initial, slotOf, syncFlow } from '../hooks/visual'
+import { accountCard, fit, header, initial, ownerHero, rankRow, slotOf, switchHero, syncFlow, useIcon } from '../hooks/visual'
 import { ANY, cleanFolder, draftGroups, normalizePolicy, projectOf, remoteKey, riskOf, ruleFor, setRule, sideOf, verdictFor } from '../hooks/policy'
 import { isNewPage, parseIndex, projectSlug, titleOf, urlIn } from '../hooks/pages'
 import { newCredentialId, planTerminal, removeFile, removeToolBackup, secretDelete, wrapperText } from '../hooks/terminal'
@@ -822,5 +822,38 @@ describe('頁面清單', () => {
     expect(urlIn('no url')).toBe(null)
     expect([titleOf({ title: 'T' }, null), titleOf({ file_path: '/x/report.html' }, '<title> 報告 </title>'), titleOf({ file_path: '/x/report.html' }, null)]).toEqual(['T', '報告', 'report'])
     expect([projectSlug('/home/me/projects/acme'), projectSlug('C:\\work\\my app'), projectSlug('/')]).toEqual(['acme', 'my-app', 'project'])
+  })
+})
+
+describe('桌面版的圖（第二批）', () => {
+  const bad = 'A&B <x>'
+  test('頁首、切換總覽、名次列、歸屬總覽：名稱照字面畫（跳脫）、說明文字完整、大小在上限內', async () => {
+    const parts = [
+      header({ account: { label: bad, color: '#2a78d6' }, windows: [{ label: '5 小時', pct: 27, reset: null }, { label: '7 天', pct: 100, reset: null }], thresholds: [90, 95] }),
+      switchHero({ account: { label: bad, color: '#2a78d6' }, windows: [{ label: '5 小時', pct: 92, reset: null }], thresholds: [90], next: { label: bad, color: '#eb6834', note: '可以接手' } }),
+      rankRow({ rank: 2, label: bad, color: '#eb6834', status: { tone: 'good', text: '可以接手' } }),
+      ownerHero({ project: bad, owner: { label: bad, color: '#2a78d6' }, me: { label: '個人', color: '#e87ba4' }, state: 'mismatch' }),
+    ]
+    for (const p of parts) {
+      expect(p.source).toContain('A&amp;B &lt;x&gt;')
+      expect(p.source).not.toContain('<x>')
+      expect(p.source.length).toBeLessThan(131072)
+      expect(p.alt).toContain(bad)
+    }
+    expect(parts[0]?.alt).toBe('braid；目前：A&B <x>；5 小時 27%，7 天 100%')
+    expect(parts[0]?.source).toContain('fill="#d03b3b"') // 7 天用完：危險色
+    expect(parts[1]?.alt).toMatch(/5 小時 92%（90% 提醒）；下一個接手：A&B <x>/)
+    expect(parts[2]?.alt).toBe('2. A&B <x>：可以接手')
+    expect(parts[3]?.alt).toBe('A&B <x> → A&B <x>；對不上：這個對話是「個人」')
+    expect(ownerHero({ project: 'p', owner: null, me: { label: '個人', color: '#e87ba4' }, state: 'unset' }).alt).toBe('p → 還沒設定；這個對話是「個人」')
+    expect(switchHero({ account: { label: 'a', color: '#2a78d6' }, windows: [], thresholds: [], next: null }).alt).toMatch(/下一個接手：沒有/)
+  })
+
+  test('用法插圖：四種都有，說明文字給看不到圖的人', async () => {
+    for (const k of ['migrate', 'switch', 'sync', 'policy'] as const) {
+      const i = useIcon(k)
+      expect(i.source.startsWith('<svg')).toBe(true)
+      expect(i.alt).toMatch(/的圖示$/)
+    }
   })
 })

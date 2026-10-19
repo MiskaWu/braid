@@ -148,6 +148,8 @@ declare module 'claude-code' {
       pages: { pending: number; list: { id: string; title: string; project: string; owner: string | null; url: string | null; status: string }[] } | null
       /** 歸屬頁「其他資料夾」要歸給誰 */
       newOwner: string | null
+      /** 展開的說明（例如同步頁的「怎麼運作」）；null＝都收著 */
+      help: string | null
       /** 這個對話是 braid 用一年期憑證開的（官方只保證 /login 的對話能發布頁面） */
       viaToken: boolean
       /** 這個對話裡按過「之後再說」的專案（不再問歸屬） */

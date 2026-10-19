@@ -334,3 +334,182 @@ export function usageStrip(d: { label: string; color: string; windows: Window[];
   const alt = `${d.label} ${d.windows.map(win => `${win.label} ${win.pct === null ? '沒有數字' : `${win.pct}%`}`).join('，')}`
   return { source: svg(w, h, body), alt, height: h }
 }
+
+// ── 第二批：頁首、切換頁的總覽、名次列、用法插圖、歸屬總覽 ──
+
+/** braid 的標誌：三股交纏的線（三個帳號色），r 是外框大小的一半。 */
+function logo(x: number, y: number, s: number): string {
+  const w = s * 2
+  const strand = (phase: number, cls: string) => {
+    let d = ''
+    for (let i = 0; i <= 24; i++) {
+      const t = i / 24
+      const px = x + t * w
+      const py = y + s + Math.sin(t * Math.PI * 2 + phase) * s * 0.55
+      d += `${d ? 'L' : 'M'}${px.toFixed(1)} ${py.toFixed(1)}`
+    }
+    return `<path d="${d}" fill="none" class="${cls}" stroke-width="${(s * 0.22).toFixed(1)}" stroke-linecap="round"/>`
+  }
+  return strand(0, 's0') + strand((Math.PI * 2) / 3, 's1') + strand((Math.PI * 4) / 3, 's2')
+}
+
+/** 面板頁首：標誌、braid、目前帳號（頭像＋名稱）、5 小時與 7 天迷你量表。 */
+export function header(d: { account: { label: string; color: string } | null; windows: Window[]; thresholds: (number | null)[] }, w = 420): { source: string; alt: string; height: number } {
+  const h = 40
+  let body = logo(2, 9, 11)
+  body += txt(32, 26, 't1', 16, 'braid', 'font-weight="700" letter-spacing="-0.3"')
+  if (d.account) {
+    let x = w - 1
+    const bars: string[] = []
+    ;[...d.windows].reverse().forEach((win, ri) => {
+      const i = d.windows.length - 1 - ri
+      const th = d.thresholds[i] ?? null
+      const pct = win.pct ?? 0
+      const level = win.pct === null ? 'none' : pct >= 100 ? 'critical' : th !== null && pct >= th ? 'warning' : 'normal'
+      const p = win.pct === null ? '—' : `${pct}%`
+      const pw = textWidth(p, 11)
+      bars.push(txt(x, 25, 't1 num', 11, p, 'font-weight="600" text-anchor="end"'))
+      x -= pw + 5 + 36
+      const fill = level === 'critical' ? `fill="${STATUS.critical}"` : level === 'warning' ? `fill="${STATUS.warning}"` : fillOf(d.account!.color)
+      bars.push(`<rect x="${x}" y="19" width="36" height="5" rx="2.5" ${fillOf(d.account!.color, 'k')}/>`)
+      if (pct > 0) bars.push(`<rect x="${x}" y="19" width="${Math.max(5, (36 * Math.min(pct, 100)) / 100)}" height="5" rx="2.5" ${fill}/>`)
+      const short = win.label.replace(' 小時', 'h').replace(' 天', 'd')
+      x -= textWidth(short, 11) + 5
+      bars.push(txt(x, 25, 't3', 11, short))
+      x -= 12
+    })
+    body += bars.join('')
+    const name = fit(d.account.label, 12, 90)
+    x -= textWidth(name, 12) + 4
+    body += txt(x, 25, 't1', 12, name, 'font-weight="600"')
+    x -= 18
+    body += avatar(x + 8, 20, 8, d.account.color, d.account.label)
+  }
+  body += `<line x1="0" y1="${h - 0.5}" x2="${w}" y2="${h - 0.5}" class="hair" stroke-width="1"/>`
+  const alt = d.account ? `braid；目前：${d.account.label}；${d.windows.map(win => `${win.label} ${win.pct ?? '—'}%`).join('，')}` : 'braid'
+  return { source: svg(w, h, body), alt, height: h }
+}
+
+/**
+ * 切換頁的總覽：目前帳號兩條用量與提醒門檻（標出幾 % 提醒），右邊是「下一個接手」。
+ */
+export function switchHero(d: {
+  account: { label: string; color: string }
+  windows: Window[]
+  thresholds: (number | null)[]
+  next: { label: string; color: string; note: string } | null
+}, w = 420): { source: string; alt: string; height: number } {
+  let body = ''
+  const colW = w - 140
+  let y = 0
+  body += txt(0, 14, 't3', 11, '目前的用量')
+  y = 26
+  d.windows.forEach((win, i) => {
+    const th = d.thresholds[i] ?? null
+    const pct = win.pct ?? 0
+    const level = win.pct === null ? 'none' : pct >= 100 ? 'critical' : th !== null && pct >= th ? 'warning' : 'normal'
+    body += txt(0, y + 10, 't2', 12, win.label)
+    body += txt(colW, y + 10, 't1 num', 13, win.pct === null ? '—' : `${pct}%`, 'font-weight="600" text-anchor="end"')
+    const by = y + 18
+    body += `<rect x="0" y="${by}" width="${colW}" height="8" rx="4" ${fillOf(d.account.color, 'k')}/>`
+    const fill = level === 'critical' ? `fill="${STATUS.critical}"` : level === 'warning' ? `fill="${STATUS.warning}"` : fillOf(d.account.color)
+    if (pct > 0) body += `<rect x="0" y="${by}" width="${Math.max(8, (colW * Math.min(pct, 100)) / 100)}" height="8" rx="4" ${fill}/>`
+    if (th !== null) {
+      const tx = (colW * th) / 100
+      body += `<line x1="${tx}" y1="${by - 4}" x2="${tx}" y2="${by + 12}" class="tick" stroke-width="1.4"/>`
+      body += txt(tx, by + 24, 't3', 10, `${th}% 提醒`, tx > colW - 30 ? 'text-anchor="end"' : 'text-anchor="middle"')
+    }
+    y = by + 32
+  })
+  // 右邊：下一個接手
+  const rx = colW + 28
+  body += `<line x1="${rx - 14}" y1="4" x2="${rx - 14}" y2="${y - 6}" class="hair" stroke-width="1"/>`
+  body += txt(rx, 14, 't3', 11, '下一個接手')
+  if (d.next) {
+    body += avatar(rx + 16, 44, 16, d.next.color, d.next.label)
+    body += txt(rx + 40, 42, 't1', 13, fit(d.next.label, 13, w - rx - 40), 'font-weight="600"')
+    body += txt(rx + 40, 58, 't3', 11, fit(d.next.note, 11, w - rx - 40))
+  } else {
+    body += txt(rx, 46, 't3', 12, '還沒有可以接手的帳號')
+  }
+  const height = Math.ceil(y)
+  const alt = `${d.account.label}：${d.windows.map((win, i) => `${win.label} ${win.pct ?? '—'}%（${d.thresholds[i] ?? '不'}% 提醒）`).join('，')}；下一個接手：${d.next ? d.next.label : '沒有'}`
+  return { source: svg(w, height, body), alt, height }
+}
+
+/** 名次列：圓圈裡的名次、頭像、名稱、狀態標籤（可以接手／要確認／沒有憑證／也快用完）。 */
+export function rankRow(d: { rank: number; label: string; color: string; status: { tone: 'good' | 'warn' | 'muted' | 'current'; text: string } }, w = 330): { source: string; alt: string; height: number } {
+  const h = 28
+  let body = `<circle cx="10" cy="14" r="9" class="panel"/>` + txt(10, 18, 't2 num', 11, String(d.rank), 'text-anchor="middle" font-weight="600"')
+  body += avatar(36, 14, 10, d.color, d.label)
+  const name = fit(d.label, 13, 110)
+  body += txt(52, 18.5, 't1', 13, name, 'font-weight="600"')
+  const x = 52 + textWidth(name, 13) + 10
+  const tone = d.status.tone
+  const dot = tone === 'good' ? STATUS.good : tone === 'warn' ? STATUS.warning : null
+  const text = fit(d.status.text, 11, w - x - 22)
+  const pw = textWidth(text, 11) + (dot ? 22 : 14)
+  body += `<rect x="${x}" y="5" width="${pw}" height="18" rx="9" class="panel"/>`
+  if (dot) body += `<circle cx="${x + 9}" cy="14" r="3.5" fill="${dot}"/>`
+  body += txt(x + (dot ? 17 : 7), 18, tone === 'current' ? 't2' : 't2', 11, text)
+  return { source: svg(w, h, body), alt: `${d.rank}. ${d.label}：${d.status.text}`, height: h }
+}
+
+/** 用法卡的插圖（48×48）。 */
+export function useIcon(kind: 'migrate' | 'switch' | 'sync' | 'policy'): { source: string; alt: string } {
+  const s = 48
+  let b = `<rect x="0" y="0" width="${s}" height="${s}" rx="12" class="panel"/>`
+  if (kind === 'migrate') {
+    b += `<rect x="9" y="12" width="16" height="20" rx="3" class="k0"/><rect x="23" y="16" width="16" height="20" rx="3" class="c0"/>`
+    b += `<path d="M15 38h14m-4-4 4 4-4 4" fill="none" class="tick" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`
+  } else if (kind === 'switch') {
+    b += `<rect x="9" y="17" width="30" height="5" rx="2.5" class="k1"/><rect x="9" y="17" width="26" height="5" rx="2.5" fill="${STATUS.warning}"/>`
+    b += `<rect x="9" y="27" width="30" height="5" rx="2.5" class="k0"/><rect x="9" y="27" width="8" height="5" rx="2.5" class="c0"/>`
+    b += `<path d="M33 37l4 3-4 3M17 40h20" fill="none" class="tick" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`
+  } else if (kind === 'sync') {
+    b += `<circle cx="13" cy="24" r="6" class="c0"/><circle cx="35" cy="24" r="6" class="c1"/>`
+    b += `<path d="M19 24q2.5-5 5 0t5 0" fill="none" class="s0" stroke-width="1.8" stroke-linecap="round"/><path d="M19 24q2.5 5 5 0t5 0" fill="none" class="s1" stroke-width="1.8" stroke-linecap="round"/>`
+  } else {
+    b += `<path d="M9 16a3 3 0 0 1 3-3h7l3 3h14a3 3 0 0 1 3 3v15a3 3 0 0 1-3 3H12a3 3 0 0 1-3-3z" class="k2"/><path d="M9 16a3 3 0 0 1 3-3h7l3 3h14a3 3 0 0 1 3 3v15a3 3 0 0 1-3 3H12a3 3 0 0 1-3-3z" fill="none" class="s2" stroke-width="1.4"/>`
+    b += `<circle cx="20" cy="27" r="5" class="c0"/><circle cx="31" cy="27" r="5" class="c1"/>`
+  }
+  const alt = { migrate: '遷移的圖示', switch: '用量切換的圖示', sync: '同步的圖示', policy: '歸屬的圖示' }[kind]
+  return { source: svg(s, s, b), alt }
+}
+
+/** 歸屬頁的總覽：資料夾 → 歸屬帳號，旁邊是這個對話的帳號與「對得上／對不上／還沒設定／不分」。 */
+export function ownerHero(d: {
+  project: string
+  owner: { label: string; color: string } | null
+  me: { label: string; color: string }
+  state: 'ok' | 'mismatch' | 'unset' | 'any'
+}, w = 420): { source: string; alt: string; height: number } {
+  const h = 74
+  // 資料夾
+  let b = `<path d="M1 20a4 4 0 0 1 4-4h10l4 4h18a4 4 0 0 1 4 4v19a4 4 0 0 1-4 4H5a4 4 0 0 1-4-4z" class="k2"/>`
+  b += `<path d="M1 20a4 4 0 0 1 4-4h10l4 4h18a4 4 0 0 1 4 4v19a4 4 0 0 1-4 4H5a4 4 0 0 1-4-4z" fill="none" class="s2" stroke-width="1.4"/>`
+  const name = fit(d.project, 14, 130)
+  b += txt(52, 30, 't1', 14, name, 'font-weight="600"')
+  b += txt(52, 46, 't3', 11, '這個資料夾')
+  // 箭頭
+  const ax = 52 + Math.max(textWidth(name, 14), 60) + 16
+  b += `<path d="M${ax} 31h28m-6-5 6 5-6 5" fill="none" class="tick" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`
+  const ox = ax + 44
+  if (d.owner) {
+    b += avatar(ox + 14, 30, 14, d.owner.color, d.owner.label)
+    b += txt(ox + 34, 30, 't1', 14, fit(d.owner.label, 14, w - ox - 34), 'font-weight="600"')
+    b += txt(ox + 34, 46, 't3', 11, '歸屬帳號')
+  } else {
+    b += `<circle cx="${ox + 14}" cy="30" r="13" fill="none" class="tick" stroke-width="1.2" stroke-dasharray="3 3"/>`
+    b += txt(ox + 14, 34.5, 't3', 13, d.state === 'any' ? '*' : '?', 'text-anchor="middle" font-weight="600"')
+    b += txt(ox + 34, 30, 't1', 14, d.state === 'any' ? '不分' : '還沒設定', 'font-weight="600"')
+    b += txt(ox + 34, 46, 't3', 11, d.state === 'any' ? '哪個帳號都可以' : '新頁會先擋下')
+  }
+  // 狀態列
+  const color = d.state === 'ok' ? STATUS.good : d.state === 'mismatch' ? STATUS.warning : null
+  const label = d.state === 'ok' ? `對得上：這個對話是「${d.me.label}」` : d.state === 'mismatch' ? `對不上：這個對話是「${d.me.label}」` : d.state === 'any' ? `這個對話是「${d.me.label}」` : `這個對話是「${d.me.label}」`
+  b += color ? `<circle cx="5" cy="${h - 7}" r="4" fill="${color}"/>` : `<circle cx="5" cy="${h - 7}" r="3.6" fill="none" class="tick" stroke-width="1.2"/>`
+  b += txt(15, h - 3, 't2', 12, fit(label, 12, w - 15))
+  const alt = `${d.project} → ${d.owner ? d.owner.label : d.state === 'any' ? '不分' : '還沒設定'}；${label}`
+  return { source: svg(w, h, b), alt, height: h }
+}

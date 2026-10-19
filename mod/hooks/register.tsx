@@ -28,7 +28,7 @@ import type {
 import { backupLabel, desktopPaths, listToolBackups, listTrash, scanDesktop, type DesktopEnv, type DesktopIo, type DesktopPaths } from './desktop'
 import { manualPath, parseDryRun, planLaunch, toolArgs, type ToolRequest } from './launch'
 import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo } from './mirror'
-import { accountCard, syncFlow, usageStrip, type Window } from './visual'
+import { accountCard, header, ownerHero, rankRow, switchHero, syncFlow, usageStrip, useIcon, type Window } from './visual'
 import { ANY, draftGroups, dropRule, normalizePolicy, projectOf, riskOf, riskText, ruleFor, sameSide, setRule, verdictFor, type FolderRemotes, type Verdict } from './policy'
 import { isNewPage, parseIndex, pendingFor, projectSlug, serializeIndex, titleOf, urlIn, type PageEntry, type PageIndex } from './pages'
 import {
@@ -115,6 +115,7 @@ const draftAtom = atom({ plugin: 'braid', key: 'draft' } as const, null)
 const newOwnerAtom = atom({ plugin: 'braid', key: 'newOwner' } as const, null)
 const skipAskAtom = atom({ plugin: 'braid', key: 'skipAsk' } as const, null)
 const viaTokenAtom = atom({ plugin: 'braid', key: 'viaToken' } as const, false)
+const helpAtom = atom({ plugin: 'braid', key: 'help' } as const, null)
 const tzAtom = atom({ plugin: 'braid', key: 'tz' } as const, 0)
 
 // ── 指令 ────────────────────────────────────────────────────
@@ -1120,24 +1121,36 @@ async function drawOnboarding($: $, ui: UI) {
   const draft = await read($, draftUsesAtom)
   const uses = await read($, usesAtom)
   const options: { id: keyof BraidUses; title: string; desc: string }[] = [
-    { id: 'migrate', title: '換帳號了，把舊對話搬過來', desc: '桌面 app 舊帳號在 Code 分頁的對話與環境，複製到現在的帳號。搬一次就好。' },
-    { id: 'switch', title: '用量用完，換另一個帳號接著做', desc: '快到上限時提醒，一鍵用另一個帳號在新視窗接著同一段對話。要兩個以上的帳號。' },
-    { id: 'sync', title: '幾個帳號長期一起用', desc: '桌面 app 的兩個帳號自動同步對話，用量用完換過去就能接著做（預設全部資料夾，也可以只挑幾個）。' },
-    { id: 'policy', title: '公司與個人分開', desc: '依資料夾決定歸哪個帳號：用錯帳號時提醒、一鍵換過去；新頁只用對的帳號發布。' },
+    { id: 'migrate', title: '換帳號了，把舊對話搬過來', desc: '舊帳號的對話與環境複製到新帳號，搬一次就好。' },
+    { id: 'switch', title: '用量用完，換帳號接著做', desc: '快到上限時提醒，一鍵用另一個帳號接著同一段對話。' },
+    { id: 'sync', title: '兩個帳號一起用', desc: '桌面 app 的兩個帳號自動同步對話，換過去就能接著做。' },
+    { id: 'policy', title: '公司與個人分開', desc: '依資料夾決定帳號：用錯時提醒，新頁只用對的帳號發布。' },
   ]
+  const { Svg } = ui
+  const toggle = (id: keyof BraidUses) => update($, draftUsesAtom, d => ({ ...d, [id]: !d[id] }))
   return (
     <Box flexDirection="column" gap={1}>
-      <Text bold>你想用 braid 做什麼？（可以複選）</Text>
-      {options.map(o => (
-        <Box key={`ob-${o.id}`} flexDirection="column">
-          <Button key={`use-${o.id}`} plain onPress={() => update($, draftUsesAtom, d => ({ ...d, [o.id]: !d[o.id] }))}>
-            {draft[o.id] ? '[x] ' : '[ ] '}
-            {o.title}
-          </Button>
-          <Text dimColor>{`    ${o.desc}`}</Text>
-        </Box>
-      ))}
-      <Text dimColor>沒選的功能不會出現，之後按「用法」可以再改。帳號頁一定會有。</Text>
+      {pageHead(ui, 'ob-head', '你想用 braid 做什麼？', '可以複選；沒選的不會出現，之後按「用法」再改。帳號頁一定會有。')}
+      {options.map(o =>
+        Svg ? (
+          <Box key={`ob-${o.id}`} flexDirection="row" gap={2} alignItems="center" borderStyle="round" borderColor={draft[o.id] ? 'text' : undefined} paddingX={1} paddingY={1}>
+            <Svg source={useIcon(o.id).source} alt={useIcon(o.id).alt} width={44} height={44} />
+            <Box flexDirection="column" flexGrow={1}>
+              <Text weight="semibold">{o.title}</Text>
+              {fine(ui, o.desc)}
+            </Box>
+            <Button key={`use-${o.id}`} label={draft[o.id] ? '✓ 已選' : '選用'} variant={draft[o.id] ? 'primary' : undefined} onPress={() => toggle(o.id)} />
+          </Box>
+        ) : (
+          <Box key={`ob-${o.id}`} flexDirection="column">
+            <Button key={`use-${o.id}`} plain onPress={() => toggle(o.id)}>
+              {draft[o.id] ? '[x] ' : '[ ] '}
+              {o.title}
+            </Button>
+            <Text dimColor>{`    ${o.desc}`}</Text>
+          </Box>
+        ),
+      )}
       <Box flexDirection="row" gap={1}>
         <Button
           key="use-save"
@@ -1449,10 +1462,32 @@ async function drawSwitch($: $, ui: UI) {
   const owner = here && (here.kind === 'ok' || here.kind === 'mismatch') ? here.owner : null
   const why = new Map(current ? candidates(accounts, current, sw, owner, await read($, cliLoginAtom), now).map(c => [c.account.id, c.why]) : [])
   const uses = await read($, usesAtom)
+  const { Svg } = ui
+  const cur = current ? accounts[current] : undefined
+  const liveNow = (await read($, liveAtom)) ?? cur?.usage ?? null
   void cwd
   return (
     <Box flexDirection="column" gap={1}>
-      {pageHead(ui, 'sw-head', '切換', '用量快用完時，輸入框上方提醒你，一鍵換另一個帳號接著做。')}
+      {pageHead(ui, 'sw-head', '切換', '快用完時提醒你，一鍵換帳號接著做。')}
+      {Svg && cur ? (
+        <Box key="sw-hero" borderStyle="round" paddingX={1} paddingY={1}>
+          {(() => {
+            const live = liveNow
+            const windows: Window[] = [
+              { label: '5 小時', pct: effectivePct(live?.fiveHour ?? null, now), reset: null },
+              { label: '7 天', pct: effectivePct(live?.sevenDay ?? null, now), reset: null },
+            ]
+            const nextUp = order.map(id => accounts[id] as BraidAccount).find(a => a.id !== current && why.get(a.id) === 'ok')
+            const hero = switchHero({
+              account: { label: cur.label, color: cur.color },
+              windows,
+              thresholds: sw.on ? [sw.fiveHour, sw.sevenDay] : [null, null],
+              next: nextUp ? { label: nextUp.label, color: nextUp.color, note: '可以接手' } : null,
+            })
+            return <Svg source={hero.source} alt={hero.alt} />
+          })()}
+        </Box>
+      ) : null}
       {sectionHead(ui, 'sw-alert-head', '提醒')}
       <Select
         key="sw-on"
@@ -1478,19 +1513,25 @@ async function drawSwitch($: $, ui: UI) {
         value={sw.sevenDay === null ? 'off' : String(sw.sevenDay)}
         onSelect={v => putSwitch($, s => ({ ...s, sevenDay: v === 'off' ? null : Number(v) }))}
       />
-      {fine(ui, '到門檻時，輸入框上方會出現提示，按了才換。')}
-
-      {sectionHead(ui, 'sw-order-head', '換到哪個帳號', '由上往下找第一個能接手的。')}
+      {sectionHead(ui, 'sw-order-head', '接手順序', '由上往下找第一個能接手的。')}
       {order.length < 2 && <Text dimColor>要兩個以上的帳號才換得過去，到「帳號」頁新增。</Text>}
       {order.map((id, i) => {
         const a = accounts[id] as BraidAccount
         const note = id === current ? '這個對話在用' : WHY_TEXT[why.get(id) ?? 'ok']
+        const w = why.get(id)
+        const row = Svg
+          ? rankRow({ rank: i + 1, label: a.label, color: a.color, status: { tone: id === current ? 'current' : w === 'ok' ? 'good' : w === 'busy' || w === 'other-side' ? 'warn' : 'muted', text: note } })
+          : null
         return (
-          <Box key={`ord-${id}`} flexDirection="row" gap={1}>
+          <Box key={`ord-${id}`} flexDirection="row" gap={1} alignItems="center">
+            {row && Svg ? (
+              <Svg source={row.source} alt={row.alt} />
+            ) : (
             <Text wrap="truncate">
               {`${i + 1}. `}
               <Text color={a.color}>●</Text> <Text weight="semibold">{a.label}</Text> <Text dimColor>{note}</Text>
             </Text>
+            )}
             {i > 0 && (
               <Button
                 key={`up-${id}`}
@@ -1511,7 +1552,7 @@ async function drawSwitch($: $, ui: UI) {
       })}
 
       {sectionHead(ui, 'sw-scope-head', '資料夾')}
-      {fine(ui, uses?.policy ? '資料夾歸哪個帳號在「歸屬」頁設定：接手的帳號和資料夾歸屬不同邊時，要先確認風險。' : '全部資料夾都能換到任何帳號。要讓公司專案只用公司帳號，在「用法」打開「歸屬」。')}
+      {fine(ui, uses?.policy ? '資料夾歸哪個帳號在「歸屬」頁設定；接手的帳號和歸屬不同邊時要先確認。' : '全部資料夾都能換到任何帳號。要把公司與個人分開，在「用法」打開「歸屬」。')}
       {uses?.policy && <Button key="sw-to-policy" label="到歸屬頁" dimColor onPress={() => setTab($, 'policy')} />}
       {platform !== 'other' && fine(ui, '在桌面 app 按「接著做」，會開一個終端機視窗用另一個帳號接著。')}
     </Box>
@@ -1520,6 +1561,7 @@ async function drawSwitch($: $, ui: UI) {
 
 async function drawSync($: $, ui: UI) {
   const { Box, Text, Button, Select } = ui
+  const help = await read($, helpAtom)
   const platform = await read($, platformAtom)
   if (platform === 'other') {
     return <Text>CLI 的對話不分帳號：換帳號後用 claude --resume 就看得到全部，不需要同步。同步是給桌面 app 的側欄用的。</Text>
@@ -1604,7 +1646,7 @@ async function drawSync($: $, ui: UI) {
 
       {partner && (
         <Box key="sy-env-box" flexDirection="column" gap={1}>
-          {sectionHead(ui, 'sy-env-head', '已儲存的環境', '存在 app 的內部資料庫，app 開著時寫不進去，所以不自動同步。要帶過來時按這裡：開獨立視窗，先結束 Claude，寫入前備份。')}
+          {sectionHead(ui, 'sy-env-head', '已儲存的環境', 'app 開著時寫不進去，所以不自動同步。要帶過來時會開獨立視窗、先結束 Claude，寫入前備份。')}
           {request && <Button key="sy-env" label={`從「${partnerName}」帶環境過來…`} onPress={async () => say($, await launchTool($, request))} />}
         </Box>
       )}
@@ -1612,11 +1654,15 @@ async function drawSync($: $, ui: UI) {
       {await drawBackups($, ui)}
 
       <Box key="sy-how" flexDirection="column">
-        {sectionHead(ui, 'sy-how-head', '怎麼運作')}
-        {fine(ui, '・桌面 app 開著時，大約每分鐘把現在登入的帳號的對話複製到另一個帳號；用量快用完時再馬上同步一次。', 'how-1')}
-        {fine(ui, '・只寫沒登入的那個帳號：app 換帳號時才會重讀，所以不用結束 Claude。', 'how-2')}
-        {fine(ui, '・刪除也跟著走；刪掉之後又在另一邊用過的不刪。被刪的那筆先存到備份。', 'how-3')}
-        {fine(ui, '・對話內容本來就是電腦上同一個檔，兩邊看到的是同一份。', 'how-4')}
+        <Button key="sy-how-toggle" label={help === 'sync-how' ? '怎麼運作 ▾' : '怎麼運作 ▸'} plain dimColor onPress={() => update($, helpAtom, h => (h === 'sync-how' ? null : 'sync-how'))} />
+        {help === 'sync-how' && (
+          <Box flexDirection="column">
+            {fine(ui, '・桌面 app 開著時，大約每分鐘把現在登入的帳號的對話複製到另一個帳號；用量快用完時再馬上同步一次。', 'how-1')}
+            {fine(ui, '・只寫沒登入的那個帳號：app 換帳號時才會重讀，所以不用結束 Claude。', 'how-2')}
+            {fine(ui, '・刪除也跟著走；刪掉之後又在另一邊用過的不刪。被刪的那筆先存到備份。', 'how-3')}
+            {fine(ui, '・對話內容本來就是電腦上同一個檔，兩邊看到的是同一份。', 'how-4')}
+          </Box>
+        )}
       </Box>
     </Box>
   )
@@ -1781,9 +1827,23 @@ async function drawPolicy($: $, ui: UI) {
     <Box flexDirection="column" gap={1}>
       {pageHead(ui, 'pol-head', '歸屬', '資料夾歸哪個帳號：對話該用誰、頁面歸誰，都照這張表。')}
 
-      <Box key="pol-here" flexDirection="column" borderStyle="round" borderColor={tone} paddingX={1}>
-        <Text weight="semibold">{`這裡：${await tilde($, project)}`}</Text>
-        <Text color={tone}>{status}</Text>
+      <Box key="pol-here" flexDirection="column" borderStyle="round" borderColor={tone} paddingX={1} paddingY={ui.Svg ? 1 : 0}>
+        {ui.Svg && cur ? (
+          (() => {
+            const Svg = ui.Svg as NonNullable<UI['Svg']>
+            const o = here && (here.kind === 'ok' || here.kind === 'mismatch') ? here.owner : null
+            const hero = ownerHero({
+              project: name,
+              owner: o ? { label: o.label, color: o.color } : null,
+              me: { label: cur.label, color: cur.color },
+              state: here?.kind === 'ok' ? 'ok' : here?.kind === 'mismatch' ? 'mismatch' : here?.kind === 'any' ? 'any' : 'unset',
+            })
+            return <Svg source={hero.source} alt={hero.alt} />
+          })()
+        ) : (
+          <Text weight="semibold">{`這裡：${await tilde($, project)}`}</Text>
+        )}
+        {(!ui.Svg || here?.kind === 'mismatch' || here?.kind === 'unset' || here?.kind === 'lost') && <Text color={tone}>{status}</Text>}
         <Select
           key="pol-here-owner"
           label="這個資料夾"
@@ -2248,8 +2308,24 @@ export const register: Register = on => {
         />
       </Box>
     ))
+    // 桌面版的頁首：標誌、目前帳號與兩條迷你量表（終端機沒有，靠狀態列）
+    const curAcc = (await read($, currentAtom)) ? (await read($, accountsAtom))[(await read($, currentAtom)) as string] : undefined
+    const liveNow = await read($, liveAtom)
+    const swNow = await read($, switchAtom)
+    const top = ui.Svg
+      ? header({
+          account: curAcc ? { label: curAcc.label, color: curAcc.color } : null,
+          windows: [
+            { label: '5 小時', pct: effectivePct(liveNow?.fiveHour ?? curAcc?.usage?.fiveHour ?? null, await $.clock.now()), reset: null },
+            { label: '7 天', pct: effectivePct(liveNow?.sevenDay ?? curAcc?.usage?.sevenDay ?? null, await $.clock.now()), reset: null },
+          ],
+          thresholds: swNow.on ? [swNow.fiveHour, swNow.sevenDay] : [null, null],
+        })
+      : null
+    const TopSvg = ui.Svg
     return (
       <Box flexDirection="column" gap={1}>
+        {top && TopSvg ? <TopSvg source={top.source} alt={top.alt} /> : null}
         <Box flexDirection="row" gap={1} flexWrap="wrap">
           {tabs.map(t => (
             <Button key={`tab-${t.id}`} label={t.label} variant={t.id === tab ? 'primary' : undefined} dimColor={t.id !== tab} onPress={() => setTab($, t.id)} />
