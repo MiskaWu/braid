@@ -950,8 +950,8 @@ async function drawSync($: $, ui: UI) {
   const known = [...new Set([...desktop.profiles.map(p => p.account), ...Object.values(accounts).filter(a => a.source === 'desktop').map(a => a.id)])].filter(id => id !== current)
   const rows = current && partner ? syncRows(desktop.profiles, current, partner, sy.folders) : []
   const cwd = await $.session.cwd()
-  const partnerName = partner ? nameOf(accounts, partner) : ''
-  const hint = sy.pair.length === 2 && !partner ? `目前的同步設定是「${nameOf(accounts, sy.pair[0] as string)}」和「${nameOf(accounts, sy.pair[1] as string)}」，這個對話的帳號不在裡面。` : null
+  const partnerName = partner ? nameOf(accounts, partner, desktop.profiles) : ''
+  const hint = sy.pair.length === 2 && !partner ? `目前的同步設定是「${nameOf(accounts, sy.pair[0] as string, desktop.profiles)}」和「${nameOf(accounts, sy.pair[1] as string, desktop.profiles)}」，這個對話的帳號不在裡面。` : null
   const request = syncRequest(sy, partner)
   // 兩邊的組織不確定相同（braid 不認得對方、或組織不同）：全部同步會把個人專案也帶過去，要講清楚
   const mineOrg = current ? accounts[current]?.orgId : undefined
@@ -993,7 +993,7 @@ async function drawSync($: $, ui: UI) {
         <Select
           key="sy-partner"
           label="和哪個帳號同步"
-          options={[{ value: '', label: '（選一個）' }, ...known.map(id => ({ value: id, label: nameOf(accounts, id) }))]}
+          options={[{ value: '', label: '（選一個）' }, ...known.map(id => ({ value: id, label: nameOf(accounts, id, desktop.profiles) }))]}
           value={partner ?? ''}
           onSelect={v => putSync($, s => ({ ...s, pair: v ? [current, v] : [] }))}
         />
@@ -1057,7 +1057,7 @@ async function drawMigrate($: $, ui: UI) {
       {sources.map(p => (
         <Box key={`src-${p.account}-${p.org}`} flexDirection="column" borderStyle="round" paddingX={1}>
           <Text>
-            <Text bold>{nameOf(accounts, p.account)}</Text>
+            <Text bold>{nameOf(accounts, p.account, desktop.profiles)}</Text>
             <Text dimColor>{p.lastActivity ? `  最近 ${dateOf(p.lastActivity, tz)}` : ''}</Text>
           </Text>
           <Text>{`${p.sessions} 個對話 · ${p.folders.length} 個資料夾`}</Text>
@@ -1101,7 +1101,10 @@ export const register: Register = on => {
       await putAccount($, account)
       await update($, currentAtom, () => account.id)
       const last = await $.store.get('lastAccount')
-      if (typeof last === 'string' && last !== account.id) await update($, changedFromAtom, () => last)
+      if (typeof last === 'string' && last !== account.id) {
+        await update($, changedFromAtom, () => last)
+        if ((await read($, usesAtom))?.sync) await ensureDesktop($) // 提示裡要叫得出另一個帳號的名字
+      }
       await $.store.set('lastAccount', account.id)
     }
     try {
@@ -1169,6 +1172,7 @@ export const register: Register = on => {
     const sy = await read($, syncAtom)
     const from = await read($, changedFromAtom)
     const platform = await read($, platformAtom)
+    const profiles = (await read($, desktopAtom))?.profiles ?? []
     const request = current ? syncRequest(sy, partnerOf(sy, current)) : null
     if (uses?.sync && sy.on && sy.when === 'on-switch' && from && current && platform !== 'other' && request?.from === from) {
       return (
@@ -1176,7 +1180,7 @@ export const register: Register = on => {
           <Text color="warning" bold>
             braid
           </Text>
-          <Text wrap="truncate">{`從「${nameOf(accounts, from)}」換到「${nameOf(accounts, current)}」了。要把${syncScopeText(sy)}的對話帶過來嗎？`}</Text>
+          <Text wrap="truncate">{`從「${nameOf(accounts, from, profiles)}」換到「${nameOf(accounts, current, profiles)}」了。要把${syncScopeText(sy)}的對話帶過來嗎？`}</Text>
           <Button
             key="sync-go"
             label="帶過來…"

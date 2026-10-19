@@ -13,6 +13,7 @@ import {
   fmtReset,
   isRestricted,
   meter,
+  nameOf,
   normalizeAccount,
   normalizeFolder,
   normalizeSwitch,
@@ -250,6 +251,16 @@ describe('同步', () => {
       ['/z', 0, 5, false],
       ['/x', 3, 0, false],
     ])
+  })
+
+  test('不認得的桌面帳號：組織正好對到一個 braid 新增的帳號就借它的名稱；認得 id 的同組織帳號不借、對到兩個也不借', async () => {
+    const profiles = [{ account: 'desk-p', org: 'org-h', sessions: 1, lastActivity: 1, folders: [] }, { account: 'desk-w', org: 'org-w', sessions: 1, lastActivity: 1, folders: [] }]
+    const tok = account('tok-1', { orgId: 'org-h', label: 'MiskaWu' })
+    expect(nameOf({ work, 'tok-1': tok }, 'desk-p', profiles)).toBe('MiskaWu')
+    expect(nameOf({ work, 'tok-1': tok }, 'desk-w', profiles)).toBe('帳號 desk-w…') // work 有真正的 id：是另一個帳號
+    expect(nameOf({ 'tok-1': tok, 'tok-2': { ...tok, id: 'tok-2' } }, 'desk-p', profiles)).toBe('帳號 desk-p…')
+    expect(nameOf({ work }, 'work', profiles)).toBe('公司')
+    expect(nameOf({}, 'desk-p')).toBe('帳號 desk-p…')
   })
 
   test('備份資料夾名稱轉成時間', async () => {

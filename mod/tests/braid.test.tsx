@@ -591,6 +591,23 @@ describe('同步', () => {
     await ui.unmount()
   })
 
+  test('桌面 app 的舊帳號沒當過目前帳號：用組織對到的、braid 新增的帳號名稱來叫它', async ($, on) => {
+    const tok = acct('tok-00000009', { orgId: OP, label: 'MiskaWu', source: 'token', credential: 'file', credentialId: 'tok-00000009' })
+    const sync = { on: true, pair: [W, P], all: true, folders: [], when: 'on-switch' }
+    const w = world(on, { store: { uses: USES_ALL, sync, lastAccount: P, 'account:tok-00000009': tok } })
+    await $.session.start(START)
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect(await shows(band, /從「MiskaWu」換到「公司」了/)).toBe(true)
+    await band.unmount()
+    await $.command.run(RUN('同步'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    const options = ((await ui.find({ key: 'sy-partner' }))?.props.options ?? []) as { value: string; label: string }[]
+    expect(options.find(o => o.value === P)?.label).toBe('MiskaWu')
+    expect(options.some(o => o.value === 'tok-00000009')).toBe(false) // braid 新增的帳號不是桌面 app 帳號，不列
+    await ui.unmount()
+    void w
+  })
+
   test('換帳號後第一次打開：問要不要從另一個帳號帶過來；按了開工具，按「這次不用」就不再問', async ($, on) => {
     const sync = { on: true, pair: [W, P], folders: ['/w/server', '/side/blog'], when: 'on-switch' }
     const w = world(on, { store: { uses: USES_ALL, sync, lastAccount: P, [`account:${P}`]: PERSONAL } })

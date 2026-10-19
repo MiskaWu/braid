@@ -368,7 +368,15 @@ export function syncRows(profiles: readonly BraidProfile[], mine: string, partne
 /** 帳號 id 的短寫，給沒有信箱可顯示的帳號用。 */
 export const short = (id: string) => `${id.slice(0, 8)}…`
 
-/** 顯示用的帳號名稱：braid 認得的用名稱，不認得的寫「帳號 1111aaaa…」。 */
-export function nameOf(accounts: Record<string, BraidAccount>, id: string): string {
-  return accounts[id]?.label ?? `帳號 ${short(id)}`
+/**
+ * 顯示用的帳號名稱：braid 認得的用名稱。不認得的桌面 app 帳號（從沒當過目前帳號），組織若正好對到一個
+ * 用 braid 新增的帳號（tok-…，不知道它真正的帳號 id），就借那個名稱：多半是同一個人的同一個帳號。
+ * 認得真正 id 的其他帳號不借（同組織的另一個帳號），對到不只一個也不借；都沒有就寫「帳號 1111aaaa…」。
+ */
+export function nameOf(accounts: Record<string, BraidAccount>, id: string, profiles: readonly BraidProfile[] = []): string {
+  const known = accounts[id]
+  if (known) return known.label
+  const org = profiles.find(p => p.account === id)?.org
+  const same = org ? Object.values(accounts).filter(a => a.id.startsWith('tok-') && a.orgId === org) : []
+  return same.length === 1 && same[0] ? same[0].label : `帳號 ${short(id)}`
 }
