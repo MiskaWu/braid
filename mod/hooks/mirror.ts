@@ -2,7 +2,9 @@
 // 為什麼 app 開著也能寫：app 只把目前帳號的清單放在記憶裡，換帳號時先清掉、再從磁碟重讀新帳號的資料夾
 // （2.42304 的 LocalSessionManager.doInitialize），所以沒登入的那個帳號的資料夾 app 不會碰，換過去就讀到。
 // 反過來，目前帳號的資料夾一律不寫：app 開著時記憶裡的清單會蓋回去，要等結束 app 才能寫（那是遷移工具的事）。
-// 哪些欄位綁帳號要拿掉，和遷移工具共用 tool/spec.json。只新增與更新，不刪除。
+// 哪些欄位綁帳號要拿掉，和遷移工具共用 tool/spec.json。
+// 刪除也跟著走：app 刪對話時會在那個帳號的資料夾留 deleted_<id>（內容是刪除時間），看到就把另一邊那筆側欄紀錄刪掉。
+// 只刪側欄紀錄：停程序、刪 worktree 與分支、刪對話檔，app 在使用者刪的當下已經做了（那些是兩個帳號共用的檔案）。
 // 引擎不准把 $ 傳過 import，所以讀寫檔的函式由 register.tsx 組好傳進來。
 import type { FsEntry } from 'claude-code'
 
@@ -10,6 +12,8 @@ export type MirrorIo = {
   list: (path: string) => Promise<readonly FsEntry[]>
   read: (path: string) => Promise<string>
   write: (path: string, text: string) => Promise<void>
+  /** 刪一個檔；刪不掉要丟錯 */
+  remove: (path: string) => Promise<void>
 }
 
 /** tool/spec.json 的 sessions 段：側欄紀錄的檔名規則與綁帳號的欄位。 */
@@ -89,7 +93,7 @@ export async function orgDirOf(io: MirrorIo, root: string, sep: string, account:
   return best?.name ?? null
 }
 
-export type MirrorResult = { created: number; updated: number }
+export type MirrorResult = { created: number; updated: number; deleted: number }
 
 /**
  * 把 src 資料夾的側欄紀錄複製到 dst（同一個 app、另一個帳號的資料夾）。scope 是 'all' 或要同步的資料夾。
@@ -99,9 +103,20 @@ export type MirrorResult = { created: number; updated: number }
  * - dst 沒有 → 新增：拿掉綁帳號的欄位（dropKeys）、清空 nullKeys、replaceFromTarget 換成 dst 最近一筆的值
  * - dst 有、而且檔案比 src 新 → 不動（那邊之後改過，或上次已經同步）
  * - dst 有、src 比較新 → 更新：內容用 src 的，綁帳號的欄位留 dst 自己的；dst 的最後活動時間比較晚就不動
- * 寫過的紀錄依封存狀態更新 dst 的封存清單（app 載入時用它先載未封存的）。src 一律不寫，任何檔案都不刪。
+ * 刪除：src 有 deleted_<id>、dst 還有那筆 → 刪掉 dst 的紀錄，再留一份同樣時間的 deleted_<id>（之後不會再被帶回來）。
+ * 不刪的情況：dst 那筆的最後活動晚於刪除時間（刪掉之後又在那邊用過）、不在同步範圍、src 其實還有那筆。
+ * 只依 src 明確的刪除紀錄刪，src 讀到空的也不會因此刪東西。刪之前先把那筆原樣存到 trash（備份寫不進去就不刪）。
+ * 寫過、刪過的紀錄依封存狀態更新 dst 的封存清單（app 載入時用它先載未封存的）。src 一律不寫。
  */
-export async function mirrorSessions(io: MirrorIo, spec: SessionSpec, src: string, dst: string, sep: string, scope: 'all' | readonly string[]): Promise<MirrorResult> {
+export async function mirrorSessions(
+  io: MirrorIo,
+  spec: SessionSpec,
+  src: string,
+  dst: string,
+  sep: string,
+  scope: 'all' | readonly string[],
+  trash: { dir: string; sep: string },
+): Promise<MirrorResult> {
   const srcFiles = (await io.list(src)).filter(f => f.kind === 'file')
   const dstFiles = (await io.list(dst)).filter(f => f.kind === 'file')
   const isRecord = (name: string) => name.startsWith(spec.filePrefix) && name.endsWith('.json')
@@ -128,6 +143,48 @@ export async function mirrorSessions(io: MirrorIo, spec: SessionSpec, src: strin
   const archived = new Map<string, boolean>()
   let created = 0
   let updated = 0
+  let deleted = 0
+
+  // 先處理刪除：在 src 刪過、dst 還有的
+  const srcNames = new Set(srcFiles.map(f => f.name))
+  for (const t of srcFiles) {
+    if (!t.name.startsWith(spec.tombstonePrefix)) continue
+    const uuid = t.name.slice(spec.tombstonePrefix.length)
+    const name = `${spec.filePrefix}${uuid}.json`
+    if (!dstByName.has(name) || tombs.has(uuid) || srcNames.has(name)) continue
+    let raw: string
+    try {
+      raw = await io.read(`${dst}${sep}${name}`)
+    } catch {
+      continue
+    }
+    let old: Rec | null = null
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      old = isObj(parsed) ? parsed : null
+    } catch {
+      old = null
+    }
+    if (!old) continue
+    if (scope !== 'all' && !scope.includes(folderOf(old))) continue
+    let stamp = ''
+    try {
+      stamp = (await io.read(`${src}${sep}${t.name}`)).trim()
+    } catch {
+      stamp = ''
+    }
+    const deletedAt = /^\d+$/.test(stamp) ? Number(stamp) : t.mtimeMs
+    if (at(old) > deletedAt) continue
+    // 先刪紀錄再留刪除紀錄：刪不掉就整個停下來（丟錯），不會留下「有刪除紀錄、紀錄卻還在」的狀態
+    await io.write(`${trash.dir}${trash.sep}${name}`, raw) // 備份；寫不進去會丟錯，下面就不刪
+    if (dstByName.has(`${name}.tmp`)) await io.remove(`${dst}${sep}${name}.tmp`) // app 載入時會把孤兒 .tmp 救回成紀錄
+    await io.remove(`${dst}${sep}${name}`)
+    await io.write(`${dst}${sep}${t.name}`, /^\d+$/.test(stamp) ? stamp : String(Math.round(deletedAt)))
+    tombs.add(uuid)
+    archived.set(name.slice(0, -'.json'.length), false)
+    deleted++
+  }
+
   for (const f of srcFiles) {
     if (!isRecord(f.name)) continue
     const id = f.name.slice(0, -'.json'.length)
@@ -156,7 +213,7 @@ export async function mirrorSessions(io: MirrorIo, spec: SessionSpec, src: strin
   }
 
   if (archived.size > 0) await updateArchivedIndex(io, spec, dst, sep, dstByName.has(spec.archivedIndex), archived)
-  return { created, updated }
+  return { created, updated, deleted }
 }
 
 /** 封存清單：{"v":1,"archived":[依字母排的 id]}，和 app 自己寫的一樣。看不懂的格式不動，app 會不靠它載入。 */

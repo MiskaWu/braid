@@ -380,7 +380,7 @@ async function runMirror($: $, mode: 'tick' | 'urgent' | 'now'): Promise<void> {
 }
 
 async function mirrorOnce($: $, platform: BraidPlatform, now: number): Promise<BraidMirror> {
-  const base: BraidMirror = { at: now, active: null, to: null, toOrg: null, created: 0, updated: 0, problem: null, detail: null }
+  const base: BraidMirror = { at: now, active: null, to: null, toOrg: null, created: 0, updated: 0, deleted: 0, problem: null, detail: null }
   pathsCache ??= await desktopPaths(desktopIo($), await desktopEnv($), platform)
   if (!pathsCache) return { ...base, problem: 'no-desktop' }
   const sep = platform === 'windows' ? '\\' : '/'
@@ -403,7 +403,16 @@ async function mirrorOnce($: $, platform: BraidPlatform, now: number): Promise<B
     spec = null
   }
   if (!spec) return { ...base, active, to: target.to, problem: 'no-spec' }
-  const io: MirrorIo = { list: path => $.fs.list(path), read: path => $.fs.read(path), write: (path, text) => $.fs.write(path, text) }
+  const io: MirrorIo = {
+    list: path => $.fs.list(path),
+    read: path => $.fs.read(path),
+    write: (path, text) => $.fs.write(path, text),
+    // $.fs 沒有刪檔：用指令刪，刪完確認真的不見了（Windows 的 Remove-Item 失敗時結束碼也可能是 0）
+    remove: async path => {
+      await $.process.run(removeFile(platform, path), { timeoutMs: 15_000 })
+      if (await $.fs.exists(path)) throw new Error(`刪不掉 ${path}`)
+    },
+  }
   const root = `${pathsCache.appData}${sep}claude-code-sessions`
   const mine = (await read($, accountsAtom))[active]
   const fromOrg = await orgDirOf(io, root, sep, active, mine?.orgId ?? null, spec)
@@ -411,7 +420,10 @@ async function mirrorOnce($: $, platform: BraidPlatform, now: number): Promise<B
   if (!toOrg) return { ...base, active, to: target.to, problem: 'no-target' }
   if (!fromOrg) return { ...base, active, to: target.to, toOrg }
   try {
-    const r = await mirrorSessions(io, spec, `${root}${sep}${active}${sep}${fromOrg}`, `${root}${sep}${target.to}${sep}${toOrg}`, sep, target.scope)
+    // 同步刪掉的側欄紀錄先原樣放這裡：braid-backups/sync-deleted/<帳號>/<組織>/local_<id>.json
+    const bk = pathsCache.backups
+    const trash = { dir: [bk.local, 'sync-deleted', target.to, toOrg].join(bk.sep), sep: bk.sep }
+    const r = await mirrorSessions(io, spec, `${root}${sep}${active}${sep}${fromOrg}`, `${root}${sep}${target.to}${sep}${toOrg}`, sep, target.scope, trash)
     return { ...base, active, to: target.to, toOrg, ...r }
   } catch (err) {
     return { ...base, active, to: target.to, toOrg, problem: 'failed', detail: err instanceof Error ? err.message : String(err) }
@@ -1116,7 +1128,7 @@ async function drawSync($: $, ui: UI) {
         </Box>
       )}
       <Text dimColor>
-        自動同步：桌面 app 開著時，braid 大約每分鐘把現在登入的帳號的對話複製到另一個帳號，用量快用完時再馬上同步一次。換帳號後側欄就是最新的，不用結束 Claude。只新增與更新，不刪除：在一邊刪掉的對話，另一邊還在（在那邊刪過的也不會再帶回去）。
+        自動同步：桌面 app 開著時，braid 大約每分鐘把現在登入的帳號的對話複製到另一個帳號，用量快用完時再馬上同步一次。換帳號後側欄就是最新的，不用結束 Claude。刪除也跟著走：在一邊刪掉的對話，另一邊的側欄紀錄也會刪掉（刪掉之後又在那邊用過的不刪）。
       </Text>
     </Box>
   )
@@ -1137,7 +1149,8 @@ function drawMirrorStatus($: $, ui: UI, sy: BraidSync, accounts: Record<string, 
   else if (m.active && !sy.pair.includes(m.active)) line = `桌面 app 現在登入的是「${name(m.active)}」，不在這一對裡，先不同步。`
   else if (!m.to) line = sy.all || sy.folders.length > 0 ? '等下一次同步。' : '還沒挑要同步的資料夾。'
   else {
-    const what = m.created + m.updated > 0 ? `新增 ${m.created}、更新 ${m.updated}` : '已經一樣了'
+    const counts = [m.created && `新增 ${m.created}`, m.updated && `更新 ${m.updated}`, m.deleted && `刪除 ${m.deleted}`].filter(Boolean)
+    const what = counts.length > 0 ? counts.join('、') : '已經一樣了'
     line = `桌面 app 現在登入「${m.active ? name(m.active) : ''}」，對話會自動複製到「${name(m.to, m.toOrg)}」：換過去就看得到，不用結束 Claude。上次同步 ${ago(now - m.at)}（${what}）。`
   }
   return (

@@ -65,6 +65,7 @@ export type BraidMirror = {
   toOrg: string | null
   created: number
   updated: number
+  deleted: number
   problem: BraidMirrorProblem | null
   /** 寫入失敗時的訊息 */
   detail: string | null

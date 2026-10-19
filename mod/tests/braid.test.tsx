@@ -51,6 +51,8 @@ type Opts = {
   uname?: string
   /** 開視窗的 bash 失敗時回的訊息 */
   failBash?: string
+  /** rm 失敗（檔案被占用） */
+  failRm?: boolean
 }
 
 const entry = (name: string, kind: FsEntry['kind'], mtimeMs = NOW): FsEntry => ({ name, kind, size: 1, mtimeMs, isLink: false })
@@ -130,6 +132,11 @@ function world(on: On, opts: Opts = {}) {
     if (argv[0] === 'uname') return out(`${opts.uname ?? 'Linux'}\n`)
     if (argv[0] === 'bash' && opts.failBash) return { value: { exitCode: 1, stdout: '', stderr: opts.failBash, isStdoutTruncated: false, isStderrTruncated: false } }
     if (argv[0] === 'date') return out('+0800\n')
+    if (argv[0] === 'rm' && argv[2] === '--') {
+      if (opts.failRm) return { value: { exitCode: 1, stdout: '', stderr: 'busy', isStdoutTruncated: false, isStderrTruncated: false } }
+      delete files[argv[3] ?? '']
+      return out('')
+    }
     if (argv[0] === 'cmd.exe' && argv[2] === 'echo %APPDATA%') return out('C:\\Users\\u\\AppData\\Roaming\r\n')
     if (argv[0] === 'cmd.exe' && argv[2] === 'echo %USERPROFILE%') return out('C:\\Users\\u\r\n')
     if (argv[0] === 'wslpath') return out(`/mnt/c/${(argv[2] ?? '').slice(3).replace(/\\/g, '/')}\n`)
@@ -650,7 +657,7 @@ describe('同步', () => {
     // 狀態：說清楚從哪到哪、不用結束 Claude
     await $.command.run(RUN('同步'))
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-    expect(await shows(ui, /桌面 app 現在登入「公司」，對話會自動複製到「個人」：換過去就看得到，不用結束 Claude。上次同步 剛剛（新增 2、更新 0）/)).toBe(true)
+    expect(await shows(ui, /桌面 app 現在登入「公司」，對話會自動複製到「個人」：換過去就看得到，不用結束 Claude。上次同步 剛剛（新增 2）/)).toBe(true)
     await ui.unmount()
   })
 
@@ -679,6 +686,42 @@ describe('同步', () => {
     await w.clock.advance(30_000)
     expect(JSON.parse(w.files[`${target}/local_d.json`] ?? '{}')).toMatchObject({ title: 'D 新', lastActivityAt: NOW + H, bridgeSessionIds: ['pb'], sshRemoteProcessId: 9 })
     expect(JSON.parse(w.files[`${target}/local_f.json`] ?? '{}').title).toBe('F')
+  })
+
+  test('刪除也跟著走：這邊刪過的，那邊的側欄紀錄刪掉、留刪除紀錄，原本那筆先備份到 braid-backups/sync-deleted', async ($, on) => {
+    const target = `${SESS}/${P}/${OP}`
+    const old = rec('x', { cwd: '/w/server', lastActivityAt: NOW - 3 * H })
+    const w = world(on, {
+      store: { uses: USES_ALL, sync: SYNC_ON },
+      files: { [`${SESS}/${W}/${OW}/deleted_x`]: String(NOW - H), [`${target}/local_x.json`]: old },
+    })
+    await $.session.start(START)
+    await w.clock.advance(3_000)
+    expect(w.files[`${target}/local_x.json`]).toBeUndefined()
+    expect(w.files[`${target}/deleted_x`]).toBe(String(NOW - H))
+    expect(w.files[`${BACKUPS}/sync-deleted/${P}/${OP}/local_x.json`]).toBe(old)
+    expect(w.runs.some(r => r.argv.join(' ') === `rm -f -- ${target}/local_x.json`)).toBe(true)
+    await $.command.run(RUN('同步'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await shows(ui, /上次同步 剛剛（刪除 1）/)).toBe(true)
+    await ui.unmount()
+  })
+
+  test('刪不掉：狀態說同步失敗，刪除紀錄不留', async ($, on) => {
+    const target = `${SESS}/${P}/${OP}`
+    const w = world(on, {
+      store: { uses: USES_ALL, sync: SYNC_ON },
+      files: { [`${SESS}/${W}/${OW}/deleted_x`]: String(NOW - H), [`${target}/local_x.json`]: rec('x', { lastActivityAt: NOW - 3 * H }) },
+      failRm: true,
+    })
+    await $.session.start(START)
+    await w.clock.advance(3_000)
+    expect(w.files[`${target}/local_x.json`]).toBeDefined()
+    expect(w.files[`${target}/deleted_x`]).toBeUndefined()
+    await $.command.run(RUN('同步'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await shows(ui, /上次同步失敗：刪不掉/)).toBe(true)
+    await ui.unmount()
   })
 
   test('以桌面 app 現在登入的帳號為準：app 已經換到個人帳號，就從個人複製到公司（這個對話還是公司的也一樣）', async ($, on) => {

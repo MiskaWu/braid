@@ -74,6 +74,7 @@ export function normalizeMirror(x: unknown): BraidMirror | null {
     toOrg: str(x.toOrg),
     created: num(x.created, 0),
     updated: num(x.updated, 0),
+    deleted: num(x.deleted, 0),
     problem: PROBLEMS.find(p => p === x.problem) ?? null,
     detail: str(x.detail),
   }

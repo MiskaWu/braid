@@ -79,6 +79,9 @@ tests/                            工具的測試（Node＋classic-level 造資�
   帳號或組織一變就 `flushPendingSaves` 舊的、`sessions.clear()`、再 `loadSessions` 從磁碟讀新帳號的資料夾；
   哪個帳號作用中看 app 的 `config.json` 的 `lastKnownAccountUuid`（換帳號當下就改）。app 改版後這段要重查。
   同步的對象由 `model.ts` 的 `mirrorTarget` 決定，它保證不會是作用中的帳號。
+  刪除只依作用中帳號資料夾裡明確的 `deleted_<id>`（app 刪對話時寫，內容是刪除時間），刪前先備份到
+  `braid-backups/sync-deleted/`、刪後留同樣時間的 `deleted_<id>`；目標那筆最後活動晚於刪除時間就不刪。
+  app 刪對話本身會停程序、刪 worktree 與分支（共用的），WSL 的對話檔不刪（`holdsLocalTranscripts` 只認 local）。
 - **只複製、不搬移，寫入前備份**；重跑必須是安全的（已有的略過）。
 - **格式認不得就停**：Local Storage 版本不在 `spec.json` 的 `supportedVersions`、LevelDB 校驗不過，
   一律放棄寫環境並說明，不猜。
