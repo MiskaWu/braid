@@ -53,6 +53,10 @@ type Opts = {
   failBash?: string
   /** rm 失敗（檔案被占用） */
   failRm?: boolean
+  /** GitHub 上的 braid 版本；null＝連不上 */
+  latest?: string | null
+  /** claude plugin … 失敗時回的訊息 */
+  failClaude?: string
 }
 
 const entry = (name: string, kind: FsEntry['kind'], mtimeMs = NOW, size = 1): FsEntry => ({ name, kind, size, mtimeMs, isLink: false })
@@ -132,6 +136,7 @@ function world(on: On, opts: Opts = {}) {
     if (argv[0] === 'uname') return out(`${opts.uname ?? 'Linux'}\n`)
     if (argv[0] === 'bash' && opts.failBash) return { value: { exitCode: 1, stdout: '', stderr: opts.failBash, isStdoutTruncated: false, isStderrTruncated: false } }
     if (argv[0] === 'date') return out('+0800\n')
+    if (argv[0] === '/opt/claude' && argv[1] === 'plugin' && opts.failClaude) return { value: { exitCode: 1, stdout: '', stderr: opts.failClaude, isStdoutTruncated: false, isStderrTruncated: false } }
     if (argv[0] === 'rm' && argv[1] === '-rf' && argv[2] === '--') {
       for (const f of Object.keys(files)) if (f.startsWith(`${argv[3]}/`)) delete files[f]
       return out('')
@@ -147,7 +152,7 @@ function world(on: On, opts: Opts = {}) {
     return out('')
   })
   on('fs.read', ($, e) => {
-    const text = e.path.endsWith('/tool/spec.json') ? SPEC : files[e.path]
+    const text = e.path.endsWith('/tool/spec.json') ? SPEC : e.path.endsWith('/.claude-plugin/plugin.json') ? JSON.stringify({ name: 'braid', version: '0.3.4' }) : files[e.path]
     if (text === undefined) throw new Error(`ENOENT ${e.path}`)
     return { value: text }
   })
@@ -169,6 +174,17 @@ function world(on: On, opts: Opts = {}) {
     }
     return { value: [...listed.values()] }
   })
+  const fetched: string[] = []
+  on('http.fetch', ($, e) => {
+    fetched.push(e.url)
+    if (opts.latest === null) throw new Error('offline')
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ version: opts.latest ?? '0.3.4' }) } }
+  })
+  const reloads: string[] = []
+  on('command.run', { command: 'reload-plugins' }, () => {
+    reloads.push('reload-plugins')
+    return { text: '' }
+  })
   on('ui.open', ($, e) => {
     opened.push(e.id)
     return { value: { isPlaced: true as const } }
@@ -185,7 +201,7 @@ function world(on: On, opts: Opts = {}) {
     copies.push(e.text)
     return { value: { isCopied: true as const } }
   })
-  return { runs, files, mtimes, opened, toasts, copies, statuses, clock, store }
+  return { runs, files, mtimes, opened, toasts, copies, statuses, clock, store, fetched, reloads }
 }
 
 const SURFACES = ['terminal', 'desktop'] as const
@@ -213,8 +229,13 @@ const usage = (five: number, seven = 20) => [
 ]
 const measure = (five: number) => ({ context: { window: 200_000 }, rateLimits: usage(five), changed: ['rateLimits' as const] })
 
-type Drawing = { find: (q: { type?: string; key?: string; text?: string | RegExp }) => Promise<unknown> }
+type Drawing = {
+  find: (q: { type?: string; key?: string; text?: string | RegExp }) => Promise<unknown>
+  findAll: (q: { type?: string }) => Promise<{ props: Record<string, unknown> }[]>
+}
 const shows = async (ui: Drawing, text: RegExp) => (await ui.find({ text })) !== undefined
+/** 文字裡、或圖（Svg）的說明裡看得到：桌面版把帳號卡與同步卡畫成圖，內容寫在 alt */
+const seen = async (ui: Drawing, text: RegExp) => (await shows(ui, text)) || (await ui.findAll({ type: 'Svg' })).some(el => text.test(String(el.props.alt ?? '')))
 
 describe('第一次打開：選用法', () => {
   test('/braid 開面板；還沒選過用法就先問，選完存起來、出現對應的分頁', async ($, on) => {
@@ -253,11 +274,13 @@ describe('帳號與用量', () => {
     expect(w.statuses.at(-1)).toBe('braid · 公司 62%')
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ ...PANE, surface })
-      expect(await shows(ui, /62%/)).toBe(true)
-      expect(await shows(ui, /16:00 重置/)).toBe(true)
-      expect(await shows(ui, /這個對話在用/)).toBe(true)
-      expect(await shows(ui, /5 小時 12%.*2 小時前的數字/)).toBe(true)
-      expect(await shows(ui, /braid 沒有它的登入憑證/)).toBe(true)
+      expect(await seen(ui, /62%/)).toBe(true)
+      expect(await seen(ui, /16:00 重置/)).toBe(true)
+      expect(await seen(ui, /這個對話/)).toBe(true)
+      expect(await seen(ui, /5 小時 12%.*2 小時前的數字/)).toBe(true)
+      expect(await seen(ui, /braid 沒有它的登入憑證/)).toBe(true)
+      // 桌面版畫成圖、終端機是文字
+      expect((await ui.findAll({ type: 'Svg' })).length).toBe(surface === 'desktop' ? 2 : 0)
       await ui.unmount()
     }
   })
@@ -281,13 +304,14 @@ describe('帳號與用量', () => {
     })
     await $.session.start(START)
     expect(w.store.get('account:tok-00000007')).toBeUndefined()
-    expect(w.store.get(`account:${P}`)).toMatchObject({ label: 'MiskaWu', color: '#8E6BD8', credential: 'file', credentialId: 'tok-00000007', source: 'desktop' })
+    // 顏色：舊版的紫色換成新配色的桃紅
+    expect(w.store.get(`account:${P}`)).toMatchObject({ label: 'MiskaWu', color: '#e87ba4', credential: 'file', credentialId: 'tok-00000007', source: 'desktop' })
     expect((w.store.get('switch') as { order: string[] }).order).toEqual([P, W])
     expect(w.runs.some(r => r.argv.join(' ').includes('secret.sh delete'))).toBe(false) // 憑證還要用，不刪
     await $.command.run(RUN('帳號'))
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
     expect((await ui.findAll({ key: 'go-tok-00000007' })).length).toBe(0) // 不會對自己「用它接著做」
-    expect(await shows(ui, /MiskaWu/)).toBe(true)
+    expect(await seen(ui, /MiskaWu/)).toBe(true)
     await ui.unmount()
   })
 
@@ -296,7 +320,7 @@ describe('帳號與用量', () => {
     await $.session.start(START)
     await $.command.run(RUN('帳號'))
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-    expect(await shows(ui, /在桌面 app 換成它就能接著做，對話會自動同步/)).toBe(true)
+    expect(await seen(ui, /在桌面 app 換成它就能接著做，對話會自動同步/)).toBe(true)
     await ui.unmount()
     void w
   })
@@ -692,11 +716,14 @@ describe('同步', () => {
     // 狀態：說清楚從哪到哪、不用結束 Claude
     await $.command.run(RUN('同步'))
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-    expect(await shows(ui, /自動同步中/)).toBe(true)
-    expect(await ui.find({ key: 'sy-flow' })).toBeDefined() // 公司 → 個人，帶帳號顏色
+    expect(await seen(ui, /自動同步中：從「公司」複製到「個人」/)).toBe(true) // 桌面版是兩個帳號之間的圖
     expect(await shows(ui, /對話會自動複製到「個人」：換過去就看得到，不用結束 Claude/)).toBe(true)
-    expect(await shows(ui, /上次同步 剛剛：新增 2/)).toBe(true)
+    expect(await seen(ui, /上次同步 剛剛：新增 2/)).toBe(true)
     await ui.unmount()
+    const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await shows(term, /自動同步中/)).toBe(true)
+    expect(await term.find({ key: 'sy-flow' })).toBeDefined() // 終端機：公司 → 個人，帶帳號顏色
+    await term.unmount()
   })
 
   test('之後每分鐘一次：app 改過的紀錄跟著更新，那個帳號自己的欄位留著；那邊比較新的不動；新的對話也帶過去', async ($, on) => {
@@ -741,7 +768,7 @@ describe('同步', () => {
     expect(w.runs.some(r => r.argv.join(' ') === `rm -f -- ${target}/local_x.json`)).toBe(true)
     await $.command.run(RUN('同步'))
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-    expect(await shows(ui, /上次同步 剛剛：刪除 1/)).toBe(true)
+    expect(await seen(ui, /上次同步 剛剛：刪除 1/)).toBe(true)
     expect(await ui.find({ key: 'keep-days' })).toBeDefined()
     expect(await shows(ui, /目前 1 筆/)).toBe(true) // 備份區塊數得到剛存的那筆
     await ui.unmount()
@@ -857,6 +884,55 @@ describe('同步', () => {
     await $.command.run(RUN('sync'))
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     expect(await shows(ui, /CLI 的對話不分帳號/)).toBe(true)
+    await ui.unmount()
+  })
+})
+
+describe('braid 的新版', () => {
+  test('GitHub 上有新版：開始後幾秒查到，跳一次提醒；面板上方有「更新並重新載入」，按了照官方兩步更新再重新載入', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL }, latest: '0.4.0' })
+    await $.session.start(START)
+    await w.clock.advance(5_000)
+    expect(w.fetched).toEqual(['https://raw.githubusercontent.com/MiskaWu/braid/main/mod/.claude-plugin/plugin.json'])
+    expect(w.toasts.filter(t => /braid 有新版 0\.4\.0（你的是 0\.3\.4）/.test(t)).length).toBe(1)
+    await $.command.run(RUN())
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await shows(ui, /braid 有新版 0\.4\.0/)).toBe(true)
+    await ui.press({ key: 'upd-go' })
+    const claudeRuns = w.runs.filter(r => r.argv[0] === '/opt/claude').map(r => r.argv.slice(1).join(' '))
+    expect(claudeRuns).toEqual(['plugin marketplace update braid', 'plugin update braid@braid'])
+    expect(w.reloads).toEqual(['reload-plugins'])
+    await ui.unmount()
+    // 同一個新版不再跳提醒；12 小時內不再查
+    await $.session.start(START)
+    await w.clock.advance(5_000)
+    expect(w.toasts.filter(t => /有新版/.test(t)).length).toBe(1)
+    expect(w.fetched.length).toBe(1)
+  })
+
+  for (const [name, latest] of [['已經是最新', '0.3.4'], ['連不上 GitHub', null]] as const) {
+    test(`${name}：不提示，什麼都不跑`, async ($, on) => {
+      const w = world(on, { store: { uses: USES_ALL }, latest })
+      await $.session.start(START)
+      await w.clock.advance(5_000)
+      await $.command.run(RUN())
+      const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+      expect(await ui.find({ key: 'upd' })).toBeUndefined()
+      await ui.unmount()
+      expect(w.toasts.some(t => /新版/.test(t))).toBe(false)
+      expect(w.runs.some(r => r.argv[0] === '/opt/claude')).toBe(false)
+    })
+  }
+
+  test('更新失敗：說原因，給可以自己在終端機執行的指令，不重新載入', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL }, latest: '0.4.0', failClaude: 'network unreachable' })
+    await $.session.start(START)
+    await w.clock.advance(5_000)
+    await $.command.run(RUN())
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    await ui.press({ key: 'upd-go' })
+    expect(await shows(ui, /更新失敗（network unreachable）。可以在終端機執行：claude plugin marketplace update braid && claude plugin update braid@braid/)).toBe(true)
+    expect(w.reloads).toEqual([])
     await ui.unmount()
   })
 })

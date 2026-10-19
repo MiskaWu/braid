@@ -27,6 +27,7 @@ mod/                              plugin 本體（從 marketplace 安裝時只�
   hooks/terminal.ts               帳號腳本（接著做、新增帳號）開新視窗的方式（純函式）
   hooks/desktop.ts                讀桌面 app 的側欄資料與備份（收一組讀檔函式，不收 $）
   hooks/mirror.ts                 自動同步的核心：把側欄紀錄複製到沒登入的帳號（收一組讀寫檔函式，不收 $）
+  hooks/visual.ts                 桌面版面板的圖（帳號卡、用量條、同步卡）：給資料回 SVG 字串的純函式
   types/index.d.ts                $.state 的契約
   tests/                          claude plugin test：model.test.ts（純邏輯）、braid.test.tsx（終端機與桌面兩種畫面）
   tool/spec.json                  兩個平台共用的遷移規則
@@ -124,6 +125,15 @@ tests/                            工具的測試（Node＋classic-level 造資�
   再在背景重讀；改了某個 atom 的形狀，就要嘛在這裡一起清、要嘛讀的地方能接受舊形狀。面板的分頁畫壞時會顯示原因和「重新讀取」，
   不會整片空白。測試的 `$` 碰不到 `$.state`：模擬舊值要攔 `state.get`（見 `braid.test.tsx` 的「更新之後」），
   攔下的讀取不算在測試工具的重畫追蹤裡，之後要自己 `ui.redraw()`。
+- **桌面版畫成 SVG，終端機照舊是文字**：判斷看 `e.surface`，不能看元件表裡有沒有 `Svg`——終端機的表也有，畫成一塊空白
+  （0.4.0 開發時帳號卡在終端機整張變空白，靠同時測終端機的測試抓到）。SVG 不會換行：長說明留給原生 Text，
+  圖裡只放短字並用 `fit` 截斷；使用者取的名稱一律經過 `esc`。深淺色寫在 SVG 自己的 `<style>`（`prefers-color-scheme`），
+  帳號色是 Claude 設計系統的類別色前五個（`model.ts` 的 `SLOTS`，用 dataviz 驗證器在深淺兩種底色驗過；改顏色或順序要重跑）。
+  桌面 app 面板的底色是 `#1a1a19`，和設計系統的深色底一樣。設計稿的預覽方法：把產生器的輸出放進 462px 寬的頁面，
+  用 Playwright 分別以深、淺色截圖來看。
+- **更新**：官方是 `/plugin` 裡打開 marketplace 的自動更新（第三方預設關，`marketplace.json` 不能替使用者開）。
+  braid 另外自己查 GitHub 上 `mod/.claude-plugin/plugin.json` 的版本，按鈕照官方兩步更新後用
+  `$.command.run({ command: 'reload-plugins' })` 重新載入。改 repo 位置或 marketplace 名稱要改 `register.tsx` 的 `LATEST_URL`、`MARKETPLACE`。
 - **JSX 檔裡不能有叫 `h` 的變數**：JSX 編譯成全域的 `h(...)`，同名的區域變數會把它蓋掉，hook 直接被跳過。
 - **測試套件裡沒有東西墊底**：`session.start`、`session.measure`、`prompt.submit`、`command.register`、
   沒畫東西時的 `ui.render`、`store.*` 都要測試自己答（生命週期事件直接回結果，`$` 名詞的事件回 `{ value }`）。

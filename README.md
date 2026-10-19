@@ -29,6 +29,19 @@ claude plugin marketplace add MiskaWu/braid && claude plugin install braid@braid
 **C. 只要遷移、不裝**（不需要 Claude Code）：下載這個 repo，Windows 雙擊 `mod/tool/windows/migrate.cmd`，
 macOS 雙擊 `mod/tool/macos/migrate.command`（從瀏覽器下載的話，第一次要按右鍵 →「打開」）。
 
+### 更新
+
+建議打開自動更新（第三方 marketplace 預設關著，只能每個人自己開）：在 Claude Code 輸入 `/plugin` →
+**Marketplaces** → **braid** → **Enable auto-update**。之後開新對話時會在背景檢查，有新版會提示你輸入 `/reload-plugins`
+（不輸入的話，下次開 Claude Code 就是新版）。
+
+沒打開也沒關係：braid 會自己查 GitHub 上的版本（最多 12 小時一次），有新版時面板上方出現
+「更新並重新載入」，按一下就幫你更新並重新載入。也可以自己在終端機執行：
+
+```bash
+claude plugin marketplace update braid && claude plugin update braid@braid
+```
+
 ### 給 Claude 的安裝步驟
 
 照下面做，不要改 `settings.json`，也不要替使用者執行遷移或新增帳號（這些由使用者自己在面板操作）。

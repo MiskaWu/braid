@@ -71,6 +71,14 @@ export type BraidMirror = {
   detail: string | null
 }
 
+/** braid 自己的新版：裝的版本、GitHub 上的版本、按了更新之後到哪一步。 */
+export type BraidUpdate = {
+  installed: string | null
+  latest: string | null
+  step: 'idle' | 'running' | 'failed'
+  message: string | null
+}
+
 /** 備份留多久：同步刪掉的對話備份留幾天、遷移工具的整份備份留最新幾份；null＝一直留著。 */
 export type BraidKeep = { deletedDays: number | null; toolCopies: number | null }
 
@@ -125,6 +133,7 @@ declare module 'claude-code' {
       snooze: string | null
       mirror: BraidMirror | null
       keep: BraidKeep
+      update: BraidUpdate | null
       tz: number
     }
   }

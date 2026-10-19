@@ -16,6 +16,7 @@ import {
   meter,
   expiredFiles,
   extraToolBackups,
+  isNewer,
   fmtBytes,
   normalizeKeep,
   mirrorTarget,
@@ -36,6 +37,7 @@ import {
   usageFrom,
 } from '../hooks/model'
 import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo, type SessionSpec } from '../hooks/mirror'
+import { accountCard, fit, initial, slotOf, syncFlow } from '../hooks/visual'
 import { newCredentialId, planTerminal, removeFile, removeToolBackup, secretDelete, wrapperText } from '../hooks/terminal'
 
 // 2026-10-16 14:00（UTC+8）
@@ -664,5 +666,68 @@ describe('備份保留', () => {
       "Remove-Item -LiteralPath 'C:\\Users\\u\\braid-backups\\20261001-090000-2' -Recurse -Force -ErrorAction SilentlyContinue",
     ])
     for (const bad of ['..', '../x', 'sync-deleted', '20261001-090000/../..', '']) expect(() => removeToolBackup('wsl', '/b', bad)).toThrow(/不是備份資料夾/)
+  })
+})
+
+describe('桌面版的圖', () => {
+  const card = (over: Partial<Parameters<typeof accountCard>[0]> = {}) =>
+    accountCard({
+      label: 'A&B <x>',
+      color: '#2a78d6',
+      tags: ['這個對話'],
+      sub: 'me@x.example',
+      windows: [
+        { label: '5 小時', pct: 92, reset: '16:00 重置' },
+        { label: '7 天', pct: 100, reset: '明天 09:00 重置' },
+      ],
+      staleness: null,
+      thresholds: [90, 95],
+      note: { tone: 'good', text: '可以一鍵接手' },
+      empty: '還沒有用量紀錄',
+      ...over,
+    })
+
+  test('使用者取的名稱照字面畫（跳脫 < & " 這類字元），不會變成 SVG 標記', async () => {
+    const c = card()
+    expect(c.source).toContain('A&amp;B &lt;x&gt;')
+    expect(c.source).not.toContain('<x>')
+    expect(c.alt).toMatch(/^A&B <x>（這個對話）/) // 說明文字給人讀，不跳脫
+  })
+
+  test('到門檻換警告色、用完換危險色，都附圖示；平常是帳號色（跟著主題換的 class）', async () => {
+    const c = card().source
+    expect(c).toContain('fill="#fab219"') // 92% ≥ 90：警告
+    expect(c).toContain('fill="#d03b3b"') // 100%：用完
+    expect(card({ windows: [{ label: '5 小時', pct: 30, reset: null }] }).source).toMatch(/class="c0"/)
+    expect(c).toContain('prefers-color-scheme: dark')
+  })
+
+  test('大小在上限內；長名稱與長說明截斷；頭像取第一個字', async () => {
+    const long = card({ label: '一個非常非常非常非常非常非常長的帳號名稱', sub: 'x'.repeat(200) })
+    expect(long.source.length).toBeLessThan(131072)
+    expect(long.source).toContain('…')
+    expect(fit('abc', 12, 1000)).toBe('abc')
+    expect([initial('miskawu'), initial('公司'), initial('  ')]).toEqual(['M', '公', '?'])
+    expect([slotOf('#2A78D6'), slotOf('#3987e5'), slotOf('#123456')]).toEqual([0, 0, null])
+  })
+
+  test('同步卡：同步中光點一開始就在流動（不會停在左上角）；說明文字是給看不到圖的人的一句話', async () => {
+    const f = syncFlow({
+      tone: 'on',
+      title: '自動同步中',
+      summary: '自動同步中：從「公司」複製到「個人」',
+      from: { label: '公司', color: '#2a78d6', caption: 'app 登入中' },
+      to: { label: '個人', color: '#eb6834', caption: '換過去就看得到' },
+      chips: ['剛剛', '新增 1'],
+      lines: [],
+    })
+    expect(f.alt).toBe('自動同步中：從「公司」複製到「個人」')
+    expect(f.source).toContain('animateMotion')
+    expect(f.source).not.toMatch(/begin="[1-9]/) // 延後出發的光點會先停在原點
+  })
+
+  test('版本比大小：照數字，不照字母；讀不懂的不算新', async () => {
+    expect([isNewer('0.3.10', '0.3.9'), isNewer('0.4.0', '0.3.4'), isNewer('0.3.4', '0.3.4'), isNewer('0.3.3', '0.3.4'), isNewer('1.0', '0.9.9')]).toEqual([true, true, false, false, true])
+    expect([isNewer(null, '0.3.4'), isNewer('beta', '0.3.4'), isNewer('0.4.0', null)]).toEqual([false, false, false])
   })
 })

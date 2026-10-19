@@ -13,15 +13,19 @@ import type {
   BraidWindow,
 } from '../types'
 
-// 帳號的顏色：亮度彼此拉開，色弱也分得出來；畫面上一律另外寫帳號名稱，不只靠顏色
-export const PALETTE = ['#3B6FE0', '#14A38E', '#D9822B', '#8E6BD8', '#C2417A'] as const
-export const COLOR_NAMES: Record<string, string> = {
-  '#3B6FE0': '藍',
-  '#14A38E': '青綠',
-  '#D9822B': '橘',
-  '#8E6BD8': '紫',
-  '#C2417A': '桃紅',
-}
+// 帳號的顏色：Claude 設計系統的類別色前五個，順序照驗證過的那組（dataviz 驗證器：深淺兩種底色、色弱模擬都分得開）。
+// 存的是淺色主題的值；面板的 SVG 在深色主題換成 dark。畫面上一律另外寫帳號名稱，不只靠顏色。
+export const SLOTS = [
+  { light: '#2a78d6', dark: '#3987e5', name: '藍' },
+  { light: '#eb6834', dark: '#d95926', name: '橘' },
+  { light: '#1baf7a', dark: '#199e70', name: '青綠' },
+  { light: '#eda100', dark: '#c98500', name: '黃' },
+  { light: '#e87ba4', dark: '#d55181', name: '桃紅' },
+] as const
+export const PALETTE: readonly string[] = SLOTS.map(s => s.light)
+export const COLOR_NAMES: Record<string, string> = Object.fromEntries(SLOTS.map(s => [s.light, s.name]))
+// 0.3.4 以前的顏色換成新配色裡最接近的那個（紫色沒有對應，併到桃紅）
+const LEGACY_COLORS: Record<string, string> = { '#3b6fe0': '#2a78d6', '#14a38e': '#1baf7a', '#d9822b': '#eb6834', '#8e6bd8': '#e87ba4', '#c2417a': '#e87ba4' }
 
 export const DEFAULT_USES: BraidUses = { migrate: false, switch: false, sync: false }
 export const DEFAULT_SWITCH: BraidSwitch = { on: true, fiveHour: 90, sevenDay: 95, order: [], restrict: false, restricted: [] }
@@ -97,6 +101,19 @@ export function expiredFiles(files: readonly { path: string; mtimeMs: number }[]
   return files.filter(f => f.mtimeMs > 0 && now - f.mtimeMs > days * 86_400_000).map(f => f.path)
 }
 
+/** 版本號比大小（0.3.10 比 0.3.9 新）；讀不懂的當成不比較新。 */
+export function isNewer(latest: string | null, installed: string | null): boolean {
+  const parts = (v: string | null) => (v && /^\d+(\.\d+)*$/.test(v.trim()) ? v.trim().split('.').map(Number) : null)
+  const a = parts(latest)
+  const b = parts(installed)
+  if (!a || !b) return false
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] ?? 0) - (b[i] ?? 0)
+    if (d !== 0) return d > 0
+  }
+  return false
+}
+
 /** 位元組寫成給人看的大小。 */
 export function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`
@@ -146,7 +163,7 @@ export function normalizeAccount(x: unknown): BraidAccount | null {
     orgId: str(x.orgId),
     orgName: str(x.orgName),
     label: str(x.label) ?? '帳號',
-    color: str(x.color) ?? PALETTE[0],
+    color: ((c: string | null) => (c ? (LEGACY_COLORS[c.toLowerCase()] ?? c) : null))(str(x.color)) ?? (PALETTE[0] as string),
     source: x.source === 'cli' || x.source === 'token' ? x.source : 'desktop',
     credential,
     credentialId: credential ? (str(x.credentialId) ?? (x.id as string)) : null,
@@ -203,7 +220,7 @@ export function upsertSeen(accounts: Record<string, BraidAccount>, seen: Seen, n
     orgId: seen.orgId,
     orgName: seen.orgName,
     label: defaultLabel(seen, all.map(a => a.label)),
-    color: PALETTE.find(c => !used.includes(c)) ?? PALETTE[all.length % PALETTE.length] ?? PALETTE[0],
+    color: PALETTE.find(c => !used.includes(c)) ?? PALETTE[all.length % PALETTE.length] ?? (PALETTE[0] as string),
     source: seen.source,
     credential: null,
     credentialId: null,

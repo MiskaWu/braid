@@ -17,6 +17,7 @@ import type {
   BraidKeep,
   BraidMirror,
   BraidPlatform,
+  BraidUpdate,
   BraidSwitch,
   BraidSync,
   BraidTab,
@@ -26,6 +27,7 @@ import type {
 import { backupLabel, desktopPaths, listToolBackups, listTrash, scanDesktop, type DesktopEnv, type DesktopIo, type DesktopPaths } from './desktop'
 import { manualPath, parseDryRun, planLaunch, toolArgs, type ToolRequest } from './launch'
 import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo } from './mirror'
+import { accountCard, syncFlow, type Window } from './visual'
 import {
   absorbTokenTwin,
   bandFor,
@@ -52,6 +54,7 @@ import {
   normalizeSync,
   normalizeUses,
   orderedIds,
+  isNewer,
   isOrgId,
   KEEP_COPIES_CHOICES,
   KEEP_DAYS_CHOICES,
@@ -75,7 +78,8 @@ import {
 import { newCredentialId, planTerminal, removeFile, removeToolBackup, secretDelete, type TerminalPlan } from './terminal'
 
 type $ = EngineInterface
-type UI = Pick<ElementTable<'terminal'>, 'Box' | 'Text' | 'Button' | 'Input' | 'Select'>
+// Svg：桌面 app 與手機畫成圖；終端機（ui.Svg 是 undefined）照舊用文字
+type UI = Pick<ElementTable<'terminal'>, 'Box' | 'Text' | 'Button' | 'Input' | 'Select'> & { Svg?: ElementTable<'desktop'>['Svg'] }
 
 const PANE = 'braid'
 
@@ -97,6 +101,7 @@ const handoffAtom = atom({ plugin: 'braid', key: 'handoff' } as const, null)
 const snoozeAtom = atom({ plugin: 'braid', key: 'snooze' } as const, null)
 const mirrorAtom = atom({ plugin: 'braid', key: 'mirror' } as const, null)
 const keepAtom = atom({ plugin: 'braid', key: 'keep' } as const, DEFAULT_KEEP)
+const updateAtom = atom({ plugin: 'braid', key: 'update' } as const, null)
 const tzAtom = atom({ plugin: 'braid', key: 'tz' } as const, 0)
 
 // ── 指令 ────────────────────────────────────────────────────
@@ -483,6 +488,104 @@ async function runPrune($: $, force = false): Promise<void> {
   }
 }
 
+// ── braid 自己的新版 ──────────────────────────────────────────
+// 官方的做法是在 /plugin 把 braid 這個 marketplace 打開自動更新（第三方預設關著，marketplace.json 也沒辦法替使用者打開）。
+// 沒打開的人：這裡讀 GitHub 上的版本號，比裝的新就在面板上方提示，按一下照官方的兩步更新，再替使用者執行 /reload-plugins。
+
+const MARKETPLACE = 'braid'
+const LATEST_URL = 'https://raw.githubusercontent.com/MiskaWu/braid/main/mod/.claude-plugin/plugin.json'
+const UPDATE_EVERY_MS = 12 * 3600_000
+const UPDATE_COMMAND = `claude plugin marketplace update ${MARKETPLACE} && claude plugin update braid@${MARKETPLACE}`
+
+const versionIn = (text: string): string | null => {
+  try {
+    const v: unknown = (JSON.parse(text.replace(/^\uFEFF/, '')) as Record<string, unknown>).version
+    return typeof v === 'string' && v ? v : null
+  } catch {
+    return null
+  }
+}
+
+/** 查有沒有新版；最多 12 小時查一次（查到的記在 $.store，其他對話也看得到）。有新版時，每個新版只跳一次提醒。 */
+async function checkUpdate($: $): Promise<void> {
+  let installed: string | null = null
+  try {
+    installed = versionIn(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))
+  } catch {
+    installed = null
+  }
+  const now = await $.clock.now()
+  const checkedAt = await $.store.get('updateCheckAt')
+  let latest = await $.store.get('updateLatest')
+  if (typeof checkedAt !== 'number' || now - checkedAt >= UPDATE_EVERY_MS || typeof latest !== 'string') {
+    await $.store.set('updateCheckAt', now)
+    try {
+      const r = await $.http.fetch(LATEST_URL)
+      latest = r.ok ? versionIn(r.text) : null
+    } catch {
+      latest = null // 連不上、公司政策擋外連：不提示就好
+    }
+    if (typeof latest === 'string') await $.store.set('updateLatest', latest)
+  }
+  const found = typeof latest === 'string' ? latest : null
+  await update($, updateAtom, u => ({ installed, latest: found, step: u?.step ?? 'idle', message: u?.message ?? null }))
+  if (isNewer(found, installed) && (await $.store.get('updateToasted')) !== found) {
+    await $.store.set('updateToasted', found)
+    $.ui.toast(`braid 有新版 ${found}（你的是 ${installed}）。打開 /braid 按「更新並重新載入」。`)
+  }
+}
+
+/** 照官方的兩步更新，再執行 /reload-plugins（等這個對話閒下來才跑）。 */
+async function runUpdate($: $): Promise<void> {
+  const set = (step: BraidUpdate['step'], message: string | null) => update($, updateAtom, u => (u ? { ...u, step, message } : u))
+  await set('running', '更新中…')
+  const claude = await claudePath($)
+  for (const argv of [[claude, 'plugin', 'marketplace', 'update', MARKETPLACE], [claude, 'plugin', 'update', `braid@${MARKETPLACE}`]]) {
+    try {
+      const r = await $.process.run(argv, { timeoutMs: 180_000 })
+      if (r.exitCode !== 0) {
+        await set('failed', `更新失敗（${(r.stderr || r.stdout).trim().split('\n').slice(-2).join(' ') || `結束碼 ${r.exitCode}`}）。可以在終端機執行：${UPDATE_COMMAND}`)
+        return
+      }
+    } catch (err) {
+      await set('failed', `更新失敗（${err instanceof Error ? err.message : String(err)}）。可以在終端機執行：${UPDATE_COMMAND}`)
+      return
+    }
+  }
+  try {
+    await $.command.run({ command: 'reload-plugins', args: '' })
+    await set('idle', '已更新，重新載入中…')
+  } catch {
+    await set('idle', '已更新。請輸入 /reload-plugins 套用新版。')
+  }
+}
+
+/** 面板最上面的新版提示。 */
+function drawUpdate($: $, ui: UI, u: BraidUpdate | null) {
+  const { Box, Text, Button } = ui
+  if (!u) return null
+  const has = isNewer(u.latest, u.installed)
+  if (!has && !u.message) return null
+  return (
+    <Box key="upd" flexDirection="column" borderStyle="round" borderColor={u.step === 'failed' ? 'warning' : 'suggestion'} paddingX={1}>
+      {has && (
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
+          <Text>
+            <Text weight="semibold">{`braid 有新版 ${u.latest}`}</Text>
+            <Text dimColor>{`（你的是 ${u.installed}）`}</Text>
+          </Text>
+          {u.step !== 'running' && <Button key="upd-go" label="更新並重新載入" variant="primary" onPress={() => runUpdate($)} />}
+        </Box>
+      )}
+      {u.message && (
+        <Text size="footnote" color={u.step === 'failed' ? 'warning' : undefined} dimColor={u.step !== 'failed'}>
+          {u.message}
+        </Text>
+      )}
+    </Box>
+  )
+}
+
 /** 同步對象的顯示名稱：沒當過目前帳號的桌面帳號，用它的組織去借 braid 新增帳號的名稱（nameOf）。 */
 function mirrorName(accounts: Record<string, BraidAccount>, id: string, org: string | null): string {
   return mirrorLook(accounts, id, org).label
@@ -605,7 +708,7 @@ async function finishAdd($: $): Promise<void> {
       orgId,
       orgName,
       label: label || defaultLabel({ email, orgName }, Object.values(accounts).map(a => a.label)),
-      color: PALETTE.find(c => !used.includes(c)) ?? PALETTE[0],
+      color: PALETTE.find(c => !used.includes(c)) ?? (PALETTE[0] as string),
       source: 'token',
       credential: add.credential,
       credentialId: add.id,
@@ -833,6 +936,8 @@ async function drawAccounts($: $, ui: UI, width: number) {
   const uses = await read($, usesAtom)
   const sy = await read($, syncAtom)
   const syncedWith = (id: string) => !!uses?.sync && sy.on && !!current && sy.pair.includes(current) && sy.pair.includes(id)
+  const sw = await read($, switchAtom)
+  const { Svg } = ui
 
   const block = (a: BraidAccount, isCurrent: boolean) => {
     const usage = isCurrent ? (live ?? a.usage) : a.usage
@@ -864,6 +969,42 @@ async function drawAccounts($: $, ui: UI, width: number) {
       )
     const five = effectivePct(usage?.fiveHour ?? null, now)
     const seven = effectivePct(usage?.sevenDay ?? null, now)
+    const note = isCurrent
+      ? null
+      : a.credential
+        ? { tone: 'good' as const, text: `可以一鍵接手（憑證存在${CREDENTIAL_TEXT[a.credential]}）` }
+        : syncedWith(a.id)
+          ? { tone: 'sync' as const, text: '在桌面 app 換成它就能接著做，對話會自動同步' }
+          : { tone: 'none' as const, text: 'braid 沒有它的登入憑證，只能在桌面 app 手動換' }
+    if (Svg) {
+      const windows: Window[] = []
+      const win = (label: string, w: BraidUsage['fiveHour']) => {
+        const pct = effectivePct(w, now)
+        if (pct === null || !w) return
+        const reset = fmtReset(w.resetsAt, now, tz)
+        windows.push({ label, pct, reset: reset ? `${reset} 重置` : null })
+      }
+      win('5 小時', usage?.fiveHour ?? null)
+      win('7 天', usage?.sevenDay ?? null)
+      const alerting = uses?.switch && sw.on
+      const card = accountCard({
+        label: a.label,
+        color: a.color,
+        tags: [...(isCurrent ? ['這個對話'] : []), ...(syncedWith(a.id) ? ['自動同步'] : [])],
+        sub: [a.email, a.orgName].filter(Boolean).join(' · ') || null,
+        windows,
+        staleness: !isCurrent && usage ? `${ago(now - usage.at)}的數字` : null,
+        thresholds: alerting ? [sw.fiveHour, sw.sevenDay] : [null, null],
+        note,
+        empty: isCurrent ? 'Claude 回覆一次之後就會有用量。' : '還沒有用量紀錄',
+      })
+      return (
+        <Box key={`acc-${a.id}`} flexDirection="column" borderStyle="round" borderColor={isCurrent ? a.color : undefined} paddingX={1} paddingY={1}>
+          <Svg source={card.source} alt={card.alt} />
+          {editRow}
+        </Box>
+      )
+    }
     return (
       <Box key={`acc-${a.id}`} flexDirection="column" borderStyle="round" borderColor={isCurrent ? a.color : undefined} paddingX={1}>
         <Text wrap="truncate">
@@ -887,13 +1028,9 @@ async function drawAccounts($: $, ui: UI, width: number) {
             {usage ? `5 小時 ${five ?? '—'}% · 7 天 ${seven ?? '—'}%（${ago(now - usage.at)}的數字）` : '還沒有用量紀錄'}
           </Text>
         )}
-        {!isCurrent && (
+        {note && (
           <Text size="footnote" dimColor>
-            {a.credential
-              ? `可以一鍵接手（憑證存在${CREDENTIAL_TEXT[a.credential]}）`
-              : syncedWith(a.id)
-                ? '在桌面 app 換成它就能接著做，對話會自動同步'
-                : 'braid 沒有它的登入憑證，只能在桌面 app 手動換'}
+            {note.text}
           </Text>
         )}
         {editRow}
@@ -1304,7 +1441,32 @@ function drawMirrorStatus($: $, ui: UI, sy: BraidSync, accounts: Record<string, 
   if (m.problem) return card('warning', '⚠ 沒同步成', [problem[m.problem]], false)
   if (m.active && !sy.pair.includes(m.active)) return card(undefined, '○ 暫停', [`桌面 app 現在登入的是「${name(m.active)}」，不在這一對裡，先不同步。`], false)
   if (!m.to) return card(undefined, '○ 暫停', [sy.all || sy.folders.length > 0 ? '等下一次同步。' : '還沒挑要同步的資料夾。'], false)
-  const counts = [m.created && `新增 ${m.created}`, m.updated && `更新 ${m.updated}`, m.deleted && `刪除 ${m.deleted}`].filter(Boolean)
+  const counts = [m.created && `新增 ${m.created}`, m.updated && `更新 ${m.updated}`, m.deleted && `刪除 ${m.deleted}`].filter((c): c is string => Boolean(c))
+  const { Svg } = ui
+  if (Svg && m.active) {
+    // 桌面版：兩個帳號之間編在一起的兩股線，同步中光點往右流；說明與按鈕照舊是文字與按鈕
+    const from = mirrorLook(accounts, m.active, null)
+    const to = mirrorLook(accounts, m.to, m.toOrg)
+    const last = `上次同步 ${ago(now - m.at)}：${counts.length > 0 ? counts.join('、') : '已經一樣了'}`
+    const flow = syncFlow({
+      tone: 'on',
+      title: '自動同步中',
+      summary: `自動同步中：從「${from.label}」複製到「${to.label}」；${last}`,
+      from: { label: from.label, color: from.color, caption: 'app 登入中' },
+      to: { label: to.label, color: to.color, caption: '換過去就看得到' },
+      chips: [ago(now - m.at), ...(counts.length > 0 ? counts : ['已經一樣了'])],
+      lines: [],
+    })
+    return (
+      <Box key="sy-status" flexDirection="column" borderStyle="round" borderColor="success" paddingX={1} paddingY={1}>
+        <Svg source={flow.source} alt={flow.alt} isInteractive />
+        {fine(ui, `對話會自動複製到「${to.label}」：換過去就看得到，不用結束 Claude。`)}
+        <Box flexDirection="row" marginTop={1}>
+          <Button key="sy-now" label="現在同步" onPress={() => runMirror($, 'now')} />
+        </Box>
+      </Box>
+    )
+  }
   return card(
     'success',
     '● 自動同步中',
@@ -1413,6 +1575,7 @@ export const register: Register = on => {
     // $.state 在外掛更新、重新載入後還留著上一版寫的值。從磁碟讀來的暫存一律丟掉重讀，
     // 不然新版讀到舊版的形狀（例如 0.3.1 的桌面資料沒有 trash）畫面就壞了（0.3.2 更新後面板空白）
     await update($, desktopAtom, () => null)
+    await update($, updateAtom, () => null) // 更新提示也從頭來：載入新版之後由 checkUpdate 重新判斷
     const platform = await detectPlatform($)
     await update($, platformAtom, () => platform)
     const tz = await localTz($, platform)
@@ -1445,6 +1608,7 @@ export const register: Register = on => {
       await runMirror($, 'tick')
       await runPrune($)
     })
+    $.clock.after(5_000, () => checkUpdate($))
     try {
       await onUsage($, (await $.session.usage()).rateLimits)
     } catch {
@@ -1562,7 +1726,9 @@ export const register: Register = on => {
         </Box>
       )
     }
-    const ui = $.ui.resolve(e) as unknown as UI
+    const table = $.ui.resolve(e) as unknown as UI
+    // 終端機的元件表也有 Svg（畫成一塊空白），只有桌面 app 與手機真的畫得出圖：看畫在哪裡，不看表裡有沒有
+    const ui: UI = { ...table, Svg: e.surface === 'terminal' ? undefined : table.Svg }
     const { Box, Text, Button } = ui
     const uses = await read($, usesAtom)
     const editing = await read($, editingAtom)
@@ -1608,6 +1774,7 @@ export const register: Register = on => {
             }}
           />
         </Box>
+        {drawUpdate($, ui, await read($, updateAtom))}
         {notice && <Text color="warning">{notice}</Text>}
         {body}
       </Box>
