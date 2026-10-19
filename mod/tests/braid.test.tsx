@@ -125,6 +125,10 @@ function world(on: On, opts: Opts = {}) {
     const { Box } = $.ui.resolve(e)
     return <Box />
   })
+  on('ui.render', { component: 'PromptHint' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>? 看快捷鍵</Text>
+  })
   on('session.cwd', () => ({ value: opts.cwd ?? '/w/server' }))
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.usage', () => ({ value: { startedAt: NOW, context: { window: 200_000 }, rateLimits: [] } }))
@@ -271,7 +275,7 @@ describe('帳號與用量', () => {
     expect([saved.label, saved.email, saved.orgId, saved.source]).toEqual(['公司', 'me@corp.example', OW, 'desktop'])
     await $.session.measure(measure(62) as never)
     expect(((await w.store.get(`account:${W}`)) as { usage: { fiveHour: { pct: number } } }).usage.fiveHour.pct).toBe(62)
-    expect(w.statuses.at(-1)).toBe('braid · 公司 62%')
+    expect(w.statuses.at(-1)).toBe('braid · 公司 5 小時 62% · 7 天 20%')
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ ...PANE, surface })
       expect(await seen(ui, /62%/)).toBe(true)
@@ -885,6 +889,40 @@ describe('同步', () => {
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     expect(await shows(ui, /CLI 的對話不分帳號/)).toBe(true)
     await ui.unmount()
+  })
+})
+
+describe('輸入框下方的迷你量表', () => {
+  const HINT = {
+    plugin: 'braid',
+    component: 'PromptHint' as const,
+    props: { isDraft: false, isWorking: false, hint: '? 看快捷鍵' },
+  }
+
+  test('桌面版：app 自己的提示留著，旁邊接 5 小時與 7 天的量表；終端機不加（用狀態列的文字）', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL } })
+    await $.session.start(START)
+    await $.session.measure({ context: { window: 200_000 }, rateLimits: usage(92, 64), changed: ['rateLimits' as const] } as never)
+    const desk = await $.ui.mount({ ...HINT, surface: 'desktop' } as never)
+    expect(await shows(desk as never, /看快捷鍵/)).toBe(true)
+    const svgs = await (desk as unknown as Drawing).findAll({ type: 'Svg' })
+    expect(svgs.map(s => s.props.alt)).toEqual(['公司 5 小時 92%，7 天 64%'])
+    expect(String(svgs[0]?.props.source)).toContain('fill="#fab219"') // 92% 過了 90% 的門檻
+    await desk.unmount()
+    const term = await $.ui.mount({ ...HINT, surface: 'terminal' } as never)
+    expect((await (term as unknown as Drawing).findAll({ type: 'Svg' })).length).toBe(0)
+    await term.unmount()
+    expect(w.statuses.at(-1)).toBe('braid · 公司 5 小時 92% · 7 天 64%')
+  })
+
+  test('沒開用量切換、或還沒有用量：不加', async ($, on) => {
+    const w = world(on, { store: { uses: { migrate: true, switch: false, sync: true } } })
+    await $.session.start(START)
+    await $.session.measure(measure(50) as never)
+    const desk = await $.ui.mount({ ...HINT, surface: 'desktop' } as never)
+    expect((await (desk as unknown as Drawing).findAll({ type: 'Svg' })).length).toBe(0)
+    await desk.unmount()
+    void w
   })
 })
 

@@ -295,3 +295,42 @@ export function syncFlow(d: FlowData, w = 420): { source: string; alt: string; h
   const alt = d.summary
   return { source: svg(w, height, body), alt, height }
 }
+
+/**
+ * 輸入框下方那行的迷你量表：帳號色點與名稱、5 小時與 7 天各一條細長條與百分比。
+ * 規則同帳號卡：平常帳號色、到門檻警告色、用完危險色（另附圖示）。
+ */
+export function usageStrip(d: { label: string; color: string; windows: Window[]; thresholds: (number | null)[] }): { source: string; alt: string; height: number } {
+  const h = 18
+  const mid = h / 2
+  let x = 0
+  let body = `<circle cx="4" cy="${mid}" r="4" ${fillOf(d.color)}/>`
+  const name = fit(d.label, 11, 80)
+  body += txt(12, mid + 4, 't2', 11, name, 'font-weight="600"')
+  x = 12 + textWidth(name, 11) + 12
+  d.windows.forEach((win, i) => {
+    const th = d.thresholds[i] ?? null
+    const pct = win.pct
+    const level = pct === null ? 'none' : pct >= 100 ? 'critical' : th !== null && pct >= th ? 'warning' : 'normal'
+    const short = win.label.replace(' 小時', 'h').replace(' 天', 'd')
+    body += txt(x, mid + 4, 't3', 11, short)
+    x += textWidth(short, 11) + 5
+    const bw = 44
+    body += `<rect x="${x}" y="${mid - 2.5}" width="${bw}" height="5" rx="2.5" ${fillOf(d.color, 'k')}/>`
+    if (pct !== null && pct > 0) {
+      const fill = level === 'critical' ? `fill="${STATUS.critical}"` : level === 'warning' ? `fill="${STATUS.warning}"` : fillOf(d.color)
+      body += `<rect x="${x}" y="${mid - 2.5}" width="${Math.max(5, (bw * Math.min(pct, 100)) / 100)}" height="5" rx="2.5" ${fill}/>`
+    }
+    x += bw + 5
+    if (level === 'warning' || level === 'critical') {
+      body += statusIcon(x, mid, level)
+      x += 14
+    }
+    const p = pct === null ? '—' : `${pct}%`
+    body += txt(x, mid + 4, 't1 num', 11, p, 'font-weight="600"')
+    x += textWidth(p, 11) + 12
+  })
+  const w = Math.ceil(x)
+  const alt = `${d.label} ${d.windows.map(win => `${win.label} ${win.pct === null ? '沒有數字' : `${win.pct}%`}`).join('，')}`
+  return { source: svg(w, h, body), alt, height: h }
+}

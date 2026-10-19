@@ -27,7 +27,7 @@ import type {
 import { backupLabel, desktopPaths, listToolBackups, listTrash, scanDesktop, type DesktopEnv, type DesktopIo, type DesktopPaths } from './desktop'
 import { manualPath, parseDryRun, planLaunch, toolArgs, type ToolRequest } from './launch'
 import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo } from './mirror'
-import { accountCard, syncFlow, type Window } from './visual'
+import { accountCard, syncFlow, usageStrip, type Window } from './visual'
 import {
   absorbTokenTwin,
   bandFor,
@@ -275,14 +275,17 @@ async function onUsage($: $, rateLimits: readonly RateLimit[]): Promise<void> {
   if (bandFor(await read($, accountsAtom), id, usage, await read($, switchAtom), await $.session.cwd(), now, null)) $.clock.after(1, () => runMirror($, 'urgent'))
 }
 
-/** 狀態列：開了用量切換才顯示目前帳號與 5 小時用量。 */
+/** 狀態列：開了用量切換才顯示目前帳號與用量（5 小時、7 天）。 */
 async function refreshStatus($: $): Promise<void> {
   const uses = await read($, usesAtom)
   const id = await read($, currentAtom)
   const live = await read($, liveAtom)
   const account = id ? (await read($, accountsAtom))[id] : undefined
-  const pct = effectivePct(live?.fiveHour ?? null, await $.clock.now())
-  $.ui.status(uses?.switch && account && pct !== null ? `braid · ${account.label} ${pct}%` : undefined)
+  const now = await $.clock.now()
+  const five = effectivePct(live?.fiveHour ?? null, now)
+  const seven = effectivePct(live?.sevenDay ?? null, now)
+  const parts = [five !== null ? `5 小時 ${five}%` : null, seven !== null ? `7 天 ${seven}%` : null].filter(Boolean)
+  $.ui.status(uses?.switch && account && parts.length > 0 ? `braid · ${account.label} ${parts.join(' · ')}` : undefined)
 }
 
 // ── 開視窗 ──────────────────────────────────────────────────
@@ -1709,6 +1712,33 @@ export const register: Register = on => {
           )}
           <Button key="band-snooze" label={reset ? `${reset} 前別再提醒` : '先別提醒'} role="dismiss" onPress={() => snooze($, band.snoozeKey)} />
         </Box>
+      </Box>
+    )
+  })
+
+  // ── 輸入框下方那行：桌面版在 app 自己的提示旁邊接一條迷你量表（終端機照舊，用狀態列的文字） ──
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    if (e.surface !== 'desktop') return next(e)
+    const uses = await read($, usesAtom)
+    const id = await read($, currentAtom)
+    const live = await read($, liveAtom)
+    const account = id ? (await read($, accountsAtom))[id] : undefined
+    if (!uses?.switch || !account || !live) return next(e)
+    const now = await $.clock.now()
+    const windows: Window[] = []
+    for (const [label, w] of [['5 小時', live.fiveHour], ['7 天', live.sevenDay]] as const) {
+      const pct = effectivePct(w, now)
+      if (pct !== null) windows.push({ label, pct, reset: null })
+    }
+    if (windows.length === 0) return next(e)
+    const sw = await read($, switchAtom)
+    const strip = usageStrip({ label: account.label, color: account.color, windows, thresholds: sw.on ? [sw.fiveHour, sw.sevenDay] : [null, null] })
+    const engine = await next(e)
+    const { Box, Svg } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="row" gap={2} alignItems="center">
+        {engine}
+        <Svg source={strip.source} alt={strip.alt} />
       </Box>
     )
   })

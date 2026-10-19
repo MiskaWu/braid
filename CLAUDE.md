@@ -131,6 +131,8 @@ tests/                            工具的測試（Node＋classic-level 造資�
   帳號色是 Claude 設計系統的類別色前五個（`model.ts` 的 `SLOTS`，用 dataviz 驗證器在深淺兩種底色驗過；改顏色或順序要重跑）。
   桌面 app 面板的底色是 `#1a1a19`，和設計系統的深色底一樣。設計稿的預覽方法：把產生器的輸出放進 462px 寬的頁面，
   用 Playwright 分別以深、淺色截圖來看。
+- **用量顯示**：狀態列（`$.ui.status`）只能放文字，寫 5 小時與 7 天；桌面版另外在輸入框下方那行（`PromptHint`）
+  先拿 `next(e)` 畫好的 app 提示，再在旁邊接 `usageStrip` 的 SVG 量表，不蓋掉 app 自己的提示。
 - **更新**：官方是 `/plugin` 裡打開 marketplace 的自動更新（第三方預設關，`marketplace.json` 不能替使用者開）。
   braid 另外自己查 GitHub 上 `mod/.claude-plugin/plugin.json` 的版本，按鈕照官方兩步更新後用
   `$.command.run({ command: 'reload-plugins' })` 重新載入。改 repo 位置或 marketplace 名稱要改 `register.tsx` 的 `LATEST_URL`、`MARKETPLACE`。
