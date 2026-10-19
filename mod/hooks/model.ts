@@ -2,6 +2,8 @@
 // 三種用法共用同一份帳號清單：遷移與同步看桌面 app 的側欄資料，用量切換看每個帳號的用量與憑證。
 import type {
   BraidAccount,
+  BraidMirror,
+  BraidMirrorProblem,
   BraidProfile,
   BraidSwitch,
   BraidSync,
@@ -22,7 +24,7 @@ export const COLOR_NAMES: Record<string, string> = {
 
 export const DEFAULT_USES: BraidUses = { migrate: false, switch: false, sync: false }
 export const DEFAULT_SWITCH: BraidSwitch = { on: true, fiveHour: 90, sevenDay: 95, order: [], restrict: false, restricted: [] }
-export const DEFAULT_SYNC: BraidSync = { on: false, pair: [], all: true, folders: [], when: 'on-switch' }
+export const DEFAULT_SYNC: BraidSync = { on: false, pair: [], all: true, folders: [] }
 export const FIVE_HOUR_CHOICES = [80, 90, 95] as const
 export const SEVEN_DAY_CHOICES = [90, 95] as const
 
@@ -58,7 +60,22 @@ export function normalizeSync(x: unknown): BraidSync {
     // 預設全部；沒有 all 欄位的舊設定，挑過資料夾的維持只同步挑的
     all: x.all === true || (x.all === undefined && folders.length === 0),
     folders,
-    when: x.when === 'manual' ? 'manual' : 'on-switch',
+  }
+}
+
+const PROBLEMS: readonly BraidMirrorProblem[] = ['no-desktop', 'no-active', 'no-spec', 'no-target', 'failed']
+
+export function normalizeMirror(x: unknown): BraidMirror | null {
+  if (!isObj(x) || typeof x.at !== 'number') return null
+  return {
+    at: x.at,
+    active: str(x.active),
+    to: str(x.to),
+    toOrg: str(x.toOrg),
+    created: num(x.created, 0),
+    updated: num(x.updated, 0),
+    problem: PROBLEMS.find(p => p === x.problem) ?? null,
+    detail: str(x.detail),
   }
 }
 
@@ -337,8 +354,20 @@ export function partnerOf(sync: BraidSync, current: string | null): string | nul
 }
 
 /**
- * 同步要工具做什麼：全部資料夾（環境也全部），或勾選的資料夾（環境跟著資料夾走）；沒有範圍就是 null。
- * 同步頁的按鈕與換帳號後的提示都只用這一個，範圍怎麼算不會兩邊各寫一套。
+ * 自動同步這次要做什麼：從桌面 app 現在登入的帳號，複製到同一對裡的另一個帳號。
+ * 沒開、app 的帳號不在這一對裡、或只同步挑的資料夾卻還沒挑，就不做。
+ * 只寫沒登入的那個帳號：目前帳號的資料夾 app 開著時會蓋回去（見 mirror.ts）。
+ */
+export function mirrorTarget(sync: BraidSync, active: string | null): { from: string; to: string; scope: 'all' | readonly string[] } | null {
+  const to = partnerOf(sync, active)
+  if (!sync.on || !active || !to || to === active) return null
+  if (!sync.all && sync.folders.length === 0) return null
+  return { from: active, to, scope: sync.all ? 'all' : sync.folders }
+}
+
+/**
+ * 環境要工具做什麼：全部資料夾（環境也全部），或勾選的資料夾（環境跟著資料夾走）；沒有範圍就是 null。
+ * 環境存在 app 的內部資料庫，app 開著不能寫，所以不自動同步，由同步頁的按鈕交給遷移工具。
  */
 export function syncRequest(
   sync: BraidSync,
@@ -348,11 +377,6 @@ export function syncRequest(
   if (sync.all) return { from: partner, projects: 'all', presets: 'all' }
   if (sync.folders.length === 0) return null
   return { from: partner, projects: sync.folders, presets: 'folders' }
-}
-
-/** 提示裡怎麼說同步範圍。 */
-export function syncScopeText(sync: BraidSync): string {
-  return sync.all ? '所有資料夾' : `同步的 ${sync.folders.length} 個資料夾`
 }
 
 /** 同步範圍的勾選清單：兩個帳號的資料夾聯集，勾過的排前面，其餘照對話數排。 */

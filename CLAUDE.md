@@ -7,7 +7,7 @@ Claude 的多帳號工具。名稱取「辮子」：每個帳號是一股線，�
 |---|---|---|---|---|
 | 遷移（migrate） | 單向 | 手動一次 | 勾選的資料夾 | 已完成（桌面 app） |
 | 用量切換（switch） | 跟著使用者走 | 到用量門檻時 | 依資料夾規則（同組織／都可以） | 0.2.0：提示＋一鍵用另一個帳號在新視窗接著做 |
-| 同步（sync） | 雙向（換帳號時各帶一次） | 換帳號後第一次打開時問 | 勾選的資料夾 | 0.2.0：桌面 app，用遷移工具的 `-From -Projects -Presets folders` |
+| 同步（sync） | app 登入的帳號 → 同一對的另一個（換帳號後方向跟著反過來） | 自動：約每分鐘、到用量門檻時馬上一次 | 全部或挑的資料夾 | 0.3.0：側欄紀錄由 mod 自己寫（`hooks/mirror.ts`）；環境要結束 app，交給遷移工具 |
 
 三種用法共用一份帳號清單（`$.store` 的 `account:<id>`）與同一個遷移工具；寫入桌面 app 資料的規則只在 `mod/tool/spec.json`。
 `/braid` 打開面板（帳號、切換、同步、遷移四頁，依使用者選的用法出現），`/braid migrate` 直接開遷移工具。
@@ -26,6 +26,7 @@ mod/                              plugin 本體（從 marketplace 安裝時只�
   hooks/launch.ts                 遷移工具的參數與開視窗的方式（純函式）
   hooks/terminal.ts               帳號腳本（接著做、新增帳號）開新視窗的方式（純函式）
   hooks/desktop.ts                讀桌面 app 的側欄資料與備份（收一組讀檔函式，不收 $）
+  hooks/mirror.ts                 自動同步的核心：把側欄紀錄複製到沒登入的帳號（收一組讀寫檔函式，不收 $）
   types/index.d.ts                $.state 的契約
   tests/                          claude plugin test：model.test.ts（純邏輯）、braid.test.tsx（終端機與桌面兩種畫面）
   tool/spec.json                  兩個平台共用的遷移規則
@@ -72,17 +73,22 @@ tests/                            工具的測試（Node＋classic-level 造資�
 
 ## 不可違反的約束
 
-- **app 開著時不寫**：作用中帳號的清單與 Local Storage 都在 app 記憶體裡，寫了會被蓋回。
+- **app 開著時不寫作用中帳號**：作用中帳號的清單與 Local Storage 都在 app 記憶體裡，寫了會被蓋回。
   Windows 的 LevelDB 寫入用獨佔開檔，app 開著會失敗，是第二道保險。
+  例外是自動同步：它只寫**沒登入**的帳號的側欄資料夾。依據是 app 2.42304 的 `LocalSessionManager.doInitialize`：
+  帳號或組織一變就 `flushPendingSaves` 舊的、`sessions.clear()`、再 `loadSessions` 從磁碟讀新帳號的資料夾；
+  哪個帳號作用中看 app 的 `config.json` 的 `lastKnownAccountUuid`（換帳號當下就改）。app 改版後這段要重查。
+  同步的對象由 `model.ts` 的 `mirrorTarget` 決定，它保證不會是作用中的帳號。
 - **只複製、不搬移，寫入前備份**；重跑必須是安全的（已有的略過）。
 - **格式認不得就停**：Local Storage 版本不在 `spec.json` 的 `supportedVersions`、LevelDB 校驗不過，
   一律放棄寫環境並說明，不猜。
 - **卡住改成問**：任何可能失敗的步驟都包在「重試／略過／取消」裡；公司政策（強制簽章、受限語言模式）不繞過。
 - **遷移邏輯不靠模型**：`/braid migrate` 只開視窗，讀寫全在工具裡；工具也能不透過 Claude 直接雙擊。
 - **資料夾設定只跟著選擇走**：有挑選時，資料夾預設值、最近使用位置只帶選到的專案與環境的資料夾，
-  個人專案不能因為「順便」被帶進公司帳號。同步的「全部資料夾」是使用者明確選的（`-Projects all -Presets all`），
-  兩個帳號的組織不確定相同時面板要警告；範圍只由 `model.ts` 的 `syncRequest` 決定，同步頁與換帳號後的提示共用。
-- **規則只寫在 `spec.json`**：要拿掉哪些欄位、認得哪些版本，兩個平台都讀它。
+  個人專案不能因為「順便」被帶進公司帳號。同步的「全部資料夾」是使用者明確選的，兩個帳號的組織不確定相同時面板要警告；
+  範圍只由 `BraidSync` 的 `all`／`folders` 決定：自動同步用 `mirrorTarget`、帶環境的按鈕用 `syncRequest`（`-Projects all -Presets all` 或 `-Presets folders`）。
+- **規則只寫在 `spec.json`**：要拿掉哪些欄位、認得哪些版本，兩個平台的工具與 mod 的自動同步都讀它。
+  自動同步更新已有的紀錄時，`dropKeys`、`nullKeys`、`replaceFromTarget` 留目標帳號自己的值（它們綁帳號）。
 - **登入憑證不經過 mod 與模型**：新增帳號、接著做都在新開的視窗裡由 `tool/cli`、`tool/windows` 的腳本取用；
   結果檔只寫成功與否和存在哪裡。mod 只知道憑證 id（`tok-xxxxxxxx`）。
 - **接著做用 `--fork-session`**：複製一份新的對話，原本的不動，兩個行程不會寫同一份紀錄。

@@ -46,12 +46,28 @@ type Opts = {
   policy?: Record<string, unknown>
   cwd?: string
   files?: Record<string, string>
+  /** 檔案的修改時間（沒給是 NOW）；寫進去的檔依寫入順序排在 NOW 之後 */
+  mtimes?: Record<string, number>
   uname?: string
   /** 開視窗的 bash 失敗時回的訊息 */
   failBash?: string
 }
 
-const entry = (name: string, kind: FsEntry['kind']): FsEntry => ({ name, kind, size: 1, mtimeMs: NOW, isLink: false })
+const entry = (name: string, kind: FsEntry['kind'], mtimeMs = NOW): FsEntry => ({ name, kind, size: 1, mtimeMs, isLink: false })
+
+// tool/spec.json 的 sessions 段（測試讀不到外掛的真檔，照抄一份）
+const SPEC = JSON.stringify({
+  sessions: {
+    dir: 'claude-code-sessions',
+    filePrefix: 'local_',
+    tombstonePrefix: 'deleted_',
+    archivedIndex: 'archived-sessions.idx',
+    requiredKeys: ['sessionId', 'cliSessionId', 'cwd'],
+    dropKeys: ['bridgeSessionIds', 'sshReattach', 'sshRemoteProcessId', 'priorRemoteCliSessionIds', 'scheduledTaskId'],
+    nullKeys: ['startedFromEnvironmentId'],
+    replaceFromTarget: ['remoteMcpServersConfig'],
+  },
+})
 
 function world(on: On, opts: Opts = {}) {
   const runs: { argv: string[]; env?: Record<string, string> }[] = []
@@ -63,8 +79,12 @@ function world(on: On, opts: Opts = {}) {
     [`${SESS}/${P}/${OP}/local_4.json`]: JSON.stringify({ cwd: '/side/blog', lastActivityAt: NOW - 6 * H }),
     [`${SESS}/${P}/${OP}/local_5.json`]: '壞掉的檔案',
     [`${BACKUPS}/20261016-140211/manifest.json`]: '{}',
+    // 桌面 app 現在登入的帳號
+    [`${APP}/config.json`]: JSON.stringify({ lastKnownAccountUuid: W }),
     ...opts.files,
   }
+  const mtimes: Record<string, number> = { ...opts.mtimes }
+  let writes = 0
   const dirs: Record<string, FsEntry[]> = {
     [SESS]: [entry(W, 'dir'), entry(P, 'dir')],
     [`${SESS}/${W}`]: [entry(OW, 'dir')],
@@ -116,16 +136,25 @@ function world(on: On, opts: Opts = {}) {
     return out('')
   })
   on('fs.read', ($, e) => {
-    const text = files[e.path]
+    const text = e.path.endsWith('/tool/spec.json') ? SPEC : files[e.path]
     if (text === undefined) throw new Error(`ENOENT ${e.path}`)
     return { value: text }
   })
   on('fs.write', ($, e) => {
     files[e.path] = e.text
+    mtimes[e.path] = NOW + ++writes
     return { value: undefined }
   })
   on('fs.exists', ($, e) => ({ value: e.path in files || e.path in dirs }))
-  on('fs.list', ($, e) => ({ value: dirs[e.path] ?? [] }))
+  // 目錄：上面列的，加上檔案表裡直接在它底下的檔（含寫進去的）
+  on('fs.list', ($, e) => {
+    const listed = new Map((dirs[e.path] ?? []).map(d => [d.name, d]))
+    for (const f of Object.keys(files)) {
+      const cut = f.lastIndexOf('/')
+      if (f.slice(0, cut) === e.path) listed.set(f.slice(cut + 1), entry(f.slice(cut + 1), 'file', mtimes[f] ?? NOW))
+    }
+    return { value: [...listed.values()] }
+  })
   on('ui.open', ($, e) => {
     opened.push(e.id)
     return { value: { isPlaced: true as const } }
@@ -142,7 +171,7 @@ function world(on: On, opts: Opts = {}) {
     copies.push(e.text)
     return { value: { isCopied: true as const } }
   })
-  return { runs, files, opened, toasts, copies, statuses, clock, store }
+  return { runs, files, mtimes, opened, toasts, copies, statuses, clock, store }
 }
 
 const SURFACES = ['terminal', 'desktop'] as const
@@ -160,6 +189,10 @@ const BAND = {
 const START = { cwd: '/w/server', surface: 'desktop' as const, isInteractive: true }
 const RUN = (args = '') => ({ command: 'braid', args, origin: { kind: 'composer' as const }, presentation: { isFullscreen: true, columns: 160 } })
 const USES_ALL = { migrate: true, switch: true, sync: true }
+const SYNC_ON = { on: true, pair: [W, P], all: true, folders: [] }
+/** 一筆桌面 app 的側欄紀錄（local_<id>.json）：必要欄位加上要改的 */
+const rec = (id: string, over: Record<string, unknown>) =>
+  JSON.stringify({ sessionId: `local_${id}`, cliSessionId: `cli-${id}`, cwd: '/w/server', lastActivityAt: NOW - H, ...over })
 const usage = (five: number, seven = 20) => [
   { kind: 'five_hour', percentUsed: five, resetsAt: new Date(NOW + 2 * H).toISOString() },
   { kind: 'seven_day', percentUsed: seven, resetsAt: new Date(NOW + 96 * H).toISOString() },
@@ -201,7 +234,6 @@ describe('帳號與用量', () => {
     await $.session.start(START)
     const saved = (await w.store.get(`account:${W}`)) as { label: string; email: string; orgId: string; source: string }
     expect([saved.label, saved.email, saved.orgId, saved.source]).toEqual(['公司', 'me@corp.example', OW, 'desktop'])
-    expect(await w.store.get('lastDesktopAccount')).toBe(W)
     await $.session.measure(measure(62) as never)
     expect(((await w.store.get(`account:${W}`)) as { usage: { fiveHour: { pct: number } } }).usage.fiveHour.pct).toBe(62)
     expect(w.statuses.at(-1)).toBe('braid · 公司 62%')
@@ -516,33 +548,34 @@ describe('切換設定', () => {
 })
 
 describe('同步', () => {
-  test('第一次設定：預設全部資料夾；按了工具收到 -Projects all -Presets all；組織不同要警告', async ($, on) => {
+  test('第一次設定：預設全部資料夾；組織不同要警告；環境交給工具 -Projects all -Presets all', async ($, on) => {
     const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL } })
     await $.session.start(START)
     await $.command.run(RUN('同步'))
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
     await ui.select({ key: 'sy-on', value: 'on' })
     await ui.select({ key: 'sy-partner', value: P })
-    expect(await w.store.get('sync')).toEqual({ on: true, pair: [W, P], all: true, folders: [], when: 'on-switch' })
+    expect(await w.store.get('sync')).toEqual({ on: true, pair: [W, P], all: true, folders: [] })
     expect((await ui.find({ key: 'sy-scope' }))?.props.value).toBe('all')
+    expect(await ui.find({ key: 'sy-when' })).toBeUndefined() // 開了就自動，不用選時機
     expect(await shows(ui, /目前兩個帳號共 2 個資料夾/)).toBe(true)
     expect(await shows(ui, /可能不在同一個組織/)).toBe(true) // 公司與個人
     expect(await ui.find({ key: 'sy-add' })).toBeUndefined()
-    await ui.press({ key: 'sy-now' })
+    await ui.press({ key: 'sy-env' })
     expect(w.runs.at(-1)?.argv.slice(2)).toEqual(['-From', P, '-Projects', 'all', '-Presets', 'all'])
     expect(await shows(ui, /已在另一個視窗開啟同步工具/)).toBe(true)
     await ui.unmount()
   })
 
-  test('自己挑：一個一個加——這個對話的資料夾、從清單挑、輸入路徑；可以移除；按了只帶這些資料夾、環境跟著資料夾', async ($, on) => {
-    const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL, sync: { on: true, pair: [W, P], all: true, folders: [], when: 'on-switch' } } })
+  test('自己挑：一個一個加——這個對話的資料夾、從清單挑、輸入路徑；可以移除；環境只帶這些資料夾的', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL, sync: { on: true, pair: [W, P], all: true, folders: [] } } })
     await $.session.start(START)
     await $.command.run(RUN('同步'))
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ ...PANE, surface })
       await ui.select({ key: 'sy-scope', value: 'picked' })
       expect(await shows(ui, /還沒加入任何資料夾/)).toBe(true)
-      expect(await ui.find({ key: 'sy-now' })).toBeUndefined() // 沒有範圍就沒有「帶過來」
+      expect(await ui.find({ key: 'sy-env' })).toBeUndefined() // 沒有範圍就沒有「帶環境過來」
       await ui.unmount()
     }
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
@@ -565,7 +598,7 @@ describe('同步', () => {
     // 移除
     await ui.press({ key: 'sy-del-/side/blog' })
     expect((w.store.get('sync') as { folders: string[] }).folders).toEqual(['/w/server', '/new/proj'])
-    await ui.press({ key: 'sy-now' })
+    await ui.press({ key: 'sy-env' })
     expect(w.runs.at(-1)?.argv.slice(2)).toEqual(['-From', P, '-Projects', '/w/server,/new/proj', '-Presets', 'folders'])
     // 切回全部：挑過的留著，再切回來還在
     await ui.select({ key: 'sy-scope', value: 'all' })
@@ -575,70 +608,151 @@ describe('同步', () => {
     await ui.unmount()
   })
 
-  test('全部資料夾：同組織的兩個帳號不警告；換帳號後的提示說「所有資料夾」', async ($, on) => {
+  test('全部資料夾：同組織的兩個帳號不警告', async ($, on) => {
     const work2 = acct(P, { email: 'me2@corp.example', orgId: OW, label: '公司 2' })
-    const sync = { on: true, pair: [W, P], all: true, folders: [], when: 'on-switch' }
-    const w = world(on, { store: { uses: USES_ALL, sync, lastDesktopAccount: P, [`account:${P}`]: work2 } })
+    const w = world(on, { store: { uses: USES_ALL, sync: SYNC_ON, [`account:${P}`]: work2 } })
     await $.session.start(START)
-    const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-    expect(await shows(band, /要把所有資料夾的對話帶過來嗎/)).toBe(true)
-    await band.press({ key: 'sync-go' })
-    expect(w.runs.at(-1)?.argv.slice(2)).toEqual(['-From', P, '-Projects', 'all', '-Presets', 'all'])
-    await band.unmount()
     await $.command.run(RUN('同步'))
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
     expect(await shows(ui, /目前兩個帳號共/)).toBe(true)
     expect(await shows(ui, /可能不在同一個組織/)).toBe(false)
     await ui.unmount()
+    void w
+  })
+
+  test('自動同步：開始後就把桌面 app 現在登入的帳號的對話複製到另一個帳號；綁帳號的欄位拿掉；在那邊刪過的不帶；這邊的資料夾一個檔都不寫', async ($, on) => {
+    const w = world(on, {
+      store: { uses: USES_ALL, sync: SYNC_ON, [`account:${P}`]: PERSONAL },
+      files: {
+        [`${SESS}/${W}/${OW}/local_a.json`]: rec('a', { cwd: '/w/server', title: 'A', bridgeSessionIds: ['wb'], sshRemoteProcessId: 7, startedFromEnvironmentId: 'env-w', remoteMcpServersConfig: { slack: 1 } }),
+        [`${SESS}/${W}/${OW}/local_b.json`]: rec('b', { cwd: '/side/blog', title: 'B', isArchived: true }),
+        [`${SESS}/${W}/${OW}/local_c.json`]: rec('c', { cwd: '/w/server', title: 'C' }),
+        [`${SESS}/${P}/${OP}/deleted_c`]: '1760000000000',
+        [`${SESS}/${P}/${OP}/local_3.json`]: rec('3', { cwd: '/side/blog', remoteMcpServersConfig: {} }),
+      },
+    })
+    const mine = Object.fromEntries(Object.entries(w.files).filter(([k]) => k.startsWith(`${SESS}/${W}/`)))
+    await $.session.start(START)
+    expect(w.files[`${SESS}/${P}/${OP}/local_a.json`]).toBeUndefined() // 開始後幾秒才做，不拖慢開對話
+    await w.clock.advance(3_000)
+    expect(JSON.parse(w.files[`${SESS}/${P}/${OP}/local_a.json`] ?? 'null')).toEqual({
+      sessionId: 'local_a',
+      cliSessionId: 'cli-a',
+      cwd: '/w/server',
+      lastActivityAt: NOW - H,
+      title: 'A',
+      startedFromEnvironmentId: null,
+      remoteMcpServersConfig: {}, // 換成那個帳號自己的
+    })
+    expect(JSON.parse(w.files[`${SESS}/${P}/${OP}/archived-sessions.idx`] ?? 'null')).toEqual({ v: 1, archived: ['local_b'] })
+    expect(w.files[`${SESS}/${P}/${OP}/local_c.json`]).toBeUndefined() // 在個人帳號刪過
+    expect(Object.fromEntries(Object.entries(w.files).filter(([k]) => k.startsWith(`${SESS}/${W}/`)))).toEqual(mine)
+    // 狀態：說清楚從哪到哪、不用結束 Claude
+    await $.command.run(RUN('同步'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await shows(ui, /桌面 app 現在登入「公司」，對話會自動複製到「個人」：換過去就看得到，不用結束 Claude。上次同步 剛剛（新增 2、更新 0）/)).toBe(true)
+    await ui.unmount()
+  })
+
+  test('之後每分鐘一次：app 改過的紀錄跟著更新，那個帳號自己的欄位留著；那邊比較新的不動；新的對話也帶過去', async ($, on) => {
+    const target = `${SESS}/${P}/${OP}`
+    const w = world(on, {
+      store: { uses: USES_ALL, sync: SYNC_ON },
+      files: {
+        [`${SESS}/${W}/${OW}/local_d.json`]: rec('d', { cwd: '/w/server', title: 'D 舊' }),
+        [`${target}/local_d.json`]: rec('d', { cwd: '/w/server', title: 'D 舊', bridgeSessionIds: ['pb'], sshRemoteProcessId: 9 }),
+        [`${SESS}/${W}/${OW}/local_e.json`]: rec('e', { cwd: '/w/server', title: 'E 這邊' }),
+        [`${target}/local_e.json`]: rec('e', { cwd: '/w/server', title: 'E 那邊', lastActivityAt: NOW }),
+      },
+      mtimes: { [`${target}/local_d.json`]: NOW - 2 * H, [`${target}/local_e.json`]: NOW - 2 * H },
+    })
+    await $.session.start(START)
+    await w.clock.advance(3_000)
+    expect(JSON.parse(w.files[`${target}/local_d.json`] ?? '{}')).toMatchObject({ title: 'D 舊', bridgeSessionIds: ['pb'], sshRemoteProcessId: 9 })
+    expect(JSON.parse(w.files[`${target}/local_e.json`] ?? '{}').title).toBe('E 那邊') // 那邊的最後活動比較晚
+    // app 在這邊繼續聊 d、開了新的 f
+    w.files[`${SESS}/${W}/${OW}/local_d.json`] = rec('d', { cwd: '/w/server', title: 'D 新', lastActivityAt: NOW + H, bridgeSessionIds: ['wb'] })
+    w.mtimes[`${SESS}/${W}/${OW}/local_d.json`] = NOW + H
+    w.files[`${SESS}/${W}/${OW}/local_f.json`] = rec('f', { cwd: '/w/server', title: 'F' })
+    await w.clock.advance(30_000)
+    expect(w.files[`${target}/local_f.json`]).toBeUndefined() // 還不到一分鐘
+    await w.clock.advance(30_000)
+    expect(JSON.parse(w.files[`${target}/local_d.json`] ?? '{}')).toMatchObject({ title: 'D 新', lastActivityAt: NOW + H, bridgeSessionIds: ['pb'], sshRemoteProcessId: 9 })
+    expect(JSON.parse(w.files[`${target}/local_f.json`] ?? '{}').title).toBe('F')
+  })
+
+  test('以桌面 app 現在登入的帳號為準：app 已經換到個人帳號，就從個人複製到公司（這個對話還是公司的也一樣）', async ($, on) => {
+    const w = world(on, {
+      store: { uses: USES_ALL, sync: SYNC_ON },
+      files: {
+        [`${APP}/config.json`]: JSON.stringify({ lastKnownAccountUuid: P }),
+        [`${SESS}/${P}/${OP}/local_p.json`]: rec('p', { cwd: '/side/blog' }),
+        [`${SESS}/${W}/${OW}/local_w.json`]: rec('w', { cwd: '/w/server' }),
+      },
+    })
+    await $.session.start(START)
+    await w.clock.advance(3_000)
+    expect(w.files[`${SESS}/${W}/${OW}/local_p.json`]).toBeDefined()
+    expect(w.files[`${SESS}/${P}/${OP}/local_w.json`]).toBeUndefined() // app 正在用的個人帳號：一律不寫
+  })
+
+  test('app 登入的帳號不在這一對裡、或另一個帳號還沒在 app 用過：不寫，狀態說明原因', async ($, on) => {
+    const other = 'cccccccc-0000-4000-8000-000000000003'
+    const w = world(on, {
+      store: { uses: USES_ALL, sync: SYNC_ON, [`account:${P}`]: PERSONAL },
+      files: { [`${APP}/config.json`]: JSON.stringify({ lastKnownAccountUuid: other }), [`${SESS}/${W}/${OW}/local_a.json`]: rec('a', { cwd: '/w/server' }) },
+    })
+    await $.session.start(START)
+    await w.clock.advance(3_000)
+    expect(Object.keys(w.files).filter(k => k.startsWith(`${SESS}/${P}/`) && k.endsWith('local_a.json'))).toEqual([])
+    await $.command.run(RUN('同步'))
+    let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await shows(ui, /桌面 app 現在登入的是「帳號 cccccccc…」，不在這一對裡，先不同步/)).toBe(true)
+    // 另一個帳號沒有資料夾
+    w.files[`${APP}/config.json`] = JSON.stringify({ lastKnownAccountUuid: W })
+    await w.store.set('sync', { ...SYNC_ON, pair: [W, other] })
+    await $.session.start(START)
+    await ui.press({ key: 'sy-now' })
+    expect(await shows(ui, /「帳號 cccccccc…」還沒在桌面 app 用過 Code 分頁/)).toBe(true)
+    await ui.unmount()
+  })
+
+  test('用量快用完：馬上再同步一次；提示說在桌面 app 換過去就能接著做', async ($, on) => {
+    const w = world(on, {
+      store: { uses: USES_ALL, sync: SYNC_ON, [`account:${P}`]: PERSONAL },
+      files: { [`${SESS}/${W}/${OW}/local_a.json`]: rec('a', { cwd: '/w/server' }) },
+    })
+    await $.session.start(START)
+    await w.clock.advance(3_000)
+    w.files[`${SESS}/${W}/${OW}/local_n.json`] = rec('n', { cwd: '/w/server' })
+    await w.clock.advance(15_000)
+    await $.session.measure(measure(92) as never)
+    await w.clock.advance(1)
+    expect(w.files[`${SESS}/${P}/${OP}/local_n.json`]).toBeDefined() // 不等一分鐘
+    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    expect(await shows(band, /在桌面 app 換成「個人」就能接著做，對話都已同步過去/)).toBe(true)
+    await band.unmount()
+  })
+
+  test('沒開同步：時間到了也什麼都不寫', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL, sync: { ...SYNC_ON, on: false } }, files: { [`${SESS}/${W}/${OW}/local_a.json`]: rec('a', { cwd: '/w/server' }) } })
+    await $.session.start(START)
+    await w.clock.advance(120_000)
+    expect(w.files[`${SESS}/${P}/${OP}/local_a.json`]).toBeUndefined()
+    expect(w.store.get('mirror')).toBeUndefined()
   })
 
   test('桌面 app 的舊帳號沒當過目前帳號：用組織對到的、braid 新增的帳號名稱來叫它', async ($, on) => {
     const tok = acct('tok-00000009', { orgId: OP, label: 'MiskaWu', source: 'token', credential: 'file', credentialId: 'tok-00000009' })
-    const sync = { on: true, pair: [W, P], all: true, folders: [], when: 'on-switch' }
-    const w = world(on, { store: { uses: USES_ALL, sync, lastDesktopAccount: P, 'account:tok-00000009': tok } })
+    const w = world(on, { store: { uses: USES_ALL, sync: SYNC_ON, 'account:tok-00000009': tok } })
     await $.session.start(START)
-    const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-    expect(await shows(band, /從「MiskaWu」換到「公司」了/)).toBe(true)
-    await band.unmount()
+    await w.clock.advance(3_000)
     await $.command.run(RUN('同步'))
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
     const options = ((await ui.find({ key: 'sy-partner' }))?.props.options ?? []) as { value: string; label: string }[]
     expect(options.find(o => o.value === P)?.label).toBe('MiskaWu')
     expect(options.some(o => o.value === 'tok-00000009')).toBe(false) // braid 新增的帳號不是桌面 app 帳號，不列
-    await ui.unmount()
-    void w
-  })
-
-  test('換帳號後第一次打開：問要不要從另一個帳號帶過來；按了開工具，按「這次不用」就不再問', async ($, on) => {
-    const sync = { on: true, pair: [W, P], folders: ['/w/server', '/side/blog'], when: 'on-switch' }
-    const w = world(on, { store: { uses: USES_ALL, sync, lastDesktopAccount: P, [`account:${P}`]: PERSONAL } })
-    await $.session.start(START)
-    expect(await w.store.get('lastDesktopAccount')).toBe(W)
-    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-    expect(await shows(ui, /從「個人」換到「公司」了。要把同步的 2 個資料夾/)).toBe(true)
-    await ui.press({ key: 'sync-go' })
-    expect(w.runs.at(-1)?.argv.slice(2)).toEqual(['-From', P, '-Projects', '/w/server,/side/blog', '-Presets', 'folders'])
-    expect(await ui.find({ key: 'sync-go' })).toBeUndefined()
-    await ui.unmount()
-  })
-
-  test('「接著做」開的視窗或 CLI 自己的登入不算換帳號：不改記住的桌面帳號，桌面 app 真的換帳號時照樣會問', async ($, on) => {
-    const sync = { on: true, pair: [W, P], all: true, folders: [], when: 'on-switch' }
-    // 用個人帳號「接著做」開的視窗（BRAID_ACCOUNT）
-    const w = world(on, { env: { BRAID_ACCOUNT: 'tok-00000002' }, store: { uses: USES_ALL, sync, lastDesktopAccount: W, 'account:tok-00000002': WORK2 } })
-    await $.session.start(START)
-    expect(w.store.get('lastDesktopAccount')).toBe(W)
-    const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-    expect(await band.find({ key: 'sync-go' })).toBeUndefined()
-    await band.unmount()
-  })
-
-  test('沒換帳號、或設成只在按的時候：不問', async ($, on) => {
-    const sync = { on: true, pair: [W, P], folders: ['/w/server'], when: 'manual' }
-    const w = world(on, { store: { uses: USES_ALL, sync, lastDesktopAccount: P } })
-    await $.session.start(START)
-    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-    expect(await ui.find({ key: 'sync-go' })).toBeUndefined()
+    expect(await shows(ui, /對話會自動複製到「MiskaWu」/)).toBe(true)
     await ui.unmount()
   })
 

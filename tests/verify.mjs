@@ -132,7 +132,7 @@ for (const c of ['a', 'c', 'f', 'i']) {
   const got = readJson(path.join(tgt(app), `local_${uuid(c)}.json`))
   const orig = readJson(path.join(src(app0), `local_${uuid(c)}.json`))
   const expect = { ...orig, startedFromEnvironmentId: null, remoteMcpServersConfig: newMcp }
-  for (const k of ['bridgeSessionIds', 'sshReattach', 'scheduledTaskId', 'priorRemoteCliSessionIds']) delete expect[k]
+  for (const k of ['bridgeSessionIds', 'sshReattach', 'sshRemoteProcessId', 'scheduledTaskId', 'priorRemoteCliSessionIds']) delete expect[k]
   eq(got, expect, `session ${c}：只動了規則裡的欄位，其餘逐欄相同`)
 }
 eq(readJson(path.join(tgt(app), 'archived-sessions.idx')), { v: 1, archived: [`local_${uuid('c')}`] }, '目標封存清單')

@@ -8,8 +8,8 @@
     "tombstonePrefix": "deleted_",
     "archivedIndex": "archived-sessions.idx",
     "requiredKeys": ["sessionId", "cliSessionId", "cwd"],
-    "_dropKeys": "綁在舊帳號雲端的欄位：遠端控制橋接、斷線重接、排程。新帳號上指不到東西。",
-    "dropKeys": ["bridgeSessionIds", "sshReattach", "priorRemoteCliSessionIds", "scheduledTaskId"],
+    "_dropKeys": "綁在舊帳號的欄位：遠端控制橋接、斷線重接與它接的那個程序、排程。新帳號上指不到東西；自動同步更新已有的紀錄時，這些欄位留目標帳號自己的。",
+    "dropKeys": ["bridgeSessionIds", "sshReattach", "sshRemoteProcessId", "priorRemoteCliSessionIds", "scheduledTaskId"],
     "nullKeys": ["startedFromEnvironmentId"],
     "_replaceFromTarget": "換成新帳號最近一筆 session 的值（舊帳號的連接器新帳號未必有）。",
     "replaceFromTarget": ["remoteMcpServersConfig"]

@@ -13,9 +13,11 @@ import {
   fmtReset,
   isRestricted,
   meter,
+  mirrorTarget,
   nameOf,
   normalizeAccount,
   normalizeFolder,
+  normalizeMirror,
   normalizeSwitch,
   normalizeSync,
   normalizeUses,
@@ -25,10 +27,10 @@ import {
   partnerOf,
   syncRequest,
   syncRows,
-  syncScopeText,
   upsertSeen,
   usageFrom,
 } from '../hooks/model'
+import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo, type SessionSpec } from '../hooks/mirror'
 import { newCredentialId, planTerminal, removeFile, secretDelete, wrapperText } from '../hooks/terminal'
 
 // 2026-10-16 14:00（UTC+8）
@@ -74,7 +76,19 @@ describe('讀回儲存的資料', () => {
     })
     // 舊版的 folders／otherFolders 不再讀：回到預設的「全部資料夾都能換到任何帳號」
     expect(normalizeSwitch({ folders: { '/a': 'same-org' }, otherFolders: 'same-org' })).toEqual(DEFAULT_SWITCH)
-    expect(normalizeSync({ on: true, pair: ['a', 'b', 'c'], folders: ['/x', ''], when: 'manual' })).toEqual({ on: true, pair: ['a', 'b'], all: false, folders: ['/x'], when: 'manual' })
+    // 舊版的 when（換帳號後問／只在按的時候）不再讀：開著就自動同步
+    expect(normalizeSync({ on: true, pair: ['a', 'b', 'c'], folders: ['/x', ''], when: 'manual' })).toEqual({ on: true, pair: ['a', 'b'], all: false, folders: ['/x'] })
+    expect(normalizeMirror({ at: 5, active: 'a', to: 'b', toOrg: 'o', created: 2, updated: 'x', problem: 'weird', detail: '' })).toEqual({
+      at: 5,
+      active: 'a',
+      to: 'b',
+      toOrg: 'o',
+      created: 2,
+      updated: 0,
+      problem: null,
+      detail: null,
+    })
+    expect([normalizeMirror(null), normalizeMirror({ active: 'a' })]).toEqual([null, null])
     // 同步預設全部；沒有 all 欄位的舊設定，挑過資料夾的維持只同步挑的
     expect([normalizeSync(null).all, normalizeSync({}).all, normalizeSync({ all: false }).all, normalizeSync({ all: true, folders: ['/x'] }).all]).toEqual([true, true, false, true])
     expect(normalizeAccount({ label: 'x' })).toBe(null)
@@ -226,17 +240,30 @@ describe('輸入框上方的提示', () => {
 
 describe('同步', () => {
   test('要工具做什麼：全部資料夾連環境全部；勾選的只帶那些資料夾，環境跟著資料夾；沒有範圍或沒有夥伴就不做', async () => {
-    const sync = { on: true, pair: ['a', 'b'], all: false, folders: ['/x', '/y'], when: 'on-switch' as const }
+    const sync = { on: true, pair: ['a', 'b'], all: false, folders: ['/x', '/y'] }
     expect(syncRequest(sync, 'b')).toEqual({ from: 'b', projects: ['/x', '/y'], presets: 'folders' })
     expect(syncRequest({ ...sync, all: true }, 'b')).toEqual({ from: 'b', projects: 'all', presets: 'all' })
     expect(syncRequest({ ...sync, folders: [] }, 'b')).toBe(null)
     expect(syncRequest({ ...sync, all: true, folders: [] }, 'b')?.projects).toBe('all')
     expect(syncRequest(sync, null)).toBe(null)
-    expect([syncScopeText(sync), syncScopeText({ ...sync, all: true })]).toEqual(['同步的 2 個資料夾', '所有資料夾'])
+  })
+
+  test('自動同步的方向：從桌面 app 現在登入的帳號到同一對的另一個；沒開、不在這一對、挑資料夾卻沒挑就不做', async () => {
+    const sync = { on: true, pair: ['a', 'b'], all: true, folders: [] }
+    expect(mirrorTarget(sync, 'a')).toEqual({ from: 'a', to: 'b', scope: 'all' })
+    expect(mirrorTarget(sync, 'b')).toEqual({ from: 'b', to: 'a', scope: 'all' })
+    expect(mirrorTarget({ ...sync, all: false, folders: ['/x'] }, 'a')).toEqual({ from: 'a', to: 'b', scope: ['/x'] })
+    expect([mirrorTarget({ ...sync, on: false }, 'a'), mirrorTarget(sync, 'c'), mirrorTarget(sync, null), mirrorTarget({ ...sync, all: false }, 'a'), mirrorTarget({ ...sync, pair: ['a', 'a'] }, 'a')]).toEqual([
+      null,
+      null,
+      null,
+      null,
+      null,
+    ])
   })
 
   test('同步夥伴是一對帳號裡的另一個；目前帳號不在這一對裡就沒有', async () => {
-    const sync = { on: true, pair: ['a', 'b'], all: false, folders: [], when: 'on-switch' as const }
+    const sync = { on: true, pair: ['a', 'b'], all: false, folders: [] }
     expect([partnerOf(sync, 'a'), partnerOf(sync, 'b'), partnerOf(sync, 'c'), partnerOf({ ...sync, pair: [] }, 'a')]).toEqual(['b', 'a', null, null])
   })
 
@@ -355,5 +382,149 @@ describe('開新視窗跑帳號腳本', () => {
     expect(newCredentialId(() => (i++ % 16) / 16)).toBe('tok-01234567')
     expect(removeFile('wsl', '/tmp/braid-add-tok-1.json')).toEqual(['rm', '-f', '--', '/tmp/braid-add-tok-1.json'])
     expect(removeFile('windows', "C:\\T\\o'k.json")).toEqual(['powershell.exe', '-NoProfile', '-Command', "Remove-Item -LiteralPath 'C:\\T\\o''k.json' -Force -ErrorAction SilentlyContinue"])
+  })
+})
+
+// ── 自動同步的核心：用記憶體裡的假檔案系統，修改時間自己給 ──
+
+const SPEC: SessionSpec = {
+  filePrefix: 'local_',
+  tombstonePrefix: 'deleted_',
+  archivedIndex: 'archived-sessions.idx',
+  requiredKeys: ['sessionId', 'cliSessionId', 'cwd'],
+  dropKeys: ['bridgeSessionIds', 'sshReattach', 'sshRemoteProcessId', 'priorRemoteCliSessionIds', 'scheduledTaskId'],
+  nullKeys: ['startedFromEnvironmentId'],
+  replaceFromTarget: ['remoteMcpServersConfig'],
+}
+
+function memFs(files: Record<string, { text: string; mtime: number }>, dirs: string[] = []) {
+  const writes: string[] = []
+  let clock = 1_000
+  const io: MirrorIo = {
+    list: async path => {
+      const out = new Map<string, { name: string; kind: 'file' | 'dir'; size: number; mtimeMs: number; isLink: boolean }>()
+      for (const [f, v] of Object.entries(files)) {
+        if (!f.startsWith(`${path}/`)) continue
+        const rest = f.slice(path.length + 1)
+        const name = rest.split('/')[0] as string
+        if (rest.includes('/')) out.set(name, { name, kind: 'dir', size: 0, mtimeMs: 0, isLink: false })
+        else out.set(name, { name, kind: 'file', size: v.text.length, mtimeMs: v.mtime, isLink: false })
+      }
+      for (const d of dirs) if (d.startsWith(`${path}/`) && !d.slice(path.length + 1).includes('/')) out.set(d.slice(path.length + 1), { name: d.slice(path.length + 1), kind: 'dir', size: 0, mtimeMs: 0, isLink: false })
+      if (out.size === 0 && !dirs.includes(path)) throw new Error(`ENOENT ${path}`)
+      return [...out.values()]
+    },
+    read: async path => {
+      const f = files[path]
+      if (!f) throw new Error(`ENOENT ${path}`)
+      return f.text
+    },
+    write: async (path, text) => {
+      writes.push(path)
+      files[path] = { text, mtime: ++clock }
+    },
+  }
+  return { io, files, writes }
+}
+
+const r = (id: string, over: Record<string, unknown> = {}) => JSON.stringify({ sessionId: `local_${id}`, cliSessionId: `cli-${id}`, cwd: '/w', lastActivityAt: 100, ...over })
+const json = (text: string | undefined) => JSON.parse(text ?? 'null') as Record<string, unknown>
+
+describe('自動同步：複製側欄紀錄', () => {
+  test('新增：拿掉綁帳號的欄位、清空 nullKeys、連接器換成目標帳號最近一筆的；刪過的、缺欄位的、壞掉的、範圍外的不帶；來源一個檔都不寫', async () => {
+    const m = memFs({
+      '/s/local_a.json': { text: r('a', { bridgeSessionIds: ['b'], sshReattach: { pid: 1 }, sshRemoteProcessId: 7, scheduledTaskId: 't', startedFromEnvironmentId: 'e', remoteMcpServersConfig: { slack: 1 }, title: 'A' }), mtime: 10 },
+      '/s/local_b.json': { text: r('b', { cwd: '/other' }), mtime: 10 },
+      '/s/local_c.json': { text: r('c'), mtime: 10 },
+      '/s/local_d.json': { text: JSON.stringify({ sessionId: 'local_d', cwd: '/w' }), mtime: 10 },
+      '/s/local_e.json': { text: '{壞掉', mtime: 10 },
+      '/s/notes.txt': { text: 'x', mtime: 10 },
+      '/s/local_w.json': { text: r('w', { cwd: '/w/.claude/worktrees/x', originCwd: '/w' }), mtime: 10 },
+      '/t/deleted_c': { text: '1', mtime: 1 },
+      '/t/local_old.json': { text: r('old', { lastActivityAt: 1, remoteMcpServersConfig: { old: 1 } }), mtime: 1 },
+      '/t/local_new.json': { text: r('new', { lastActivityAt: 50, remoteMcpServersConfig: { mine: 1 } }), mtime: 1 },
+    })
+    expect(await mirrorSessions(m.io, SPEC, '/s', '/t', '/', ['/w'])).toEqual({ created: 2, updated: 0 })
+    expect(json(m.files['/t/local_a.json']?.text)).toEqual({ sessionId: 'local_a', cliSessionId: 'cli-a', cwd: '/w', lastActivityAt: 100, startedFromEnvironmentId: null, remoteMcpServersConfig: { mine: 1 }, title: 'A' })
+    expect(json(m.files['/t/local_w.json']?.text).originCwd).toBe('/w') // 資料夾看 originCwd
+    expect(m.writes.sort()).toEqual(['/t/local_a.json', '/t/local_w.json'])
+  })
+
+  test('更新：來源比較新就覆寫，綁帳號的欄位留目標自己的；目標檔案比較新、或最後活動比較晚就不動；寫過一次就不再重寫', async () => {
+    const m = memFs({
+      '/s/local_a.json': { text: r('a', { title: '新', lastActivityAt: 200, bridgeSessionIds: ['s'], sshRemoteProcessId: 7, startedFromEnvironmentId: 'es', remoteMcpServersConfig: { s: 1 } }), mtime: 20 },
+      '/t/local_a.json': { text: r('a', { title: '舊', lastActivityAt: 100, bridgeSessionIds: ['t'], sshRemoteProcessId: 9, startedFromEnvironmentId: 'et', remoteMcpServersConfig: { t: 1 } }), mtime: 10 },
+      '/s/local_b.json': { text: r('b', { title: '這邊' }), mtime: 20 },
+      '/t/local_b.json': { text: r('b', { title: '那邊後來改的' }), mtime: 30 },
+      '/s/local_c.json': { text: r('c', { title: '這邊', lastActivityAt: 100 }), mtime: 20 },
+      '/t/local_c.json': { text: r('c', { title: '那邊聊得比較晚', lastActivityAt: 300 }), mtime: 10 },
+      '/s/local_d.json': { text: r('d', { title: '只有封存變了', isArchived: true }), mtime: 20 },
+      '/t/local_d.json': { text: r('d', { title: '只有封存變了', isArchived: false, sshReattach: { pid: 3 } }), mtime: 10 },
+    })
+    expect(await mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all')).toEqual({ created: 0, updated: 2 })
+    expect(json(m.files['/t/local_a.json']?.text)).toEqual({
+      sessionId: 'local_a',
+      cliSessionId: 'cli-a',
+      cwd: '/w',
+      lastActivityAt: 200,
+      title: '新',
+      bridgeSessionIds: ['t'],
+      sshRemoteProcessId: 9,
+      startedFromEnvironmentId: 'et',
+      remoteMcpServersConfig: { t: 1 },
+    })
+    expect(json(m.files['/t/local_b.json']?.text).title).toBe('那邊後來改的')
+    expect(json(m.files['/t/local_c.json']?.text).title).toBe('那邊聊得比較晚')
+    expect(json(m.files['/t/local_d.json']?.text)).toMatchObject({ isArchived: true, sshReattach: { pid: 3 } })
+    expect(json(m.files['/t/archived-sessions.idx']?.text)).toEqual({ v: 1, archived: ['local_d'] })
+    m.writes.length = 0
+    expect(await mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all')).toEqual({ created: 0, updated: 0 })
+    expect(m.writes).toEqual([])
+  })
+
+  test('封存清單：加進封存的、拿掉取消封存的，其他的留著、照字母排；沒有清單又沒有封存的不建；看不懂的格式不動', async () => {
+    const m = memFs({
+      '/s/local_a.json': { text: r('a', { isArchived: true }), mtime: 20 },
+      '/s/local_b.json': { text: r('b', { isArchived: false }), mtime: 20 },
+      '/t/local_b.json': { text: r('b', { isArchived: true }), mtime: 10 },
+      '/t/archived-sessions.idx': { text: JSON.stringify({ v: 1, archived: ['local_z', 'local_b'] }), mtime: 10 },
+    })
+    await mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all')
+    expect(json(m.files['/t/archived-sessions.idx']?.text)).toEqual({ v: 1, archived: ['local_a', 'local_z'] })
+
+    const n = memFs({ '/s/local_a.json': { text: r('a'), mtime: 20 }, '/t/local_x.json': { text: r('x'), mtime: 1 } })
+    await mirrorSessions(n.io, SPEC, '/s', '/t', '/', 'all')
+    expect(n.files['/t/archived-sessions.idx']).toBeUndefined()
+
+    const odd = JSON.stringify({ v: 2, archived: ['local_q'] })
+    const o = memFs({ '/s/local_a.json': { text: r('a', { isArchived: true }), mtime: 20 }, '/t/archived-sessions.idx': { text: odd, mtime: 1 } })
+    await mirrorSessions(o.io, SPEC, '/s', '/t', '/', 'all')
+    expect(o.files['/t/archived-sessions.idx']?.text).toBe(odd)
+  })
+
+  test('目標資料夾讀不到就整個失敗（不會寫到別的地方）', async () => {
+    const m = memFs({ '/s/local_a.json': { text: r('a'), mtime: 20 } })
+    await expect(mirrorSessions(m.io, SPEC, '/s', '/missing', '/', 'all')).rejects.toThrow(/ENOENT/)
+    expect(m.writes).toEqual([])
+  })
+
+  test('組織資料夾：指定的有就用；沒指定挑最近有寫入紀錄的；帳號沒有資料夾回 null', async () => {
+    const m = memFs({
+      '/root/acc/o1/local_a.json': { text: '{}', mtime: 50 },
+      '/root/acc/o2/local_b.json': { text: '{}', mtime: 90 },
+      '/root/acc/o2/archived-sessions.idx': { text: '{}', mtime: 10 },
+    })
+    expect(await orgDirOf(m.io, '/root', '/', 'acc', 'o1', SPEC)).toBe('o1')
+    expect(await orgDirOf(m.io, '/root', '/', 'acc', 'nope', SPEC)).toBe('o2')
+    expect(await orgDirOf(m.io, '/root', '/', 'acc', null, SPEC)).toBe('o2')
+    expect(await orgDirOf(m.io, '/root', '/', 'ghost', null, SPEC)).toBe(null)
+  })
+
+  test('規則檔：讀 spec.json 的 sessions 段（含 BOM）；缺欄位或壞掉回 null', async () => {
+    const text = `\uFEFF${JSON.stringify({ sessions: { ...SPEC, dir: 'claude-code-sessions' }, presets: {} })}`
+    expect(parseSpec(text)).toEqual(SPEC)
+    expect(parseSpec(JSON.stringify({ sessions: { ...SPEC, dropKeys: 'x' } }))).toBe(null)
+    expect(parseSpec(JSON.stringify({ sessions: { ...SPEC, filePrefix: '' } }))).toBe(null)
+    expect(parseSpec('{')).toBe(null)
   })
 })

@@ -1,9 +1,10 @@
 // braid：Claude 的多帳號工具。/braid 打開面板，四個分頁對應三種用法加帳號清單：
 //   帳號：這台電腦認得的帳號與各自的用量；新增帳號（一年期憑證，存在系統鑰匙圈）
 //   切換：用量快到門檻時，輸入框上方提示，一鍵用另一個帳號在新視窗接著同一段對話
-//   同步：桌面 app 換帳號後，把指定資料夾的側欄對話與環境從另一個帳號帶過來
+//   同步：桌面 app 開著時，把現在登入的帳號的側欄對話自動複製到另一個帳號，換過去就看得到
 //   遷移：桌面 app 換帳號後，把舊帳號的對話與環境搬過來（/braid migrate 也可以直接開）
-// 寫入桌面 app 資料的事（遷移、同步、還原）一律交給 tool/ 的工具在獨立視窗做：它會等 app 結束、先備份。
+// 自動同步只寫沒登入的那個帳號的側欄資料夾（app 開著也安全，見 mirror.ts）。其餘寫入桌面 app 資料的事
+// （遷移、同步環境、還原）一律交給 tool/ 的工具在獨立視窗做：它會等 app 結束、先備份。
 // mod 本身不碰登入憑證：新增帳號與接著做都是 tool/cli、tool/windows 的腳本在新視窗裡自己取用。
 // 引擎不准把 $ 經由資料結構傳遞，所以動作的分派寫成 switch，畫面的函式直接收 $。
 import { atom, read, update } from 'claude-code'
@@ -13,6 +14,7 @@ import type {
   BraidAccount,
   BraidAdd,
   BraidCredential,
+  BraidMirror,
   BraidPlatform,
   BraidSwitch,
   BraidSync,
@@ -20,8 +22,9 @@ import type {
   BraidUsage,
   BraidUses,
 } from '../types'
-import { backupLabel, scanDesktop, type DesktopEnv, type DesktopIo } from './desktop'
+import { backupLabel, desktopPaths, scanDesktop, type DesktopEnv, type DesktopIo, type DesktopPaths } from './desktop'
 import { manualPath, parseDryRun, planLaunch, toolArgs, type ToolRequest } from './launch'
+import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo } from './mirror'
 import {
   bandFor,
   candidates,
@@ -33,9 +36,11 @@ import {
   FIVE_HOUR_CHOICES,
   fmtReset,
   meter,
+  mirrorTarget,
   nameOf,
   normalizeAccount,
   normalizeFolder,
+  normalizeMirror,
   normalizeSwitch,
   normalizeSync,
   normalizeUses,
@@ -49,7 +54,6 @@ import {
   SEVEN_DAY_CHOICES,
   syncRequest,
   syncRows,
-  syncScopeText,
   upsertSeen,
   usageFrom,
   WINDOW_NAMES,
@@ -80,7 +84,7 @@ const editingAtom = atom({ plugin: 'braid', key: 'editing' } as const, null)
 const noticeAtom = atom({ plugin: 'braid', key: 'notice' } as const, null)
 const handoffAtom = atom({ plugin: 'braid', key: 'handoff' } as const, null)
 const snoozeAtom = atom({ plugin: 'braid', key: 'snooze' } as const, null)
-const changedFromAtom = atom({ plugin: 'braid', key: 'changedFrom' } as const, null)
+const mirrorAtom = atom({ plugin: 'braid', key: 'mirror' } as const, null)
 const tzAtom = atom({ plugin: 'braid', key: 'tz' } as const, 0)
 
 // ── 指令 ────────────────────────────────────────────────────
@@ -91,7 +95,7 @@ type Action = { name: ActionName; aliases: readonly string[]; usage: string; sum
 const ACTIONS: readonly Action[] = [
   { name: 'accounts', aliases: ['帳號'], usage: 'accounts', summary: '打開面板的帳號頁：這台電腦的帳號與用量、新增帳號' },
   { name: 'switch', aliases: ['切換'], usage: 'switch', summary: '打開面板的切換頁：用量快用完時換哪個帳號接著做' },
-  { name: 'sync', aliases: ['同步'], usage: 'sync', summary: '打開面板的同步頁：桌面 app 換帳號後，指定資料夾的對話跟著過去' },
+  { name: 'sync', aliases: ['同步'], usage: 'sync', summary: '打開面板的同步頁：桌面 app 的兩個帳號自動同步對話，額度用完換過去就能接著做' },
   {
     name: 'migrate',
     aliases: ['遷移'],
@@ -187,11 +191,13 @@ async function loadStore($: $): Promise<void> {
     if (a) accounts[a.id] = a
   }
   const snooze = await $.store.get('snooze')
+  const mirror = normalizeMirror(await $.store.get('mirror'))
   await update($, usesAtom, () => uses)
   await update($, switchAtom, () => sw)
   await update($, syncAtom, () => sy)
   await update($, accountsAtom, () => accounts)
   await update($, snoozeAtom, () => (typeof snooze === 'string' ? snooze : null))
+  await update($, mirrorAtom, () => mirror)
 }
 
 async function putAccount($: $, a: BraidAccount): Promise<void> {
@@ -237,6 +243,9 @@ async function onUsage($: $, rateLimits: readonly RateLimit[]): Promise<void> {
   const account = id ? (await read($, accountsAtom))[id] : undefined
   if (account) await putAccount($, { ...account, usage })
   await refreshStatus($)
+  // 快用完了：馬上再同步一次，換過去時連剛剛的對話都在（不在這個事件裡等，讀寫桌面 app 的資料夾要一點時間）
+  const now = await $.clock.now()
+  if (bandFor(await read($, accountsAtom), id, usage, await read($, switchAtom), await $.session.cwd(), now, null)) $.clock.after(1, () => runMirror($, 'urgent'))
 }
 
 /** 狀態列：開了用量切換才顯示目前帳號與 5 小時用量。 */
@@ -317,22 +326,101 @@ async function setTab($: $, tab: BraidTab): Promise<void> {
   if (tab !== 'accounts') await ensureDesktop($)
 }
 
-async function ensureDesktop($: $, force = false): Promise<void> {
-  if (!force && (await read($, desktopAtom)) !== null) return
-  const platform = (await read($, platformAtom)) ?? 'other'
-  const io: DesktopIo = {
+function desktopIo($: $): DesktopIo {
+  return {
     list: path => $.fs.list(path),
     read: path => $.fs.read(path),
     exists: path => $.fs.exists(path),
     run: (argv, cwd) => $.process.run(argv, { timeoutMs: 15_000, ...(cwd ? { cwd } : {}) }),
   }
-  const env: DesktopEnv = {
-    home: await $.env.get('HOME'),
-    appData: await $.env.get('APPDATA'),
-    userProfile: await $.env.get('USERPROFILE'),
-  }
-  const scanned = await scanDesktop(io, env, platform)
+}
+
+async function desktopEnv($: $): Promise<DesktopEnv> {
+  return { home: await $.env.get('HOME'), appData: await $.env.get('APPDATA'), userProfile: await $.env.get('USERPROFILE') }
+}
+
+async function ensureDesktop($: $, force = false): Promise<void> {
+  if (!force && (await read($, desktopAtom)) !== null) return
+  const platform = (await read($, platformAtom)) ?? 'other'
+  const scanned = await scanDesktop(desktopIo($), await desktopEnv($), platform)
   await update($, desktopAtom, () => scanned)
+}
+
+// ── 自動同步 ────────────────────────────────────────────────
+
+// 每個對話各有一個計時器；跨對話用 $.store 的 mirrorAt 節流，同時開好幾個對話也大約一分鐘一次
+let mirrorTimer: { cancel: () => void } | null = null
+let mirroring = false
+// 桌面 app 的資料夾：WSL 裡要問 cmd.exe，不必每分鐘問一次
+let pathsCache: DesktopPaths | null = null
+const MIRROR_EVERY_MS = 60_000
+
+/** 多久內同步過就不再做：計時器一分鐘一次；用量快用完時至少隔 10 秒；按「現在同步」不等。 */
+const MIRROR_GAP: Record<'tick' | 'urgent' | 'now', number> = { tick: MIRROR_EVERY_MS - 5_000, urgent: 10_000, now: 0 }
+
+/** 自動同步一次，結果記在 $.store（面板與提示看它）。沒開同步、這台沒有桌面 app 就什麼都不做。 */
+async function runMirror($: $, mode: 'tick' | 'urgent' | 'now'): Promise<void> {
+  if (mirroring) return
+  const uses = await read($, usesAtom)
+  const sy = await read($, syncAtom)
+  const platform = await read($, platformAtom)
+  if (!uses?.sync || !sy.on || sy.pair.length !== 2 || !platform || platform === 'other') return
+  const now = await $.clock.now()
+  const last = await $.store.get('mirrorAt')
+  if (typeof last === 'number' && now - last < MIRROR_GAP[mode]) return
+  mirroring = true
+  try {
+    await $.store.set('mirrorAt', now)
+    const status = await mirrorOnce($, platform, now)
+    await $.store.set('mirror', status)
+    await update($, mirrorAtom, () => status)
+  } finally {
+    mirroring = false
+  }
+}
+
+async function mirrorOnce($: $, platform: BraidPlatform, now: number): Promise<BraidMirror> {
+  const base: BraidMirror = { at: now, active: null, to: null, toOrg: null, created: 0, updated: 0, problem: null, detail: null }
+  pathsCache ??= await desktopPaths(desktopIo($), await desktopEnv($), platform)
+  if (!pathsCache) return { ...base, problem: 'no-desktop' }
+  const sep = platform === 'windows' ? '\\' : '/'
+  // 桌面 app 現在登入誰：app 換帳號當下就改 config.json 的這一欄
+  let active: string | null = null
+  try {
+    const cfg: unknown = JSON.parse(await $.fs.read(`${pathsCache.appData}${sep}config.json`))
+    const v = typeof cfg === 'object' && cfg !== null ? (cfg as Record<string, unknown>).lastKnownAccountUuid : null
+    active = typeof v === 'string' && v ? v : null
+  } catch {
+    active = null
+  }
+  if (!active) return { ...base, problem: 'no-active' }
+  const target = mirrorTarget(await read($, syncAtom), active)
+  if (!target) return { ...base, active }
+  let spec = null
+  try {
+    spec = parseSpec(await $.fs.read(`${$.plugin.root}/tool/spec.json`))
+  } catch {
+    spec = null
+  }
+  if (!spec) return { ...base, active, to: target.to, problem: 'no-spec' }
+  const io: MirrorIo = { list: path => $.fs.list(path), read: path => $.fs.read(path), write: (path, text) => $.fs.write(path, text) }
+  const root = `${pathsCache.appData}${sep}claude-code-sessions`
+  const mine = (await read($, accountsAtom))[active]
+  const fromOrg = await orgDirOf(io, root, sep, active, mine?.orgId ?? null, spec)
+  const toOrg = await orgDirOf(io, root, sep, target.to, null, spec)
+  if (!toOrg) return { ...base, active, to: target.to, problem: 'no-target' }
+  if (!fromOrg) return { ...base, active, to: target.to, toOrg }
+  try {
+    const r = await mirrorSessions(io, spec, `${root}${sep}${active}${sep}${fromOrg}`, `${root}${sep}${target.to}${sep}${toOrg}`, sep, target.scope)
+    return { ...base, active, to: target.to, toOrg, ...r }
+  } catch (err) {
+    return { ...base, active, to: target.to, toOrg, problem: 'failed', detail: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/** 同步對象的顯示名稱：沒當過目前帳號的桌面帳號，用它的組織去借 braid 新增帳號的名稱（nameOf）。 */
+function mirrorName(accounts: Record<string, BraidAccount>, id: string, org: string | null): string {
+  return nameOf(accounts, id, org ? [{ account: id, org, sessions: 0, lastActivity: 0, folders: [] }] : [])
 }
 
 // ── 新增帳號 ────────────────────────────────────────────────
@@ -581,7 +669,7 @@ async function drawOnboarding($: $, ui: UI) {
   const options: { id: keyof BraidUses; title: string; desc: string }[] = [
     { id: 'migrate', title: '換帳號了，把舊對話搬過來', desc: '桌面 app 舊帳號在 Code 分頁的對話與環境，複製到現在的帳號。搬一次就好。' },
     { id: 'switch', title: '用量用完，換另一個帳號接著做', desc: '快到上限時提醒，一鍵用另一個帳號在新視窗接著同一段對話。要兩個以上的帳號。' },
-    { id: 'sync', title: '幾個帳號長期一起用', desc: '桌面 app 換帳號後，對話與環境跟著過去（預設全部資料夾，也可以只挑幾個）。' },
+    { id: 'sync', title: '幾個帳號長期一起用', desc: '桌面 app 的兩個帳號自動同步對話，用量用完換過去就能接著做（預設全部資料夾，也可以只挑幾個）。' },
   ]
   return (
     <Box flexDirection="column" gap={1}>
@@ -1019,20 +1107,44 @@ async function drawSync($: $, ui: UI) {
           {sy.all ? drawSyncAll() : drawSyncPicked()}
         </Box>
       )}
-      <Select
-        key="sy-when"
-        label="什麼時候"
-        options={[
-          { value: 'on-switch', label: '換帳號後第一次打開時問我' },
-          { value: 'manual', label: '只在我按的時候' },
-        ]}
-        value={sy.when}
-        onSelect={v => putSync($, s => ({ ...s, when: v === 'manual' ? 'manual' : 'on-switch' }))}
-      />
-      {request && <Button key="sy-now" label={`從「${partnerName}」帶過來…`} variant="primary" onPress={async () => say($, await launchTool($, request))} />}
+      {sy.on && sy.pair.length === 2 && drawMirrorStatus($, ui, sy, accounts, await read($, mirrorAtom), await $.clock.now())}
+      {partner && (
+        <Box key="sy-env-box" flexDirection="column">
+          <Text bold>已儲存的環境</Text>
+          <Text dimColor>環境存在 app 的內部資料庫，app 開著時寫不進去，所以不自動同步。要帶過來時按這裡：開獨立視窗，先結束 Claude，寫入前備份。</Text>
+          {request && <Button key="sy-env" label={`從「${partnerName}」帶環境過來…`} onPress={async () => say($, await launchTool($, request))} />}
+        </Box>
+      )}
       <Text dimColor>
-        同步＝把另一個帳號在這些資料夾的對話與環境，帶到桌面 app 現在登入的帳號。換到另一個帳號時再帶一次，兩邊就一樣了。寫入時要先結束 Claude，會開獨立視窗處理，寫入前先備份。
+        自動同步：桌面 app 開著時，braid 大約每分鐘把現在登入的帳號的對話複製到另一個帳號，用量快用完時再馬上同步一次。換帳號後側欄就是最新的，不用結束 Claude。只新增與更新，不刪除：在一邊刪掉的對話，另一邊還在（在那邊刪過的也不會再帶回去）。
       </Text>
+    </Box>
+  )
+}
+
+/** 同步頁的狀態：桌面 app 現在登入誰、複製到哪、上次的結果；沒做成就說為什麼。 */
+function drawMirrorStatus($: $, ui: UI, sy: BraidSync, accounts: Record<string, BraidAccount>, m: BraidMirror | null, now: number) {
+  const { Box, Text, Button } = ui
+  const name = (id: string, org: string | null = null) => mirrorName(accounts, id, org)
+  let line: string
+  let warn = false
+  if (!m) line = '還沒同步過，馬上開始。'
+  else if (m.problem === 'no-desktop') [line, warn] = ['找不到桌面 app 的資料夾。', true]
+  else if (m.problem === 'no-active') [line, warn] = ['讀不到桌面 app 現在登入哪個帳號。', true]
+  else if (m.problem === 'no-spec') [line, warn] = ['讀不到同步規則（tool/spec.json），請重新安裝 braid。', true]
+  else if (m.problem === 'no-target' && m.to) [line, warn] = [`「${name(m.to)}」還沒在桌面 app 用過 Code 分頁：先在 app 登入它、開一個對話，之後才同步得過去。`, true]
+  else if (m.problem === 'failed') [line, warn] = [`上次同步失敗：${m.detail ?? '原因不明'}`, true]
+  else if (m.active && !sy.pair.includes(m.active)) line = `桌面 app 現在登入的是「${name(m.active)}」，不在這一對裡，先不同步。`
+  else if (!m.to) line = sy.all || sy.folders.length > 0 ? '等下一次同步。' : '還沒挑要同步的資料夾。'
+  else {
+    const what = m.created + m.updated > 0 ? `新增 ${m.created}、更新 ${m.updated}` : '已經一樣了'
+    line = `桌面 app 現在登入「${m.active ? name(m.active) : ''}」，對話會自動複製到「${name(m.to, m.toOrg)}」：換過去就看得到，不用結束 Claude。上次同步 ${ago(now - m.at)}（${what}）。`
+  }
+  return (
+    <Box key="sy-status" flexDirection="column">
+      <Text bold>狀態</Text>
+      <Text color={warn ? 'warning' : undefined}>{line}</Text>
+      <Button key="sy-now" label="現在同步" onPress={() => runMirror($, 'now')} />
     </Box>
   )
 }
@@ -1105,17 +1217,11 @@ export const register: Register = on => {
       const account = upsertSeen(await read($, accountsAtom), seen, await $.clock.now())
       await putAccount($, account)
       await update($, currentAtom, () => account.id)
-      // 換帳號後問要不要同步：只記桌面 app 的帳號。CLI 自己的登入、「接著做」開的視窗也會開對話，
-      // 一起記的話，中間開過一個，桌面 app 真的換帳號時就認成從那個帳號換過來，漏問（10-19 修）
-      if (seen.source === 'desktop') {
-        const last = await $.store.get('lastDesktopAccount')
-        if (typeof last === 'string' && last !== account.id) {
-          await update($, changedFromAtom, () => last)
-          if ((await read($, usesAtom))?.sync) await ensureDesktop($) // 提示裡要叫得出另一個帳號的名字
-        }
-        await $.store.set('lastDesktopAccount', account.id)
-      }
     }
+    // 自動同步：開始後先做一次，之後每分鐘一次（沒開同步時 runMirror 直接回來）
+    mirrorTimer?.cancel()
+    mirrorTimer = $.clock.every(MIRROR_EVERY_MS, () => runMirror($, 'tick'))
+    $.clock.after(3_000, () => runMirror($, 'tick'))
     try {
       await onUsage($, (await $.session.usage()).rateLimits)
     } catch {
@@ -1156,7 +1262,7 @@ export const register: Register = on => {
     return { drop: `這段對話已經交給「${handed.label}」在新視窗接著做（那邊是複製出來的新對話）。確定要在這裡繼續，就再送一次。` }
   })
 
-  // ── 輸入框上方：換帳號後問要不要同步、用量快到門檻時提示換帳號 ──
+  // ── 輸入框上方：交給另一個帳號之後的提醒、用量快到門檻時提示換帳號 ──
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
@@ -1178,32 +1284,6 @@ export const register: Register = on => {
       )
     }
 
-    const sy = await read($, syncAtom)
-    const from = await read($, changedFromAtom)
-    const platform = await read($, platformAtom)
-    const profiles = (await read($, desktopAtom))?.profiles ?? []
-    const request = current ? syncRequest(sy, partnerOf(sy, current)) : null
-    if (uses?.sync && sy.on && sy.when === 'on-switch' && from && current && platform !== 'other' && request?.from === from) {
-      return (
-        <Box flexDirection="row" gap={1} alignItems="center">
-          <Text color="warning" bold>
-            braid
-          </Text>
-          <Text wrap="truncate">{`從「${nameOf(accounts, from, profiles)}」換到「${nameOf(accounts, current, profiles)}」了。要把${syncScopeText(sy)}的對話帶過來嗎？`}</Text>
-          <Button
-            key="sync-go"
-            label="帶過來…"
-            variant="primary"
-            onPress={async () => {
-              $.ui.toast(await launchTool($, request))
-              await update($, changedFromAtom, () => null)
-            }}
-          />
-          <Button key="sync-skip" label="這次不用" role="dismiss" onPress={() => update($, changedFromAtom, () => null)} />
-        </Box>
-      )
-    }
-
     if (!uses?.switch) return next(e)
     const now = await $.clock.now()
     const band = bandFor(accounts, current, await read($, liveAtom), await read($, switchAtom), await $.session.cwd(), now, await read($, snoozeAtom))
@@ -1212,11 +1292,19 @@ export const register: Register = on => {
     const reset = fmtReset(band.resetsAt, now, await read($, tzAtom))
     const head = band.kind === 'out' ? `${cur.label} ${WINDOW_NAMES[band.window]}用量用完了` : `${cur.label} ${WINDOW_NAMES[band.window]}用量 ${band.pct}%`
     const best = band.best
+    // 桌面 app 的這個帳號有在自動同步：對話已經複製到另一個帳號，在 app 換過去就能接著做
+    const sy = await read($, syncAtom)
+    const m = await read($, mirrorAtom)
+    const synced = uses.sync && sy.on && m && m.active === current && m.to && !m.problem ? mirrorName(accounts, m.to, m.toOrg) : null
     const detail = best
-      ? `「${best.label}」可以接手：在新視窗接著這段對話。`
-      : band.manual
-        ? `可以在桌面 app 換成「${band.manual.label}」，再用「同步」把對話帶過去。`
-        : '沒有其他帳號可以接手；在 braid 面板可以新增。'
+      ? synced
+        ? `「${best.label}」可以在新視窗接著這段對話；或在桌面 app 換成「${synced}」，對話都已同步過去。`
+        : `「${best.label}」可以接手：在新視窗接著這段對話。`
+      : synced
+        ? `在桌面 app 換成「${synced}」就能接著做，對話都已同步過去。`
+        : band.manual
+          ? `可以在桌面 app 換成「${band.manual.label}」；在 braid 開啟同步，對話就會自動跟過去。`
+          : '沒有其他帳號可以接手；在 braid 面板可以新增。'
     return (
       <Box flexDirection="column">
         <Text wrap="truncate">

@@ -43,14 +43,31 @@ export type BraidSwitch = {
 }
 
 export type BraidSync = {
+  /** 開著就自動同步：桌面 app 現在登入的是其中一個時，它的對話隨時複製到另一個 */
   on: boolean
-  /** 一起同步的兩個帳號；換到其中一個時，從另一個把對話帶過來 */
+  /** 一起同步的兩個帳號 */
   pair: string[]
   /** true＝全部資料夾（預設，之後新出現的也算）；false＝只同步 folders。切回全部時 folders 留著 */
   all: boolean
   folders: string[]
-  /** 換帳號後第一次打開時問要不要同步，或只在按按鈕時同步 */
-  when: 'on-switch' | 'manual'
+}
+
+/** 自動同步沒做成的原因：找不到桌面 app、讀不到它登入誰、讀不到規則、對方帳號沒有資料夾、寫入失敗。 */
+export type BraidMirrorProblem = 'no-desktop' | 'no-active' | 'no-spec' | 'no-target' | 'failed'
+
+/** 自動同步最近一次的結果。 */
+export type BraidMirror = {
+  at: number
+  /** 桌面 app 現在登入的帳號（app 的 config.json）；讀不到是 null */
+  active: string | null
+  /** 複製到哪個帳號、它的組織資料夾（叫名稱用）；這次沒有對象是 null */
+  to: string | null
+  toOrg: string | null
+  created: number
+  updated: number
+  problem: BraidMirrorProblem | null
+  /** 寫入失敗時的訊息 */
+  detail: string | null
 }
 
 export type BraidTab = 'accounts' | 'switch' | 'sync' | 'migrate'
@@ -95,7 +112,7 @@ declare module 'claude-code' {
       notice: string | null
       handoff: BraidHandoff | null
       snooze: string | null
-      changedFrom: string | null
+      mirror: BraidMirror | null
       tz: number
     }
   }
