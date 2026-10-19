@@ -70,8 +70,10 @@ node verify.mjs picked "$W" "$W.before"
 restore_ps "$W/backups-pick"
 
 echo; echo "######## 備份資料夾同一秒不撞名"
-# 先把接下來 10 秒會用到的時間名稱（本地時間與 UTC 都建）佔掉：工具要改用 -2，不能寫進已存在的資料夾
-mkdir -p "$W/backups-col"; for i in $(seq 0 10); do mkdir -p "$W/backups-col/$(date -d "+$i sec" +%Y%m%d-%H%M%S)" "$W/backups-col/$(date -u -d "+$i sec" +%Y%m%d-%H%M%S)"; done
+# 先把接下來 30 秒會用到的時間名稱（本地時間與 UTC 都建）佔掉：工具要改用 -2，不能寫進已存在的資料夾。
+# 時間只讀一次、以它為基準連續建：每圈重讀現在時間的話，/mnt/c 上建資料夾慢，跨秒就會空出一格（2026-10-19 假紅過）
+mkdir -p "$W/backups-col"; base=$(date +%s)
+for i in $(seq 0 30); do mkdir -p "$W/backups-col/$(date -d "@$((base + i))" +%Y%m%d-%H%M%S)" "$W/backups-col/$(date -u -d "@$((base + i))" +%Y%m%d-%H%M%S)"; done
 BK="$W/backups-col" run_ps -Projects "/p/a" -Presets none >/dev/null
 made=$(find "$W/backups-col" -name manifest.json | xargs -r dirname)
 [ "$(echo "$made" | grep -c -- '-2$')" = 1 ] && [ "$(find "$W/backups-col" -mindepth 2 | grep -vc "^$made")" = 0 ] \
