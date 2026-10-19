@@ -274,21 +274,20 @@ describe('用量快用完：輸入框上方的提示', () => {
     expect('drop' in slash).toBe(false)
   })
 
-  test('組織不同的帳號不會被推薦：公司資料夾只給「打開 braid」，設成都可以的資料夾才給個人帳號', async ($, on) => {
+  test('預設所有資料夾都能換到個人帳號；把這個資料夾設成只換同組織後，就不推薦個人帳號、只給「打開 braid」', async ($, on) => {
     const home = { ...PERSONAL, credential: 'keychain', credentialId: 'tok-00000001' }
-    const store = { uses: USES_ALL, [`account:${P}`]: home }
-    const w = world(on, { store })
+    const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: home } })
     await $.session.start(START)
     await $.session.measure(measure(95) as never)
     let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-    expect(await ui.find({ key: 'band-handoff' })).toBeUndefined()
-    expect(await ui.find({ key: 'band-open' })).toBeDefined()
+    expect((await ui.find({ key: 'band-handoff' }))?.props.label).toBe('用「個人」接著做')
     await ui.unmount()
-    w.store.set('switch', { on: true, fiveHour: 90, sevenDay: 95, order: [], folders: { '/w/server': 'any' }, otherFolders: 'same-org' })
+    w.store.set('switch', { on: true, fiveHour: 90, sevenDay: 95, order: [], restrict: true, restricted: ['/w'] })
     await $.session.start(START)
     await $.session.measure(measure(95) as never)
     ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-    expect((await ui.find({ key: 'band-handoff' }))?.props.label).toBe('用「個人」接著做')
+    expect(await ui.find({ key: 'band-handoff' })).toBeUndefined() // /w/server 在限制的 /w 底下
+    expect(await ui.find({ key: 'band-open' })).toBeDefined()
     await ui.unmount()
   })
 
@@ -467,24 +466,50 @@ describe('新增帳號', () => {
 })
 
 describe('切換設定', () => {
-  test('門檻、順序與資料夾規則都存回去；列出各帳號在這個資料夾能不能接手', async ($, on) => {
+  test('門檻與順序存回去；資料夾預設全部都能換，沒有清單也沒有下拉', async ($, on) => {
     const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL, 'account:tok-00000002': WORK2 } })
     await $.session.start(START)
     await $.command.run(RUN('切換'))
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ ...PANE, surface })
-      expect(await shows(ui, /組織不同，這個資料夾不會換到它/)).toBe(true)
+      expect((await ui.find({ key: 'sw-scope' }))?.props.value).toBe('all')
+      expect(await ui.find({ key: 'sw-add-here' })).toBeUndefined()
       expect(await shows(ui, /可以接手/)).toBe(true)
+      expect(await shows(ui, /這個資料夾只換同組織的帳號/)).toBe(false)
       await ui.unmount()
     }
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
     await ui.select({ key: 'sw-five', value: '80' })
     await ui.select({ key: 'sw-seven', value: 'off' })
-    await ui.select({ key: 'rule-/w/server', value: 'any' })
     await ui.press({ key: `up-${P}` })
-    const sw = (await w.store.get('switch')) as { fiveHour: number; sevenDay: number | null; folders: Record<string, string>; order: string[] }
-    expect([sw.fiveHour, sw.sevenDay, sw.folders]).toEqual([80, null, { '/w/server': 'any' }])
+    const sw = w.store.get('switch') as { fiveHour: number; sevenDay: number | null; restrict: boolean; order: string[] }
+    expect([sw.fiveHour, sw.sevenDay, sw.restrict]).toEqual([80, null, false])
     expect(sw.order.indexOf(P)).toBeLessThan(sw.order.indexOf('tok-00000002'))
+    await ui.unmount()
+  })
+
+  test('要分開時：改成「有些資料夾只換同組織」，一個一個加（這個對話的、從清單挑、輸入路徑），可以移除', async ($, on) => {
+    const home = { ...PERSONAL, credential: 'keychain', credentialId: 'tok-00000001' }
+    const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: home } })
+    await $.session.start(START)
+    await $.command.run(RUN('切換'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    await ui.select({ key: 'sw-scope', value: 'restrict' })
+    expect(await shows(ui, /還沒加入任何資料夾/)).toBe(true)
+    expect(await shows(ui, /可以接手/)).toBe(true) // 還沒加資料夾：個人帳號照樣可以接手
+    await ui.press({ key: 'sw-add-here' })
+    expect(await shows(ui, /這個資料夾只換同組織的帳號/)).toBe(true) // 這個對話的資料夾被限制了
+    const options = ((await ui.find({ key: 'sw-add' }))?.props.options ?? []) as { value: string; label: string }[]
+    expect(options.map(o => o.value)).toEqual(['', '/side/blog']) // 桌面 app 的資料夾，已加的不列
+    expect(options[1]?.label).toBe('/side/blog　2 個對話')
+    await ui.select({ key: 'sw-add', value: '/side/blog' })
+    await ui.input({ key: 'sw-add-path', text: '/new/proj/' })
+    expect(w.store.get('switch')).toMatchObject({ restrict: true, restricted: ['/w/server', '/side/blog', '/new/proj'] })
+    await ui.press({ key: 'sw-del-/w/server' })
+    expect(await shows(ui, /這個資料夾只換同組織的帳號/)).toBe(false)
+    await ui.select({ key: 'sw-scope', value: 'all' })
+    expect(w.store.get('switch')).toMatchObject({ restrict: false, restricted: ['/side/blog', '/new/proj'] }) // 清單留著
+    expect(await ui.find({ key: 'sw-add-path' })).toBeUndefined()
     await ui.unmount()
   })
 })

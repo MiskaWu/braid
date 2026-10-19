@@ -29,9 +29,6 @@ export type BraidAccount = {
 
 export type BraidUses = { migrate: boolean; switch: boolean; sync: boolean }
 
-/** 資料夾規則：same-org＝只換同組織的帳號，any＝哪個帳號都可以。 */
-export type BraidFolderRule = 'same-org' | 'any'
-
 export type BraidSwitch = {
   on: boolean
   /** 5 小時用量達到幾 % 提醒 */
@@ -40,8 +37,9 @@ export type BraidSwitch = {
   sevenDay: number | null
   /** 換帳號的順序（帳號 id），沒列到的排在後面 */
   order: string[]
-  folders: Record<string, BraidFolderRule>
-  otherFolders: BraidFolderRule
+  /** false＝全部資料夾都能換到任何帳號（預設）；true＝restricted 裡的資料夾（含子資料夾）只換同組織的帳號。切回全部時清單留著 */
+  restrict: boolean
+  restricted: string[]
 }
 
 export type BraidSync = {

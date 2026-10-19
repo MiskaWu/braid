@@ -2,7 +2,6 @@
 // 三種用法共用同一份帳號清單：遷移與同步看桌面 app 的側欄資料，用量切換看每個帳號的用量與憑證。
 import type {
   BraidAccount,
-  BraidFolderRule,
   BraidProfile,
   BraidSwitch,
   BraidSync,
@@ -22,7 +21,7 @@ export const COLOR_NAMES: Record<string, string> = {
 }
 
 export const DEFAULT_USES: BraidUses = { migrate: false, switch: false, sync: false }
-export const DEFAULT_SWITCH: BraidSwitch = { on: true, fiveHour: 90, sevenDay: 95, order: [], folders: {}, otherFolders: 'same-org' }
+export const DEFAULT_SWITCH: BraidSwitch = { on: true, fiveHour: 90, sevenDay: 95, order: [], restrict: false, restricted: [] }
 export const DEFAULT_SYNC: BraidSync = { on: false, pair: [], all: true, folders: [], when: 'on-switch' }
 export const FIVE_HOUR_CHOICES = [80, 90, 95] as const
 export const SEVEN_DAY_CHOICES = [90, 95] as const
@@ -32,7 +31,6 @@ export const SEVEN_DAY_CHOICES = [90, 95] as const
 const isObj = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x)
 const str = (x: unknown): string | null => (typeof x === 'string' && x !== '' ? x : null)
 const num = (x: unknown, fallback: number): number => (typeof x === 'number' && Number.isFinite(x) ? x : fallback)
-const rule = (x: unknown, fallback: BraidFolderRule): BraidFolderRule => (x === 'same-org' || x === 'any' ? x : fallback)
 
 export function normalizeUses(x: unknown): BraidUses | null {
   if (!isObj(x)) return null
@@ -41,15 +39,13 @@ export function normalizeUses(x: unknown): BraidUses | null {
 
 export function normalizeSwitch(x: unknown): BraidSwitch {
   if (!isObj(x)) return { ...DEFAULT_SWITCH }
-  const folders: Record<string, BraidFolderRule> = {}
-  if (isObj(x.folders)) for (const [k, v] of Object.entries(x.folders)) if (k !== '') folders[k] = rule(v, 'same-org')
   return {
     on: x.on !== false,
     fiveHour: num(x.fiveHour, DEFAULT_SWITCH.fiveHour),
     sevenDay: x.sevenDay === null ? null : num(x.sevenDay, DEFAULT_SWITCH.sevenDay ?? 95),
     order: Array.isArray(x.order) ? x.order.filter((v): v is string => typeof v === 'string') : [],
-    folders,
-    otherFolders: rule(x.otherFolders, 'same-org'),
+    restrict: x.restrict === true,
+    restricted: Array.isArray(x.restricted) ? x.restricted.filter((v): v is string => typeof v === 'string' && v !== '') : [],
   }
 }
 
@@ -231,14 +227,10 @@ export function parseTz(text: string): number {
 
 // ── 換帳號 ──
 
-/** 資料夾適用哪條規則：設定過的資料夾（含子資料夾）取最長的那條，沒設定的看「其他資料夾」。 */
-export function folderRule(sw: BraidSwitch, cwd: string): BraidFolderRule {
-  let best: string | null = null
-  for (const f of Object.keys(sw.folders)) {
-    const under = cwd === f || cwd.startsWith(f.endsWith('/') || f.endsWith('\\') ? f : `${f}/`) || cwd.startsWith(`${f}\\`)
-    if (under && (best === null || f.length > best.length)) best = f
-  }
-  return best === null ? sw.otherFolders : (sw.folders[best] ?? sw.otherFolders)
+/** 這個資料夾（含子資料夾）是不是設成只換同組織的帳號。預設不限制。 */
+export function isRestricted(sw: BraidSwitch, cwd: string): boolean {
+  if (!sw.restrict) return false
+  return sw.restricted.some(f => cwd === f || cwd.startsWith(f.endsWith('/') || f.endsWith('\\') ? f : `${f}/`) || cwd.startsWith(`${f}\\`))
 }
 
 /** 依設定的順序排帳號；沒排到的照最近出現的時間排在後面。 */
@@ -269,7 +261,7 @@ export function isBusy(usage: BraidUsage | null, sw: BraidSwitch, now: number): 
  */
 export function candidates(accounts: Record<string, BraidAccount>, currentId: string, sw: BraidSwitch, cwd: string, now: number): Candidate[] {
   const current = accounts[currentId]
-  const sameOrgOnly = folderRule(sw, cwd) === 'same-org'
+  const sameOrgOnly = isRestricted(sw, cwd)
   return orderedIds(accounts, sw.order)
     .filter(id => id !== currentId)
     .map(id => {

@@ -11,7 +11,7 @@ import {
   defaultLabel,
   effectivePct,
   fmtReset,
-  folderRule,
+  isRestricted,
   meter,
   normalizeAccount,
   normalizeFolder,
@@ -63,14 +63,16 @@ describe('讀回儲存的資料', () => {
     expect(normalizeUses('x')).toBe(null)
     expect(normalizeUses({ migrate: true, switch: 'yes' })).toEqual({ migrate: true, switch: false, sync: false })
     expect(normalizeSwitch(null)).toEqual(DEFAULT_SWITCH)
-    expect(normalizeSwitch({ on: false, fiveHour: 'x', sevenDay: null, order: ['a', 3], folders: { '/a': 'any', '/b': 'weird', '': 'any' } })).toEqual({
+    expect(normalizeSwitch({ on: false, fiveHour: 'x', sevenDay: null, order: ['a', 3], restrict: 'yes', restricted: ['/a', '', 3] })).toEqual({
       on: false,
       fiveHour: 90,
       sevenDay: null,
       order: ['a'],
-      folders: { '/a': 'any', '/b': 'same-org' },
-      otherFolders: 'same-org',
+      restrict: false,
+      restricted: ['/a'],
     })
+    // 舊版的 folders／otherFolders 不再讀：回到預設的「全部資料夾都能換到任何帳號」
+    expect(normalizeSwitch({ folders: { '/a': 'same-org' }, otherFolders: 'same-org' })).toEqual(DEFAULT_SWITCH)
     expect(normalizeSync({ on: true, pair: ['a', 'b', 'c'], folders: ['/x', ''], when: 'manual' })).toEqual({ on: true, pair: ['a', 'b'], all: false, folders: ['/x'], when: 'manual' })
     // 同步預設全部；沒有 all 欄位的舊設定，挑過資料夾的維持只同步挑的
     expect([normalizeSync(null).all, normalizeSync({}).all, normalizeSync({ all: false }).all, normalizeSync({ all: true, folders: ['/x'] }).all]).toEqual([true, true, false, true])
@@ -155,14 +157,13 @@ describe('用量', () => {
 })
 
 describe('換帳號的規則', () => {
-  const sw: BraidSwitch = { ...DEFAULT_SWITCH, folders: { '/side': 'any', '/side/work': 'same-org' } }
+  const sw: BraidSwitch = { ...DEFAULT_SWITCH, restrict: true, restricted: ['/work', 'C:\\proj'] }
 
-  test('資料夾規則：取最長的那條，子資料夾跟著；沒設定的看「其他資料夾」', async () => {
-    expect(folderRule(sw, '/side/blog')).toBe('any')
-    expect(folderRule(sw, '/side/work/api')).toBe('same-org')
-    expect(folderRule(sw, '/sidecar')).toBe('same-org')
-    expect(folderRule({ ...sw, otherFolders: 'any' }, '/x')).toBe('any')
-    expect(folderRule({ ...sw, folders: { 'C:\\proj': 'any' } }, 'C:\\proj\\a')).toBe('any')
+  test('預設不限制；設了才看清單，子資料夾跟著，名稱只是開頭相同的不算', async () => {
+    expect(isRestricted(DEFAULT_SWITCH, '/work/server')).toBe(false)
+    expect(isRestricted({ ...sw, restrict: false }, '/work/server')).toBe(false) // 切回全部時清單留著但不生效
+    expect([isRestricted(sw, '/work'), isRestricted(sw, '/work/server/api'), isRestricted(sw, '/workshop'), isRestricted(sw, '/side/blog')]).toEqual([true, true, false, false])
+    expect(isRestricted(sw, 'C:\\proj\\a')).toBe(true)
   })
 
   test('順序：設定的在前，其餘照最近出現排', async () => {
@@ -170,7 +171,7 @@ describe('換帳號的規則', () => {
     expect(orderedIds(ACCOUNTS, ['gone'])).toEqual(['work', 'work2', 'home'])
   })
 
-  test('公司的資料夾不換到個人帳號；組織不明也不算同組織', async () => {
+  test('限制的資料夾不換到其他組織的帳號；組織不明也不算同組織', async () => {
     const list = candidates({ ...ACCOUNTS, tok: account('tok', { credential: 'file', credentialId: 'tok' }) }, 'work', sw, '/work/server', NOW)
     expect(list.map(c => [c.account.id, c.why])).toEqual([
       ['work2', 'ok'],
@@ -179,7 +180,7 @@ describe('換帳號的規則', () => {
     ])
   })
 
-  test('都可以的資料夾：沒有憑證的、也快用完的都說明原因', async () => {
+  test('沒限制的資料夾：哪個組織都可以；沒有憑證的、也快用完的都說明原因', async () => {
     const busy = { ...work2, usage: { fiveHour: { pct: 95, resetsAt: iso(NOW + H) }, sevenDay: null, at: NOW } }
     const list = candidates({ work, work2: busy, home, desk: account('desk', { lastSeen: -1 }) }, 'work', sw, '/side/blog', NOW)
     expect(list.map(c => [c.account.id, c.why])).toEqual([

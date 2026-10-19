@@ -13,7 +13,6 @@ import type {
   BraidAccount,
   BraidAdd,
   BraidCredential,
-  BraidFolderRule,
   BraidPlatform,
   BraidSwitch,
   BraidSync,
@@ -33,7 +32,6 @@ import {
   effectivePct,
   FIVE_HOUR_CHOICES,
   fmtReset,
-  folderRule,
   meter,
   nameOf,
   normalizeAccount,
@@ -310,13 +308,13 @@ async function openPane($: $, tab?: BraidTab): Promise<void> {
   if (tab) await update($, tabAtom, () => tab)
   await $.ui.open({ id: PANE, title: 'braid', columns: 64 })
   const shown = tab ?? (await read($, tabAtom))
-  if (shown === 'migrate' || shown === 'sync') await ensureDesktop($)
+  if (shown !== 'accounts') await ensureDesktop($)
 }
 
 async function setTab($: $, tab: BraidTab): Promise<void> {
   await update($, tabAtom, () => tab)
   await say($, null)
-  if (tab === 'migrate' || tab === 'sync') await ensureDesktop($)
+  if (tab !== 'accounts') await ensureDesktop($)
 }
 
 async function ensureDesktop($: $, force = false): Promise<void> {
@@ -526,7 +524,7 @@ async function snooze($: $, key: string): Promise<void> {
 
 const WHY_TEXT: Record<Why, string> = {
   ok: '可以接手',
-  'other-org': '組織不同，這個資料夾不會換到它',
+  'other-org': '這個資料夾只換同組織的帳號',
   'no-credential': 'braid 沒有它的登入憑證，只能在桌面 app 手動換',
   busy: '也快用完了',
 }
@@ -790,6 +788,56 @@ async function drawAdd($: $, ui: UI) {
   )
 }
 
+// ── 一個一個加資料夾：同步頁（要同步的）與切換頁（只換同組織的）共用 ──
+
+type PickerTarget = 'sync' | 'switch'
+type PickerRow = { path: string; note: string }
+
+async function changePicked($: $, target: PickerTarget, change: (list: string[]) => string[]): Promise<void> {
+  if (target === 'sync') await putSync($, s => ({ ...s, folders: change(s.folders) }))
+  else await putSwitch($, s => ({ ...s, restricted: change(s.restricted) }))
+}
+
+async function addPicked($: $, target: PickerTarget, text: string): Promise<void> {
+  const path = normalizeFolder(text)
+  if (path !== null) await changePicked($, target, list => (list.includes(path) ? list : [...list, path]))
+}
+
+/** 已加入的一列一列、各自可以移除；下面三種加法：這個對話的資料夾、從清單挑、輸入路徑。 */
+function drawFolderPicker($: $, ui: UI, target: PickerTarget, view: { title: string; picked: PickerRow[]; choices: PickerRow[]; cwd: string; hint: string }) {
+  const { Box, Text, Button, Input, Select } = ui
+  const p = target === 'sync' ? 'sy' : 'sw'
+  const has = (path: string) => view.picked.some(r => r.path === path)
+  return (
+    <Box key={`${p}-picker`} flexDirection="column" gap={1}>
+      <Box flexDirection="column">
+        <Text bold>{`${view.title}（${view.picked.length}）`}</Text>
+        {view.picked.length === 0 && <Text dimColor>還沒加入任何資料夾，用下面的方式加。</Text>}
+        {view.picked.map(r => (
+          <Box key={`${p}-row-${r.path}`} flexDirection="row" gap={1}>
+            <Text wrap="truncate-start">
+              {r.path} <Text dimColor>{r.note}</Text>
+            </Text>
+            <Button key={`${p}-del-${r.path}`} label="移除" dimColor onPress={() => changePicked($, target, list => list.filter(f => f !== r.path))} />
+          </Box>
+        ))}
+      </Box>
+      {!has(view.cwd) && <Button key={`${p}-add-here`} label={`＋ 加入這個對話的資料夾（${view.cwd}）`} onPress={() => addPicked($, target, view.cwd)} />}
+      {view.choices.length > 0 && (
+        <Select
+          key={`${p}-add`}
+          label="從清單加入"
+          options={[{ value: '', label: `（還有 ${view.choices.length} 個資料夾可以加）` }, ...view.choices.map(r => ({ value: r.path, label: `${r.path}　${r.note}` }))]}
+          value=""
+          onSelect={v => addPicked($, target, v)}
+        />
+      )}
+      <Input key={`${p}-add-path`} label="或輸入資料夾路徑" value="" placeholder="例如 /home/me/work/api，按 Enter 加入" onSubmit={v => addPicked($, target, v)} />
+      <Text dimColor>{view.hint}</Text>
+    </Box>
+  )
+}
+
 async function drawSwitch($: $, ui: UI) {
   const { Box, Text, Button, Select } = ui
   const sw = await read($, switchAtom)
@@ -800,12 +848,12 @@ async function drawSwitch($: $, ui: UI) {
   const now = await $.clock.now()
   const order = orderedIds(accounts, sw.order)
   const why = new Map(current ? candidates(accounts, current, sw, cwd, now).map(c => [c.account.id, c.why]) : [])
-  const ruleOptions = [
-    { value: 'same-org', label: '只換同組織的帳號' },
-    { value: 'any', label: '哪個帳號都可以' },
-  ]
-  const folders = [...new Set([...(sw.folders[cwd] === undefined ? [cwd] : []), ...Object.keys(sw.folders)])]
-  const setRule = (path: string, v: string) => putSwitch($, s => ({ ...s, folders: { ...s.folders, [path]: v as BraidFolderRule } }))
+  // 從清單加入的候選：桌面 app 各帳號對話的資料夾（含對話數），還沒限制的
+  const desktop = await read($, desktopAtom)
+  const totals = new Map<string, number>()
+  for (const prof of desktop?.profiles ?? []) for (const f of prof.folders) totals.set(f.path, (totals.get(f.path) ?? 0) + f.sessions)
+  const noteOf = (path: string) => (totals.get(path) ? `${totals.get(path)} 個對話` : '')
+  const choices = [...totals.keys()].filter(path => !sw.restricted.includes(path)).sort((x, y) => (totals.get(y) ?? 0) - (totals.get(x) ?? 0))
   return (
     <Box flexDirection="column" gap={1}>
       <Select
@@ -864,39 +912,31 @@ async function drawSwitch($: $, ui: UI) {
         )
       })}
 
-      <Text bold>資料夾</Text>
-      {folders.map(path => (
-        <Box key={`rule-row-${path}`} flexDirection="row" gap={1}>
-          <Select key={`rule-${path}`} label={path === cwd ? `${path}（這個對話）` : path} options={ruleOptions} value={folderRule(sw, path)} onSelect={v => setRule(path, v)} />
-          {sw.folders[path] !== undefined && (
-            <Button
-              key={`rule-del-${path}`}
-              label="移除"
-              dimColor
-              onPress={() =>
-                putSwitch($, s => {
-                  const rest = { ...s.folders }
-                  delete rest[path]
-                  return { ...s, folders: rest }
-                })
-              }
-            />
-          )}
-        </Box>
-      ))}
-      <Select key="rule-other" label="其他資料夾" options={ruleOptions} value={sw.otherFolders} onSelect={v => putSwitch($, s => ({ ...s, otherFolders: v as BraidFolderRule }))} />
-      <Text dimColor>只換同組織的帳號：公司的專案不會換到個人帳號。新增的帳號要說它屬於哪個組織，才算同組織。</Text>
-      {platform !== 'other' && (
-        <Text dimColor>
-          桌面 app 的對話沒辦法在 app 裡直接換帳號：按「接著做」會開一個終端機，用另一個帳號接著同一段對話。想留在 app 裡，就在 app 換帳號，再用「同步」把對話帶過去。
-        </Text>
-      )}
+      <Select
+        key="sw-scope"
+        label="資料夾"
+        options={[
+          { value: 'all', label: '全部資料夾都能換到任何帳號（建議）' },
+          { value: 'restrict', label: '有些資料夾只換同組織的帳號' },
+        ]}
+        value={sw.restrict ? 'restrict' : 'all'}
+        onSelect={v => putSwitch($, s => ({ ...s, restrict: v === 'restrict' }))}
+      />
+      {sw.restrict &&
+        drawFolderPicker($, ui, 'switch', {
+          title: '只換同組織帳號的資料夾',
+          picked: sw.restricted.map(path => ({ path, note: noteOf(path) })),
+          choices: choices.map(path => ({ path, note: noteOf(path) })),
+          cwd,
+          hint: '例如公司專案：在這些資料夾（含子資料夾）不會換到個人帳號。',
+        })}
+      {platform !== 'other' && <Text dimColor>在桌面 app 按「接著做」，會開一個終端機視窗用另一個帳號接著。</Text>}
     </Box>
   )
 }
 
 async function drawSync($: $, ui: UI) {
-  const { Box, Text, Button, Input, Select } = ui
+  const { Box, Text, Button, Select } = ui
   const platform = await read($, platformAtom)
   if (platform === 'other') {
     return <Text>CLI 的對話不分帳號：換帳號後用 claude --resume 就看得到全部，不需要同步。同步是給桌面 app 的側欄用的。</Text>
@@ -922,49 +962,20 @@ async function drawSync($: $, ui: UI) {
     const r = byPath.get(path)
     return r && r.mine + r.theirs > 0 ? `目前 ${r.mine} · ${partnerName} ${r.theirs}` : '兩邊都還沒有對話'
   }
-  const addFolder = (text: string) => {
-    const path = normalizeFolder(text)
-    if (path === null) return
-    return putSync($, s => (s.folders.includes(path) ? s : { ...s, folders: [...s.folders, path] }))
-  }
   const drawSyncAll = () => (
     <Box key="sy-all-box" flexDirection="column">
       <Text dimColor>{`目前兩個帳號共 ${rows.length} 個資料夾，對話與環境全部互相帶過去。`}</Text>
       {crossOrg && <Text color="warning">這兩個帳號可能不在同一個組織：全部同步會連個人專案的對話也一起帶過去，反過來也一樣。要分開，改成「只同步我挑的資料夾」。</Text>}
     </Box>
   )
-  // 自己挑：已加入的一列一列、各自可以移除；下面三種加法——這個對話的資料夾、從清單挑、輸入路徑
-  const drawSyncPicked = () => {
-    const choices = rows.filter(r => !sy.folders.includes(r.path))
-    return (
-      <Box key="sy-picked-box" flexDirection="column" gap={1}>
-        <Box flexDirection="column">
-          <Text bold>{`要同步的資料夾（${sy.folders.length}）`}</Text>
-          {sy.folders.length === 0 && <Text dimColor>還沒加入任何資料夾，用下面的方式加。</Text>}
-          {sy.folders.map(path => (
-            <Box key={`sy-row-${path}`} flexDirection="row" gap={1}>
-              <Text wrap="truncate-start">
-                {path} <Text dimColor>{counts(path)}</Text>
-              </Text>
-              <Button key={`sy-del-${path}`} label="移除" dimColor onPress={() => putSync($, s => ({ ...s, folders: s.folders.filter(f => f !== path) }))} />
-            </Box>
-          ))}
-        </Box>
-        {!sy.folders.includes(cwd) && <Button key="sy-add-here" label={`＋ 加入這個對話的資料夾（${cwd}）`} onPress={() => addFolder(cwd)} />}
-        {choices.length > 0 && (
-          <Select
-            key="sy-add"
-            label="從清單加入"
-            options={[{ value: '', label: `（還有 ${choices.length} 個資料夾可以加）` }, ...choices.map(r => ({ value: r.path, label: `${r.path}　${counts(r.path)}` }))]}
-            value=""
-            onSelect={v => addFolder(v)}
-          />
-        )}
-        <Input key="sy-add-path" label="或輸入資料夾路徑" value="" placeholder="例如 /home/me/work/api，按 Enter 加入" onSubmit={v => addFolder(v)} />
-        <Text dimColor>路徑要和桌面 app 對話的資料夾完全一樣（子資料夾要另外加）。</Text>
-      </Box>
-    )
-  }
+  const drawSyncPicked = () =>
+    drawFolderPicker($, ui, 'sync', {
+      title: '要同步的資料夾',
+      picked: sy.folders.map(path => ({ path, note: counts(path) })),
+      choices: rows.filter(r => !sy.folders.includes(r.path)).map(r => ({ path: r.path, note: counts(r.path) })),
+      cwd,
+      hint: '路徑要和桌面 app 對話的資料夾完全一樣（子資料夾要另外加）。',
+    })
   return (
     <Box flexDirection="column" gap={1}>
       <Select
