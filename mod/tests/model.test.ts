@@ -29,7 +29,7 @@ import {
   upsertSeen,
   usageFrom,
 } from '../hooks/model'
-import { newCredentialId, planTerminal, secretDelete, wrapperText } from '../hooks/terminal'
+import { newCredentialId, planTerminal, removeFile, secretDelete, wrapperText } from '../hooks/terminal'
 
 // 2026-10-16 14:00（UTC+8）
 const NOW = Date.parse('2026-10-16T06:00:00Z')
@@ -353,5 +353,7 @@ describe('開新視窗跑帳號腳本', () => {
     expect(secretDelete('windows', 'C:/r', 'tok-1')).toEqual(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'C:\\r\\tool\\windows\\secret.ps1', 'delete', 'tok-1'])
     let i = 0
     expect(newCredentialId(() => (i++ % 16) / 16)).toBe('tok-01234567')
+    expect(removeFile('wsl', '/tmp/braid-add-tok-1.json')).toEqual(['rm', '-f', '--', '/tmp/braid-add-tok-1.json'])
+    expect(removeFile('windows', "C:\\T\\o'k.json")).toEqual(['powershell.exe', '-NoProfile', '-Command', "Remove-Item -LiteralPath 'C:\\T\\o''k.json' -Force -ErrorAction SilentlyContinue"])
   })
 })

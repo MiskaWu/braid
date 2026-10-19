@@ -82,6 +82,12 @@ export function secretDelete(platform: BraidPlatform, root: string, credentialId
   return ['bash', `${root}/tool/cli/secret.sh`, 'delete', credentialId]
 }
 
+/** 刪掉一個暫存檔（新增帳號的結果檔：面板讀完就不需要了）。 */
+export function removeFile(platform: BraidPlatform, path: string): string[] {
+  if (platform === 'windows') return ['powershell.exe', '-NoProfile', '-Command', `Remove-Item -LiteralPath ${psq(path)} -Force -ErrorAction SilentlyContinue`]
+  return ['rm', '-f', '--', path]
+}
+
 /** 新增帳號時給憑證的 id：tok- 加 8 個十六進位字。 */
 export function newCredentialId(random: () => number): string {
   let hex = ''

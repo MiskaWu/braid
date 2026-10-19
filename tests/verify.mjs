@@ -30,9 +30,13 @@ function treeHash(dir) {
 }
 
 // LevelDB 在 /mnt/c 上開鎖檔不穩，複製到本機暫存再開
+// 結束時（不論通過與否）刪掉：finish() 用 process.exit，所以掛在 exit 上
+const copies = []
+process.on('exit', () => { for (const d of copies) fs.rmSync(d, { recursive: true, force: true }) })
 function lsCopy(appDir, tag) {
   const d = path.join(os.tmpdir(), `cdm-verify-${tag}-${process.pid}`)
   copyDir(path.join(appDir, 'Local Storage', 'leveldb'), d)
+  copies.push(d)
   return d
 }
 

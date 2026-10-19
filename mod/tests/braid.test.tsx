@@ -352,6 +352,7 @@ describe('新增帳號', () => {
     w.files[result] = '\uFEFF{"ok":true,"backend":"file"}'
     await w.clock.advance(1500)
     expect(await shows(ui, /憑證已存好（只有你讀得到的檔案）/)).toBe(true)
+    expect(w.runs.some(r => r.argv.join(' ') === `rm -f -- ${result}`)).toBe(true) // 結果檔讀完就刪
     expect(await shows(ui, /查不出這組憑證屬於哪個組織/)).toBe(true) // 結果檔沒有組織：由使用者說明
     await ui.input({ key: 'add-label', text: '公司 2' })
     await ui.select({ key: 'add-org', value: OW })

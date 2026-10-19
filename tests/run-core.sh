@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 [ -d node_modules ] || npm install --no-audit --no-fund >/dev/null
 W=/tmp/cdm-core-test-$$; WSLDIR=/tmp/cdm-core-wsl-$$   # 每次執行各用各的，同時跑也不互相干擾
+trap 'rm -rf "$W" "$W.before" "$W.mismatch-before" "$WSLDIR"' EXIT   # 失敗或被中斷也清掉
 run() { node run-core.mjs --yes --from 11111111 --app-data-root "$W/app" --claude-home "$W/claude-home" --backup-root "${BK:-$W/backups}" "$@"; }
 restore() { node run-core.mjs --restore "$(ls -d "$1"/*/ | head -1)" >/dev/null; node verify.mjs restored "$W" "$W.before"; }
 

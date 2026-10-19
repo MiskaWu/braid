@@ -57,7 +57,7 @@ import {
   type Seen,
   type Why,
 } from './model'
-import { newCredentialId, planTerminal, secretDelete, type TerminalPlan } from './terminal'
+import { newCredentialId, planTerminal, removeFile, secretDelete, type TerminalPlan } from './terminal'
 
 type $ = EngineInterface
 type UI = Pick<ElementTable<'terminal'>, 'Box' | 'Text' | 'Button' | 'Input' | 'Select'>
@@ -392,6 +392,11 @@ function pollAdd($: $, id: string, resultPath: string, startedAt: number): void 
       result = JSON.parse((await $.fs.read(resultPath)).replace(/^\uFEFF/, '')) as typeof result
     } catch {
       result = { ok: false, reason: 'unreadable' }
+    }
+    try {
+      await $.process.run(removeFile((await read($, platformAtom)) ?? 'other', resultPath), { timeoutMs: 15_000 })
+    } catch {
+      // 刪不掉也不擋：結果檔裡只有成功與否和組織，沒有憑證
     }
     const backends: readonly BraidCredential[] = ['keychain', 'secret-service', 'file', 'credman']
     const backend = backends.find(b => b === result.backend)

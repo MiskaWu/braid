@@ -10,6 +10,8 @@ W="$WINTEMP/cdm-test-$$"               # Windows 看得到的位置
 LOCAL=/tmp/cdm-fixture-$$              # 造資料用（LevelDB 在 /mnt/c 上開鎖檔不穩）
 WSLDIR=/tmp/cdm-test-wsl-$$            # 假的 WSL 端對話紀錄
 PS1=$(wslpath -w ../mod/tool/windows/migrate.ps1)
+# 不論通過、失敗或被中斷都清掉（失敗時直接 exit，原本會留在 Windows 暫存資料夾）
+trap 'rm -rf "$W" "$W.before" "$W.mismatch-before" "$LOCAL" "$WSLDIR"' EXIT
 
 run_ps() {
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1" \
