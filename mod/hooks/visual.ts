@@ -477,7 +477,7 @@ export function useIcon(kind: 'migrate' | 'switch' | 'sync' | 'policy'): { sourc
   return { source: svg(s, s, b), alt }
 }
 
-/** 歸屬頁的總覽：資料夾 → 歸屬帳號，旁邊是這個對話的帳號與「對得上／對不上／還沒設定／不分」。 */
+/** 歸屬頁的總覽：資料夾 → 歸屬帳號，下面是這個對話做的新頁會怎樣（直接發布／先排著）。 */
 export function ownerHero(d: {
   project: string
   owner: { label: string; color: string } | null
@@ -503,11 +503,11 @@ export function ownerHero(d: {
     b += `<circle cx="${ox + 14}" cy="30" r="13" fill="none" class="tick" stroke-width="1.2" stroke-dasharray="3 3"/>`
     b += txt(ox + 14, 34.5, 't3', 13, d.state === 'any' ? '*' : '?', 'text-anchor="middle" font-weight="600"')
     b += txt(ox + 34, 30, 't1', 14, d.state === 'any' ? '不分' : '還沒設定', 'font-weight="600"')
-    b += txt(ox + 34, 46, 't3', 11, d.state === 'any' ? '哪個帳號都可以' : '新頁會先擋下')
+    b += txt(ox + 34, 46, 't3', 11, d.state === 'any' ? '哪個帳號都可以' : '新頁會先排著')
   }
   // 狀態列
   const color = d.state === 'ok' ? STATUS.good : d.state === 'mismatch' ? STATUS.warning : null
-  const label = d.state === 'ok' ? `對得上：這個對話是「${d.me.label}」` : d.state === 'mismatch' ? `對不上：這個對話是「${d.me.label}」` : d.state === 'any' ? `這個對話是「${d.me.label}」` : `這個對話是「${d.me.label}」`
+  const label = d.state === 'mismatch' ? `新頁先排著，等歸屬帳號發布（這個對話是「${d.me.label}」）` : d.state === 'unset' ? `這個對話是「${d.me.label}」` : `新頁直接發布（這個對話是「${d.me.label}」）`
   b += color ? `<circle cx="5" cy="${h - 7}" r="4" fill="${color}"/>` : `<circle cx="5" cy="${h - 7}" r="3.6" fill="none" class="tick" stroke-width="1.2"/>`
   b += txt(15, h - 3, 't2', 12, fit(label, 12, w - 15))
   const alt = `${d.project} → ${d.owner ? d.owner.label : d.state === 'any' ? '不分' : '還沒設定'}；${label}`

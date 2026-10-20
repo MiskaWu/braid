@@ -37,7 +37,7 @@ import {
 } from '../hooks/model'
 import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo, type SessionSpec } from '../hooks/mirror'
 import { accountCard, backupTiles, fit, header, initial, ownerHero, rankRow, slotOf, switchHero, syncFlow, useIcon } from '../hooks/visual'
-import { ANY, cleanFolder, draftGroups, normalizePolicy, projectOf, remoteKey, riskOf, ruleFor, setRule, sideOf, verdictFor } from '../hooks/policy'
+import { ANY, cleanFolder, draftGroups, normalizePolicy, projectOf, remoteKey, ruleFor, setRule, verdictFor } from '../hooks/policy'
 import { isNewPage, parseIndex, projectSlug, titleOf, urlIn } from '../hooks/pages'
 import { claudeInstall, claudeLookup, newCredentialId, newestFirst, planTerminal, removeFile, removeToolBackup, secretDelete, wrapperText } from '../hooks/terminal'
 
@@ -185,18 +185,9 @@ describe('換帳號的規則', () => {
     expect(orderedIds(ACCOUNTS, ['gone'])).toEqual(['work', 'work2', 'home'])
   })
 
-  test('資料夾歸公司：同組織的帳號可以接手；個人與組織不明的帳號要先確認（不同邊）', async () => {
-    const list = candidates({ ...ACCOUNTS, tok: account('tok', { credential: 'file', credentialId: 'tok' }) }, 'work', DEFAULT_SWITCH, work, null, NOW)
-    expect(list.map(c => [c.account.id, c.why])).toEqual([
-      ['work2', 'ok'],
-      ['home', 'other-side'],
-      ['tok', 'other-side'],
-    ])
-  })
-
-  test('沒設定歸屬：哪個帳號都可以；沒有憑證的、也快用完的說明原因；CLI 自己登入的帳號沒有憑證也能接手', async () => {
+  test('哪個帳號都可以（不看歸屬）；沒有憑證的、也快用完的說明原因；CLI 自己登入的帳號沒有憑證也能接手', async () => {
     const busy = { ...work2, usage: { fiveHour: { pct: 95, resetsAt: iso(NOW + H) }, sevenDay: null, at: NOW } }
-    const list = candidates({ work, work2: busy, home, desk: account('desk', { lastSeen: -1 }), login: account('login', { lastSeen: -2 }) }, 'work', DEFAULT_SWITCH, null, 'login', NOW)
+    const list = candidates({ work, work2: busy, home, desk: account('desk', { lastSeen: -1 }), login: account('login', { lastSeen: -2 }) }, 'work', DEFAULT_SWITCH, 'login', NOW)
     expect(list.map(c => [c.account.id, c.why])).toEqual([
       ['work2', 'busy'],
       ['home', 'ok'],
@@ -208,7 +199,7 @@ describe('換帳號的規則', () => {
 
 describe('輸入框上方的提示', () => {
   const live = (five: number, seven = 10) => ({ fiveHour: { pct: five, resetsAt: iso(NOW + 2 * H) }, sevenDay: { pct: seven, resetsAt: iso(NOW + 96 * H) }, at: NOW })
-  const at = (pct: number, seven?: number, snooze: string | null = null, sw: BraidSwitch = DEFAULT_SWITCH) => bandFor(ACCOUNTS, 'work', live(pct, seven), sw, null, null, NOW, snooze)
+  const at = (pct: number, seven?: number, snooze: string | null = null, sw: BraidSwitch = DEFAULT_SWITCH) => bandFor(ACCOUNTS, 'work', live(pct, seven), sw, null, NOW, snooze)
 
   test('沒到門檻不出現；關掉也不出現', async () => {
     expect(at(89)).toBe(null)
@@ -233,13 +224,13 @@ describe('輸入框上方的提示', () => {
   })
 
   test('沒有可以一鍵接手的：給可以在桌面 app 手動換的帳號', async () => {
-    const band = bandFor({ work, desk: account('desk', { orgId: 'org-w' }) }, 'work', live(92), DEFAULT_SWITCH, null, null, NOW, null)
+    const band = bandFor({ work, desk: account('desk', { orgId: 'org-w' }) }, 'work', live(92), DEFAULT_SWITCH, null, NOW, null)
     expect([band?.best, band?.manual?.id]).toEqual([null, 'desk'])
   })
 
-  test('資料夾歸公司、只剩個人帳號能接：不當成「一鍵接手」，而是要確認的那個（規格第 9 格）', async () => {
-    const band = bandFor({ work, home }, 'work', live(100), DEFAULT_SWITCH, work, null, NOW, null)
-    expect([band?.best, band?.risky?.id]).toEqual([null, 'home'])
+  test('只剩個人帳號能接：照樣是「一鍵接手」——歸屬只管新頁，不管對話往哪個帳號走', async () => {
+    const band = bandFor({ work, home }, 'work', live(100), DEFAULT_SWITCH, null, NOW, null)
+    expect(band?.best?.id).toBe('home')
   })
 })
 
@@ -805,22 +796,17 @@ describe('歸屬表', () => {
     expect(ruleFor(policy, 'C:\\code\\app')?.owner).toBe(ANY)
   })
 
-  test('四種組合：對得上、公司專案用個人帳號、個人專案用公司帳號；不分；還沒設定；歸屬帳號被移除', async () => {
+  test('新頁歸誰：對得上、歸別的帳號（公司專案用個人帳號、反過來）；不分；還沒設定；歸屬帳號被移除', async () => {
     const accounts = { work, work2, home }
     const p = { rules: [{ folder: '/w', owner: 'work' }, { folder: '/me', owner: 'home' }, { folder: '/any', owner: ANY }, { folder: '/gone', owner: 'x' }] }
     expect(verdictFor(p, accounts, work, '/w/a').kind).toBe('ok')
     expect(verdictFor(p, accounts, work2, '/w/a').kind).toBe('ok') // 同組織的第二個帳號也算公司
-    expect(verdictFor(p, accounts, home, '/w/a')).toMatchObject({ kind: 'mismatch', risk: 'work-via-personal' })
-    expect(verdictFor(p, accounts, work, '/me/blog')).toMatchObject({ kind: 'mismatch', risk: 'personal-via-work' })
+    expect(verdictFor(p, accounts, home, '/w/a')).toMatchObject({ kind: 'mismatch', owner: { id: 'work' } })
+    expect(verdictFor(p, accounts, work, '/me/blog')).toMatchObject({ kind: 'mismatch', owner: { id: 'home' } })
     expect(verdictFor(p, accounts, home, '/me/blog').kind).toBe('ok')
     expect(verdictFor(p, accounts, home, '/any/x').kind).toBe('any')
     expect(verdictFor(p, accounts, home, '/other')).toEqual({ kind: 'unset', project: '/other' })
     expect(verdictFor(p, accounts, home, '/gone/x').kind).toBe('lost')
-  })
-
-  test('哪一邊：組織名稱寫個人、或常見個人信箱是個人；其他信箱是公司；都沒有不知道', async () => {
-    expect([sideOf(work), sideOf(home), sideOf({ email: null, orgName: null }), sideOf({ email: 'a@corp.example', orgName: "Me's Individual Org personal" })]).toEqual(['work', 'personal', 'unknown', 'personal'])
-    expect([riskOf(work, home), riskOf(home, work), riskOf(work, account('x', { email: null }))]).toEqual(['work-via-personal', 'personal-via-work', 'other'])
   })
 
   test('git 遠端：取主機與擁有者；工作區看底下 repo 最多的；沒有遠端的另成一組放最後', async () => {
@@ -886,7 +872,7 @@ describe('桌面版的圖（第二批）', () => {
     expect(parts[0]?.source).toContain('fill="#d03b3b"') // 7 天用完：危險色
     expect(parts[1]?.alt).toMatch(/5 小時 92%（90% 提醒）；下一個接手：A&B <x>/)
     expect(parts[2]?.alt).toBe('2. A&B <x>：可以接手')
-    expect(parts[3]?.alt).toBe('A&B <x> → A&B <x>；對不上：這個對話是「個人」')
+    expect(parts[3]?.alt).toBe('A&B <x> → A&B <x>；新頁先排著，等歸屬帳號發布（這個對話是「個人」）')
     expect(ownerHero({ project: 'p', owner: null, me: { label: '個人', color: '#e87ba4' }, state: 'unset' }).alt).toBe('p → 還沒設定；這個對話是「個人」')
     expect(switchHero({ account: { label: 'a', color: '#2a78d6' }, windows: [], thresholds: [], next: null }).alt).toMatch(/下一個接手：沒有/)
   })

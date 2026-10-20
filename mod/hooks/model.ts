@@ -348,10 +348,10 @@ export function orderedIds(accounts: Record<string, BraidAccount>, order: readon
 }
 
 /**
- * 能不能接手：ok；跟這個資料夾的歸屬不同邊（other-side，可以但要先確認風險）；
- * braid 沒有憑證、也不是 CLI 自己登入的帳號（no-credential，只能在桌面 app 換）；也快用完（busy）。
+ * 能不能接手：ok；braid 沒有憑證、也不是 CLI 自己登入的帳號（no-credential，只能在桌面 app 換）；也快用完（busy）。
+ * 不看歸屬表：歸屬只管新頁歸誰，對話往哪個帳號走由切換與同步決定（2026-10-20 拍板：同步優先）。
  */
-export type Why = 'ok' | 'other-side' | 'no-credential' | 'busy'
+export type Why = 'ok' | 'no-credential' | 'busy'
 
 export type Candidate = { account: BraidAccount; why: Why }
 
@@ -368,17 +368,11 @@ export function canHandoff(a: BraidAccount, cliLogin: string | null): boolean {
   return a.credential !== null || (cliLogin !== null && a.id === cliLogin)
 }
 
-const sameSide = (a: BraidAccount, b: BraidAccount) => a.id === b.id || (!!a.orgId && !!b.orgId && a.orgId === b.orgId)
-
-/**
- * 其他帳號依順序，各自能不能接手、不能的話為什麼。owner 是這個資料夾的歸屬帳號（歸屬表；沒設定或不分是 null）：
- * 跟它不同邊的帳號標成 other-side——額度用完時可以暫用，但要先確認風險（規格第 9 格）。
- */
+/** 其他帳號依順序，各自能不能接手、不能的話為什麼。 */
 export function candidates(
   accounts: Record<string, BraidAccount>,
   currentId: string,
   sw: BraidSwitch,
-  owner: BraidAccount | null,
   cliLogin: string | null,
   now: number,
 ): Candidate[] {
@@ -389,7 +383,6 @@ export function candidates(
       let why: Why = 'ok'
       if (!canHandoff(account, cliLogin)) why = 'no-credential'
       else if (isBusy(account.usage, sw, now)) why = 'busy'
-      else if (owner && !sameSide(owner, account)) why = 'other-side'
       return { account, why }
     })
 }
@@ -403,8 +396,6 @@ export type Band = {
   snoozeKey: string
   /** 可以一鍵接著做的帳號 */
   best: BraidAccount | null
-  /** 只剩跟資料夾歸屬不同邊的帳號能接：要先確認風險 */
-  risky: BraidAccount | null
   /** 沒有 braid 的憑證、但可以在桌面 app 手動換過去的帳號 */
   manual: BraidAccount | null
 }
@@ -415,7 +406,6 @@ export function bandFor(
   currentId: string | null,
   live: BraidUsage | null,
   sw: BraidSwitch,
-  owner: BraidAccount | null,
   cliLogin: string | null,
   now: number,
   snooze: string | null,
@@ -431,12 +421,11 @@ export function bandFor(
   if (!hit) return null
   const snoozeKey = `${currentId}|${hit.window}|${hit.resetsAt ?? ''}|${hit.kind}`
   if (snooze === snoozeKey) return null
-  const list = candidates(accounts, currentId, sw, owner, cliLogin, now)
+  const list = candidates(accounts, currentId, sw, cliLogin, now)
   return {
     ...hit,
     snoozeKey,
     best: list.find(c => c.why === 'ok')?.account ?? null,
-    risky: list.find(c => c.why === 'other-side')?.account ?? null,
     manual: list.find(c => c.why === 'no-credential')?.account ?? null,
   }
 }

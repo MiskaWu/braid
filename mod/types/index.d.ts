@@ -39,12 +39,9 @@ export type BraidSwitch = {
   order: string[]
 }
 
-/** 歸屬表的一條：這個資料夾（含子資料夾）歸哪個帳號（帳號 id；「*」＝不分）。 */
+/** 歸屬表的一條：在這個資料夾（含子資料夾）做的新頁歸哪個帳號（帳號 id；「*」＝不分）。只管頁面，不管對話。 */
 export type BraidRule = { folder: string; owner: string }
 export type BraidPolicy = { rules: BraidRule[] }
-
-/** 這個對話裡「這次就用目前帳號」：只算這一次，不寫回表。 */
-export type BraidOverride = { project: string; account: string }
 
 export type BraidSync = {
   /** 開著就自動同步：桌面 app 現在登入的是其中一個時，它的對話隨時複製到另一個 */
@@ -142,8 +139,7 @@ declare module 'claude-code' {
       policy: BraidPolicy
       /** CLI 自己 /login 的帳號（~/.claude.json）：braid 沒有它的憑證也能用它接著做 */
       cliLogin: string | null
-      override: BraidOverride | null
-      /** 要確認風險才接手的帳號（按了第一次，等第二次） */
+      /** 要按第二次才算的按鈕（例如待發布的頁「就用這個帳號發布」） */
       confirming: string | null
       /** 頁面清單（~/.claude/artifact-sources/index.json）讀進來的樣子 */
       pages: { pending: number; list: { id: string; title: string; project: string; owner: string | null; url: string | null; status: string }[] } | null

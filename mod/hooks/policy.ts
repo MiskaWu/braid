@@ -1,8 +1,9 @@
-// 歸屬表：哪個資料夾歸哪個帳號。對話該用誰、頁面（artifact）該歸誰，都看這一張表（使用者 10-19 拍板的「方案四」）。
+// 歸屬表：哪個資料夾歸哪個帳號，決定在那裡做的新頁（artifact）用哪個帳號發布（使用者 10-19 拍板的「方案四」）。
+// 只管頁面，不管對話：對話往哪個帳號走由切換與同步決定，歸屬不提醒、不擋（10-20 拍板：同步優先，歸屬輔助）。
 // 純邏輯，不碰 $。
 //
 // 規則：資料夾（含子資料夾）→ 帳號 id，或「不分」（*）。多條符合時取最具體（最長）的那條；
-// worktree（…/.claude/worktrees/x）跟著它的專案。沒有規則的資料夾＝還沒設定：第一次問，答案寫回表。
+// worktree（…/.claude/worktrees/x）跟著它的專案。沒有規則的資料夾＝還沒設定：有新頁被擋下時才問，答案寫回表。
 // 「對得上」看的是同一邊：同一個帳號，或同一個組織（公司的第二個帳號也算公司）。
 import type { BraidAccount, BraidPolicy, BraidRule } from '../types'
 
@@ -62,41 +63,21 @@ export function ruleFor(policy: BraidPolicy, cwd: string): BraidRule | null {
   return best
 }
 
-// 常見的個人信箱網域（和 model.ts 猜「公司／個人」名稱的那份一樣）
-const PERSONAL_MAIL = /@(gmail|googlemail|outlook|hotmail|live|msn|yahoo|icloud|me|mac|proton|protonmail|pm|qq|163|126|yeah|naver|kakao)\./i
-
-/** 帳號是個人還是公司的：組織名稱或信箱網域判斷；都沒有就不知道。 */
-export function sideOf(a: Pick<BraidAccount, 'email' | 'orgName'>): 'personal' | 'work' | 'unknown' {
-  if (a.orgName && /personal|個人/i.test(a.orgName)) return 'personal'
-  if (a.email) return PERSONAL_MAIL.test(a.email) ? 'personal' : 'work'
-  return 'unknown'
-}
-
 /** 兩個帳號算同一邊：同一個帳號，或組織相同。 */
 export function sameSide(a: BraidAccount, b: BraidAccount): boolean {
   return a.id === b.id || (!!a.orgId && !!b.orgId && a.orgId === b.orgId)
 }
 
-/** 對不上時的風險：公司的東西經由個人帳號送出、個人的東西經由公司帳號送出、其他。 */
-export type Risk = 'work-via-personal' | 'personal-via-work' | 'other'
-
 export type Verdict =
-  /** 還沒設定：第一次問 */
+  /** 還沒設定：有新頁被擋下時問歸誰 */
   | { kind: 'unset'; project: string }
   /** 規則是「不分」 */
   | { kind: 'any'; rule: BraidRule }
   /** 歸屬帳號已經不在 braid 的清單裡（移除了）：當成還沒設定 */
   | { kind: 'lost'; rule: BraidRule; project: string }
   | { kind: 'ok'; rule: BraidRule; owner: BraidAccount }
-  | { kind: 'mismatch'; rule: BraidRule; owner: BraidAccount; risk: Risk }
-
-export function riskOf(owner: BraidAccount, current: BraidAccount): Risk {
-  const o = sideOf(owner)
-  const c = sideOf(current)
-  if (o === 'work' && c === 'personal') return 'work-via-personal'
-  if (o === 'personal' && c === 'work') return 'personal-via-work'
-  return 'other'
-}
+  /** 歸別的帳號：這個對話做的新頁先排著，等歸屬帳號發布 */
+  | { kind: 'mismatch'; rule: BraidRule; owner: BraidAccount }
 
 /** 這個資料夾在這個帳號底下的判斷。current 是這個對話的帳號。 */
 export function verdictFor(policy: BraidPolicy, accounts: Record<string, BraidAccount>, current: BraidAccount, cwd: string): Verdict {
@@ -106,14 +87,7 @@ export function verdictFor(policy: BraidPolicy, accounts: Record<string, BraidAc
   const owner = accounts[rule.owner]
   if (!owner) return { kind: 'lost', rule, project: projectOf(cwd) }
   if (sameSide(owner, current)) return { kind: 'ok', rule, owner }
-  return { kind: 'mismatch', rule, owner, risk: riskOf(owner, current) }
-}
-
-/** 對不上時，說清楚風險的那句話。 */
-export function riskText(risk: Risk, owner: string, current: string): string {
-  if (risk === 'work-via-personal') return `這個資料夾歸「${owner}」：公司程式碼會經由「${current}」（個人帳號）送出，可能違反公司規範。`
-  if (risk === 'personal-via-work') return `這個資料夾歸「${owner}」：個人內容會經由「${current}」（公司帳號）送出，公司能取得。`
-  return `這個資料夾歸「${owner}」：內容會經由「${current}」送出。`
+  return { kind: 'mismatch', rule, owner }
 }
 
 // ── 草稿：依 git 遠端分組，讓使用者一組選一次 ──

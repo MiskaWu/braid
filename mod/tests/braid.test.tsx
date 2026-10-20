@@ -237,7 +237,7 @@ const BAND = {
 }
 const START = { cwd: '/w/server', surface: 'desktop' as const, isInteractive: true }
 const RUN = (args = '') => ({ command: 'braid', args, origin: { kind: 'composer' as const }, presentation: { isFullscreen: true, columns: 160 } })
-const USES_ALL = { migrate: true, switch: true, sync: true }
+const USES_ALL = { migrate: true, switch: true, sync: true, policy: true }
 const SYNC_ON = { on: true, pair: [W, P], all: true, folders: [] }
 /** 一筆桌面 app 的側欄紀錄（local_<id>.json）：必要欄位加上要改的 */
 const rec = (id: string, over: Record<string, unknown>) =>
@@ -402,23 +402,15 @@ describe('用量快用完：輸入框上方的提示', () => {
     expect('drop' in slash).toBe(false)
   })
 
-  test('沒設定歸屬：任何帳號都能一鍵接手；資料夾歸公司後，個人帳號要先確認風險（按兩次）才接手', async ($, on) => {
+  test('歸屬不管換帳號：資料夾歸公司，有憑證的個人帳號照樣一鍵接手，不另外確認', async ($, on) => {
     const home = { ...PERSONAL, credential: 'keychain', credentialId: 'tok-00000001' }
-    const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: home } })
+    const w = world(on, { store: { uses: USES_ALL, policy: { rules: [{ folder: '/w', owner: W }] }, [`account:${P}`]: home } })
     await $.session.start(START)
     await $.session.measure(measure(95) as never)
-    let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     expect((await ui.find({ key: 'band-handoff' }))?.props.label).toBe('用「個人」接著做')
-    await ui.unmount()
-    w.store.set('uses', { ...USES_ALL, policy: true })
-    w.store.set('policy', { rules: [{ folder: '/w', owner: W }] })
-    await $.session.start(START)
-    await $.session.measure(measure(95) as never)
-    ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-    expect(await ui.find({ key: 'band-handoff' })).toBeUndefined() // /w/server 歸公司：個人帳號不算一鍵接手
-    expect(await shows(ui, /公司程式碼會經由「個人」（個人帳號）送出/)).toBe(true)
-    await ui.press({ key: 'band-risky' })
-    await ui.press({ key: 'band-risky-yes' })
+    expect(await shows(ui, /公司程式碼會經由/)).toBe(false)
+    await ui.press({ key: 'band-handoff' })
     expect(w.runs.at(-1)?.argv.join(' ')).toContain('open-wsl.sh')
     expect(w.files['/tmp/braid-resume-tok-00000001.sh']).toContain("'tok-00000001'")
     await ui.unmount()
@@ -662,14 +654,14 @@ describe('新增帳號', () => {
 })
 
 describe('切換設定', () => {
-  test('門檻與順序存回去；資料夾的事交給歸屬頁，這裡沒有清單也沒有下拉', async ($, on) => {
+  test('門檻與順序存回去；換帳號不分資料夾：這裡沒有資料夾清單，也不提歸屬', async ($, on) => {
     const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL, 'account:tok-00000002': WORK2 } })
     await $.session.start(START)
     await $.command.run(RUN('切換'))
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ ...PANE, surface })
       expect(await ui.find({ key: 'sw-scope' })).toBeUndefined()
-      expect(await shows(ui, /全部資料夾都能換到任何帳號/)).toBe(true)
+      expect(await ui.find({ key: 'sw-to-policy' })).toBeUndefined()
       expect(await seen(ui, /可以接手/)).toBe(true)
       await ui.unmount()
     }
@@ -915,6 +907,22 @@ describe('同步', () => {
     await band.unmount()
   })
 
+  test('四種全開、資料夾歸公司、同步夥伴是個人帳號：同步照常複製，用量提示照樣建議換過去，歸屬不插話（同步優先）', async ($, on) => {
+    const w = world(on, {
+      store: { uses: USES_ALL, sync: SYNC_ON, policy: { rules: [{ folder: '/w', owner: W }] }, [`account:${P}`]: PERSONAL },
+      files: { [`${SESS}/${W}/${OW}/local_a.json`]: rec('a', { cwd: '/w/server' }) },
+    })
+    await $.session.start(START)
+    await w.clock.advance(3_000)
+    expect(w.files[`${SESS}/${P}/${OP}/local_a.json`]).toBeDefined() // 歸公司的資料夾也同步：同步不看歸屬表
+    await $.session.measure(measure(92) as never)
+    await w.clock.advance(1)
+    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    expect(await shows(band, /在桌面 app 換成「個人」就能接著做，對話都已同步過去/)).toBe(true)
+    expect(await shows(band, /公司程式碼會經由|歸哪個帳號/)).toBe(false)
+    await band.unmount()
+  })
+
   test('沒開同步：時間到了也什麼都不寫', async ($, on) => {
     const w = world(on, { store: { uses: USES_ALL, sync: { ...SYNC_ON, on: false } }, files: { [`${SESS}/${W}/${OW}/local_a.json`]: rec('a', { cwd: '/w/server' }) } })
     await $.session.start(START)
@@ -992,8 +1000,8 @@ describe('輸入框下方的迷你量表', () => {
   })
 })
 
-describe('歸屬（依資料夾決定帳號）', () => {
-  const USES_P = { ...USES_ALL, policy: true }
+describe('歸屬（依資料夾決定新頁歸哪個帳號；不管對話）', () => {
+  const USES_P = USES_ALL
   // 公司帳號（桌面 app 與 CLI 都 /login 這個）、braid 新增憑證的個人帳號
   const WORK = acct(W, { email: 'me@corp.example', orgId: OW, label: '公司' })
   const HOME = { ...PERSONAL, credential: 'keychain', credentialId: 'tok-00000001' }
@@ -1018,20 +1026,16 @@ describe('歸屬（依資料夾決定帳號）', () => {
     expect(pages(w).pages).toMatchObject([{ title: '週報', project: '/w/server', owner: W, by: W, status: 'published', url: 'https://claude.ai/code/artifact/page-1' }])
   })
 
-  test('第 2 格 公司專案 × 個人帳號：提醒公司程式碼會經由個人帳號送出；一鍵用公司接著做（CLI 自己 /login 的帳號，不帶憑證）', async ($, on) => {
-    const w = world(on, { env: AS_HOME, store: { uses: USES_P, policy: rules(W), [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: { ...PAGE, ...CLI_LOGIN } })
+  test('第 2、3 格 歸屬對不上的對話：照常，不提醒也不建議換帳號（同步優先，歸屬只管新頁）', async ($, on) => {
+    world(on, { env: AS_HOME, store: { uses: USES_P, policy: rules(W), [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: { ...PAGE, ...CLI_LOGIN } })
     await $.session.start(START)
     for (const surface of SURFACES) {
       const band = await $.ui.mount({ ...BAND, surface })
-      expect(await shows(band, /這個資料夾歸「公司」：公司程式碼會經由「個人」（個人帳號）送出，可能違反公司規範/)).toBe(true)
-      expect((await band.find({ key: 'pol-go' }))?.props.label).toBe('用「公司」在新視窗接著做')
+      expect(await shows(band, /braid/)).toBe(false)
+      expect(await band.find({ key: 'pol-go' })).toBeUndefined()
+      expect(await band.find({ key: 'pol-stay' })).toBeUndefined()
       await band.unmount()
     }
-    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
-    await band.press({ key: 'pol-go' })
-    expect(w.files['/tmp/braid-resume--.sh']).toContain("/tool/cli/resume.sh' '-' 'sess-1' '/w/server'") // 「-」：不帶憑證
-    await band.unmount()
-    expect((w.store.get(`account:${W}`) as { source: string }).source).toBe('desktop') // 也是 CLI 登入的帳號，來源仍是桌面
   })
 
   test('第 2 格（頁面）：公司專案用個人帳號發布新頁 → 擋下、存原始檔、排進「待公司發布」；更新已有的頁照常', async ($, on) => {
@@ -1049,16 +1053,6 @@ describe('歸屬（依資料夾決定帳號）', () => {
     expect(w.artifacts.length).toBe(1)
   })
 
-  test('第 3 格 個人專案 × 公司帳號：較強的提醒（公司能取得）；一鍵用個人帳號接著做（帶憑證）', async ($, on) => {
-    const w = world(on, { store: { uses: USES_P, policy: rules(P), [`account:${W}`]: WORK, [`account:${P}`]: HOME } })
-    await $.session.start(START)
-    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
-    expect(await shows(band, /這個資料夾歸「個人」：個人內容會經由「公司」（公司帳號）送出，公司能取得/)).toBe(true)
-    await band.press({ key: 'pol-go' })
-    expect(w.files['/tmp/braid-resume-tok-00000001.sh']).toContain("'tok-00000001'")
-    await band.unmount()
-  })
-
   test('第 4 格 個人專案 × 個人帳號：不提醒，新頁照常發布', async ($, on) => {
     const w = world(on, { env: AS_HOME, store: { uses: USES_P, policy: rules(P), [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: PAGE })
     await $.session.start(START)
@@ -1069,40 +1063,45 @@ describe('歸屬（依資料夾決定帳號）', () => {
     expect(w.artifacts.length).toBe(1)
   })
 
-  test('第 5 格 還沒設定：問歸誰（不擋對話）、按了寫回表；回答前新頁擋下排隊；「之後再說」這個對話不再問', async ($, on) => {
+  test('第 5 格 還沒設定：沒有新頁時不問；新頁擋下排隊後才問歸誰，選這個對話這一邊就寫回表並直接發布', async ($, on) => {
     const w = world(on, { store: { uses: USES_P, [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: PAGE })
     await $.session.start(START)
+    let band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    expect(await band.find({ key: `ask-${W}` })).toBeUndefined() // 歸屬只為頁面服務：沒有頁在等就不打斷對話
+    await band.unmount()
     const r = (await $.tool.call(publish())) as { deny?: string }
     expect(r.deny).toMatch(/這個資料夾還沒設定歸哪個帳號/)
+    expect(r.deny).toMatch(/在輸入框上方選這個資料夾歸哪個帳號/)
     expect(pages(w).pages).toMatchObject([{ owner: null, status: 'pending' }])
-    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
-    expect(await shows(band, /「server」歸哪個帳號？/)).toBe(true)
+    band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    expect(await shows(band, /「server」有 1 張新頁在等：這個資料夾歸哪個帳號？/)).toBe(true)
+    expect((await band.find({ key: `ask-${W}` }))?.props.label).toBe('歸「公司」並發布')
+    expect((await band.find({ key: `ask-${P}` }))?.props.label).toBe('歸「個人」') // 別的帳號：只寫表，頁留著等它
     await band.press({ key: 'ask-later' })
     expect(await band.find({ key: `ask-${W}` })).toBeUndefined()
     await band.unmount()
-    await $.session.start(START)
+    await $.session.start(START) // 新的對話：排著的頁從檔案讀回來，又會問
+    await w.clock.advance(1)
     const again = await $.ui.mount({ ...BAND, surface: 'desktop' })
     await again.press({ key: `ask-${W}` })
     expect(w.store.get('policy')).toEqual({ rules: [{ folder: '/w/server', owner: W }] })
+    expect(w.artifacts.length).toBe(1)
+    expect(pages(w).pages).toMatchObject([{ owner: W, status: 'published', url: 'https://claude.ai/code/artifact/page-1' }])
     expect(await again.find({ key: `ask-${W}` })).toBeUndefined()
     await again.unmount()
   })
 
-  test('第 6 格 臨時指定：「這次就用目前帳號」按兩次才算，只算這個對話，不改表', async ($, on) => {
-    const w = world(on, { env: AS_HOME, store: { uses: USES_P, policy: rules(W), [`account:${W}`]: WORK, [`account:${P}`]: HOME } })
+  test('第 5 格 選了別的帳號：寫回表，頁留在待發布、改歸那個帳號，不替你發布', async ($, on) => {
+    const w = world(on, { store: { uses: USES_P, [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: PAGE })
     await $.session.start(START)
+    await $.tool.call(publish())
     const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
-    await band.press({ key: 'pol-stay' })
-    expect(await shows(band, /公司程式碼會經由/)).toBe(true) // 還沒確認：提醒還在
-    await band.press({ key: 'pol-stay-yes' })
-    expect(await band.find({ key: 'pol-stay' })).toBeUndefined()
-    expect(await shows(band, /公司程式碼會經由/)).toBe(false)
+    await band.press({ key: `ask-${P}` })
+    expect(w.store.get('policy')).toEqual({ rules: [{ folder: '/w/server', owner: P }] })
+    expect(w.artifacts.length).toBe(0)
+    expect(pages(w).pages).toMatchObject([{ owner: P, status: 'pending' }])
+    expect(await band.find({ key: `ask-${P}` })).toBeUndefined()
     await band.unmount()
-    expect(w.store.get('policy')).toEqual(rules(W))
-    await $.session.start(START) // 新的對話（或重新載入）：又會提醒
-    const next = await $.ui.mount({ ...BAND, surface: 'desktop' })
-    expect(await next.find({ key: 'pol-stay' })).toBeDefined()
-    await next.unmount()
   })
 
   test('待發布：歸屬帳號的對話按「發布」，braid 替你發布並記下網址；不同邊的要按兩次確認；可以丟掉', async ($, on) => {
