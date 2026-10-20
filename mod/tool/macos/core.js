@@ -803,6 +803,9 @@ var CDM = (function () {
       ui.step('備份', function () {
         io.mkdirp(backupDir);
         var manifest = { createdAt: new Date().toISOString(), sessionsDir: target.dir };
+        // 還原只拿掉這次寫進去的：檔名與寫入時的最後活動時間（之後在新帳號用過的，還原時留著）、這次補進封存清單的
+        manifest.addedSessions = copy.map(function (x) { return { file: x.name, lastActivityAt: typeof x.data.lastActivityAt === 'number' ? x.data.lastActivityAt : null }; });
+        manifest.addedArchived = addArchived.slice();
         io.copyTree(target.dir, io.join(backupDir, 'sessions'));
         if (mergeScopes.length) {
           io.copyTree(lsDir, io.join(backupDir, 'leveldb'));
@@ -873,6 +876,45 @@ var CDM = (function () {
     }
   }
 
+  function sameSet(a, b) { return a.slice().sort().join('\n') === b.slice().sort().join('\n'); }
+
+  // 還原側欄：只拿掉那次寫進去的紀錄（manifest 的 addedSessions），之後新開的、遷移後在新帳號用過的都留著。
+  // 不整個資料夾換回備份：開著 braid 的同步時，換掉的紀錄會從另一個帳號再被帶回來，之後新開的對話也會從側欄消失。
+  // 不寫刪除紀錄（deleted_<id>）：同步夥伴若就是遷移來源，braid 會照刪除紀錄把來源帳號原本那份也刪掉。
+  function undoAdded(io, ui, spec, m, dir) {
+    var removed = 0, kept = [], keptIds = {};
+    arr(m.addedSessions).forEach(function (a) {
+      var p = io.join(m.sessionsDir, a.file);
+      if (!io.exists(p)) return;
+      var now = null;
+      try { now = JSON.parse(io.readText(p)).lastActivityAt; } catch (e) { now = null; }
+      if (typeof now === 'number' && typeof a.lastActivityAt === 'number' && now > a.lastActivityAt) {
+        kept.push(a.file); keptIds[a.file.slice(0, -5)] = true; return;
+      }
+      if (ui.step('拿掉「' + a.file + '」', function () {
+        if (io.exists(p + '.tmp')) io.removeTree(p + '.tmp');   // app 載入時會把孤兒 .tmp 救回成紀錄
+        io.removeTree(p);
+      })) removed++;
+    });
+    var idx = io.join(m.sessionsDir, spec.sessions.archivedIndex), idxBak = io.join(dir, 'sessions', spec.sessions.archivedIndex);
+    var undo = arr(m.addedArchived).filter(function (id) { return !keptIds[id]; });
+    if (undo.length && io.exists(idx)) {
+      ui.step('還原封存清單', function () {
+        var cur = JSON.parse(io.readText(idx));
+        var left = arr(cur.archived).filter(function (id) { return undo.indexOf(id) < 0; });
+        var was = io.exists(idxBak) ? arr(JSON.parse(io.readText(idxBak)).archived) : [];
+        if (sameSet(left, was)) {   // 和備份時一樣：放回備份那份（備份時沒有就拿掉）
+          if (io.exists(idxBak)) io.writeText(idx, io.readText(idxBak)); else io.removeTree(idx);
+        } else {
+          cur.archived = left;
+          io.writeText(idx, JSON.stringify(cur));
+        }
+      });
+    }
+    ui.say('側欄：拿掉這次搬進來的 ' + removed + ' 筆。', 'green');
+    if (kept.length) ui.say('遷移後在新帳號用過的 ' + kept.length + ' 筆留著：' + kept.join('、'), 'yellow');
+  }
+
   function restore(io, opts, dir) {
     var ui = makeUi(io, opts);
     try {
@@ -882,10 +924,14 @@ var CDM = (function () {
       waitAppClosed(io, ui, opts);
       ui.say('從備份還原：' + dir);
       if (m.sessionsDir && io.exists(io.join(dir, 'sessions'))) {
-        ui.step('還原 session 清單', function () {
-          if (io.exists(m.sessionsDir)) io.removeTree(m.sessionsDir);
-          io.copyTree(io.join(dir, 'sessions'), m.sessionsDir);
-        });
+        if (m.addedSessions) undoAdded(io, ui, opts.spec, m, dir);
+        else {
+          ui.say('這份備份是舊版工具做的，沒有記下搬了哪些：側欄清單整個換回備份時的樣子（之後新開的對話也會從側欄拿掉，對話紀錄檔還在）。', 'yellow');
+          ui.step('還原 session 清單', function () {
+            if (io.exists(m.sessionsDir)) io.removeTree(m.sessionsDir);
+            io.copyTree(io.join(dir, 'sessions'), m.sessionsDir);
+          });
+        }
       }
       if (m.mirrorFile && io.exists(io.join(dir, 'mirror.json'))) {
         ui.step('還原環境清單檔', function () {

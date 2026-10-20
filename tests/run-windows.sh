@@ -50,6 +50,19 @@ echo "$out" | grep -q '沒有需要搬的東西' && echo "  ok  重跑無事可�
 echo; echo "######## 還原"
 restore_ps "$W/backups"
 
+echo; echo "######## 舊版備份（沒記下搬了哪些）：照舊整個換回備份時的樣子"
+BK="$W/backups-old" run_ps -Projects "/p/a,/p/c" -Presets none >/dev/null
+node -e 'const fs=require("fs"),f=process.argv[1],m=JSON.parse(fs.readFileSync(f,"utf8").replace(/^\uFEFF/,""));delete m.addedSessions;delete m.addedArchived;fs.writeFileSync(f,JSON.stringify(m))' "$(ls -d "$W/backups-old"/*/)manifest.json"
+restore_ps "$W/backups-old"
+
+echo; echo "######## 還原只拿掉那次搬進來的：遷移後用過的、之後新開的留著"
+BK="$W/backups-undo" run_ps -Projects "/p/a,/p/c" -Presets none >/dev/null
+node verify.mjs touch "$W" "$W.before"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1" -AppDataRoot "$(wslpath -w "$W/app")" -SkipAppCheck -Yes -Restore "$(wslpath -w "$(ls -d "$W/backups-undo"/*/ | head -1)")" | tr -d '\r' >/dev/null
+node verify.mjs undone "$W" "$W.before"
+T_DIR="$W/app/claude-code-sessions/22222222-2222-4222-8222-222222222222/22222222-2222-4222-8222-2222222222aa"
+rm -f "$T_DIR"/local_aaaaaaaa-0000-4000-8000-00000000000[an].json; node verify.mjs restored "$W" "$W.before"   # 其餘都和遷移前一樣
+
 echo; echo "######## 依參數選擇（專案 /p/a、/p/c＋環境 garden）"
 BK="$W/backups-sel" run_ps -Projects "/p/a,/p/c" -Presets garden -PlanJson "$(wslpath -w "$W/plan.json")" >/dev/null
 node verify.mjs selected "$W" "$W.before"

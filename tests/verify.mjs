@@ -2,11 +2,13 @@
 //   node verify.mjs dryrun   <跑過的根目錄> <執行前的快照>
 //   node verify.mjs apply    <跑過的根目錄> <執行前的快照>
 //   node verify.mjs restored <跑過的根目錄> <執行前的快照>
+//   node verify.mjs touch    <跑過的根目錄> <執行前的快照>   遷移後在新帳號用過 a、新開一段 n（給下一步的還原）
+//   node verify.mjs undone   <跑過的根目錄> <執行前的快照>   還原只拿掉那次搬進來的（--projects /p/a,/p/c 搬的 a、c）
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
-import { dump, readPresets, readJson, copyDir, check, eq, finish, PREFIX } from './lib.mjs'
+import { dump, readPresets, readJson, writeJson, copyDir, check, eq, finish, PREFIX } from './lib.mjs'
 
 const [mode, root, before] = process.argv.slice(2)
 const S = '11111111-1111-4111-8111-111111111111', SO = '11111111-1111-4111-8111-1111111111aa'
@@ -53,6 +55,23 @@ if (mode === 'restored') {
   eq(treeHash(tgt(app)), treeHash(tgt(app0)), '目標帳號 session 資料夾與遷移前一致')
   eq(readJson(path.join(app, 'ccd-session-presets.json')), readJson(path.join(app0, 'ccd-session-presets.json')), '環境清單檔與遷移前一致')
   eq(await dump(lsCopy(app, 'restored')), lsBefore, 'Local Storage 每個鍵都與遷移前一致')
+  finish()
+}
+
+const rec = (c) => path.join(tgt(app), `local_${uuid(c)}.json`)
+if (mode === 'touch') {
+  const a = readJson(rec('a'))
+  writeJson(rec('a'), { ...a, lastActivityAt: a.lastActivityAt + 1000, title: 'a 遷移後用過' })
+  writeJson(rec('n'), { ...a, sessionId: `local_${uuid('n')}`, cliSessionId: 'new', title: '遷移後新開的' })
+  process.exit(0)
+}
+if (mode === 'undone') {
+  console.log('== 還原：只拿掉那次搬進來的 ==')
+  eq(fs.readdirSync(tgt(app)).sort(), [`deleted_${uuid('e')}`, ...['a', 'd', 'n', 't'].map((c) => `local_${uuid(c)}.json`)].sort(),
+    '拿掉沒用過的 c；遷移後用過的 a、之後新開的 n、原本的 d、t 與刪除紀錄留著')
+  eq(readJson(rec('a')).title, 'a 遷移後用過', '用過的那筆是用過之後的內容')
+  check(!fs.existsSync(path.join(tgt(app), 'archived-sessions.idx')), '封存清單回到備份時（備份時沒有，就拿掉）')
+  eq(treeHash(src(app)), treeHash(src(app0)), '來源帳號一個檔都沒動')
   finish()
 }
 
@@ -162,5 +181,9 @@ const backups = fs.readdirSync(path.join(root, 'backups'))
 eq(backups.length, 1, '產生一份備份')
 const b = path.join(root, 'backups', backups[0])
 check(['manifest.json', 'sessions', 'leveldb', 'mirror.json'].every((n) => fs.existsSync(path.join(b, n))), '備份含 session、Local Storage、環境清單檔')
+const manifest = readJson(path.join(b, 'manifest.json'))
+eq(manifest.addedSessions, ['a', 'c', 'f', 'i'].map((c) => ({ file: `local_${uuid(c)}.json`, lastActivityAt: readJson(path.join(src(app0), `local_${uuid(c)}.json`)).lastActivityAt })),
+  '備份記下這次寫進去的檔與當時的最後活動時間（還原只拿掉這些）')
+eq(manifest.addedArchived, [`local_${uuid('c')}`], '備份記下這次補進封存清單的')
 eq(treeHash(path.join(b, 'sessions')), treeHash(tgt(app0)), '備份的 session 是遷移前的樣子')
 finish()

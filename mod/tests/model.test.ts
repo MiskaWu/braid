@@ -480,6 +480,38 @@ const r = (id: string, over: Record<string, unknown> = {}) => JSON.stringify({ s
 const json = (text: string | undefined) => JSON.parse(text ?? 'null') as Record<string, unknown>
 
 describe('自動同步：複製側欄紀錄', () => {
+  test('換帳號後方向反過來：同步自己寫過去、app 沒動過的複本不寫回去；app 改過的照常帶回來', async () => {
+    const m = memFs({
+      '/a/local_x.json': { text: r('x', { title: 'X' }), mtime: 10 },
+      '/a/local_y.json': { text: r('y'), mtime: 10 },
+      '/b/local_z.json': { text: r('z'), mtime: 5 },
+    })
+    const memory = {}
+    expect(await mirrorSessions(m.io, SPEC, '/a', '/b', '/', 'all', TRASH, memory)).toEqual({ created: 2, updated: 0, deleted: 0 })
+    // 換成 b：x、y 是剛複製過去的，修改時間比 a 的新，沒有記憶的話會被當成新的變更整批寫回 a
+    const before = m.writes.length
+    expect(await mirrorSessions(m.io, SPEC, '/b', '/a', '/', 'all', TRASH, memory)).toEqual({ created: 1, updated: 0, deleted: 0 })
+    expect(m.writes.slice(before)).toEqual(['/a/local_z.json']) // 只有 b 自己的那筆
+    // 在 b 用過 x（app 改了它）：照常帶回 a
+    m.files['/b/local_x.json'] = { text: r('x', { title: 'X 在 b 改過', lastActivityAt: 200 }), mtime: 5_000 }
+    expect(await mirrorSessions(m.io, SPEC, '/b', '/a', '/', 'all', TRASH, memory)).toEqual({ created: 0, updated: 1, deleted: 0 })
+    expect(json(m.files['/a/local_x.json']?.text).title).toBe('X 在 b 改過')
+    // 換回 a：剛寫回 a 的 x 也是複本，不再寫去 b
+    expect(await mirrorSessions(m.io, SPEC, '/a', '/b', '/', 'all', TRASH, memory)).toEqual({ created: 0, updated: 0, deleted: 0 })
+  })
+
+  test('遷移工具「還原」拿掉的紀錄：另一邊的複本沒動過就不帶回來，在那邊用過才帶回來', async () => {
+    const m = memFs({ '/a/local_mig.json': { text: r('mig'), mtime: 10 }, '/b/local_z.json': { text: r('z'), mtime: 5 } }, ['/a', '/b'])
+    const memory = {}
+    await mirrorSessions(m.io, SPEC, '/a', '/b', '/', 'all', TRASH, memory)
+    delete m.files['/a/local_mig.json'] // 還原：只拿掉那次搬進來的，不留刪除紀錄
+    await mirrorSessions(m.io, SPEC, '/b', '/a', '/', 'all', TRASH, memory)
+    expect(m.files['/a/local_mig.json']).toBeUndefined()
+    m.files['/b/local_mig.json'] = { text: r('mig', { lastActivityAt: 300 }), mtime: 9_000 } // 在 b 接著用了
+    await mirrorSessions(m.io, SPEC, '/b', '/a', '/', 'all', TRASH, memory)
+    expect(m.files['/a/local_mig.json']).toBeDefined()
+  })
+
   test('目標帳號中途被 app 登入：在那一筆之前停下，後面的新增、刪除、封存清單都不寫', async () => {
     const m = memFs({
       '/s/local_a.json': { text: r('a'), mtime: 10 },
@@ -489,11 +521,11 @@ describe('自動同步：複製側欄紀錄', () => {
       '/t/local_x.json': { text: r('x'), mtime: 1 },
     })
     m.app.activeAfterWrites = 0 // 一開始就被登入了：連刪除的備份都不寫
-    expect(await mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all', TRASH)).toEqual({ created: 0, updated: 0, deleted: 0, stopped: true })
+    expect(await mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all', TRASH, {})).toEqual({ created: 0, updated: 0, deleted: 0, stopped: true })
     expect([m.writes, m.removes]).toEqual([[], []])
     const n = memFs({ '/s/local_a.json': { text: r('a'), mtime: 10 }, '/s/local_b.json': { text: r('b', { isArchived: true }), mtime: 10 }, '/s/local_c.json': { text: r('c'), mtime: 10 }, '/t/local_z.json': { text: r('z'), mtime: 1 } })
     n.app.activeAfterWrites = 1 // 寫完第一筆就換過去了
-    expect(await mirrorSessions(n.io, SPEC, '/s', '/t', '/', 'all', TRASH)).toEqual({ created: 1, updated: 0, deleted: 0, stopped: true })
+    expect(await mirrorSessions(n.io, SPEC, '/s', '/t', '/', 'all', TRASH, {})).toEqual({ created: 1, updated: 0, deleted: 0, stopped: true })
     expect(n.writes).toEqual(['/t/local_a.json']) // 封存清單也沒寫
   })
 
@@ -510,7 +542,7 @@ describe('自動同步：複製側欄紀錄', () => {
       '/t/local_old.json': { text: r('old', { lastActivityAt: 1, remoteMcpServersConfig: { old: 1 } }), mtime: 1 },
       '/t/local_new.json': { text: r('new', { lastActivityAt: 50, remoteMcpServersConfig: { mine: 1 } }), mtime: 1 },
     })
-    expect(await mirrorSessions(m.io, SPEC, '/s', '/t', '/', ['/w'], TRASH)).toEqual({ created: 2, updated: 0, deleted: 0 })
+    expect(await mirrorSessions(m.io, SPEC, '/s', '/t', '/', ['/w'], TRASH, {})).toEqual({ created: 2, updated: 0, deleted: 0 })
     expect(json(m.files['/t/local_a.json']?.text)).toEqual({ sessionId: 'local_a', cliSessionId: 'cli-a', cwd: '/w', lastActivityAt: 100, startedFromEnvironmentId: null, remoteMcpServersConfig: { mine: 1 }, title: 'A' })
     expect(json(m.files['/t/local_w.json']?.text).originCwd).toBe('/w') // 資料夾看 originCwd
     expect(m.writes.sort()).toEqual(['/t/local_a.json', '/t/local_w.json'])
@@ -527,7 +559,7 @@ describe('自動同步：複製側欄紀錄', () => {
       '/s/local_d.json': { text: r('d', { title: '只有封存變了', isArchived: true }), mtime: 20 },
       '/t/local_d.json': { text: r('d', { title: '只有封存變了', isArchived: false, sshReattach: { pid: 3 } }), mtime: 10 },
     })
-    expect(await mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all', TRASH)).toEqual({ created: 0, updated: 2, deleted: 0 })
+    expect(await mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all', TRASH, {})).toEqual({ created: 0, updated: 2, deleted: 0 })
     expect(json(m.files['/t/local_a.json']?.text)).toEqual({
       sessionId: 'local_a',
       cliSessionId: 'cli-a',
@@ -544,7 +576,7 @@ describe('自動同步：複製側欄紀錄', () => {
     expect(json(m.files['/t/local_d.json']?.text)).toMatchObject({ isArchived: true, sshReattach: { pid: 3 } })
     expect(json(m.files['/t/archived-sessions.idx']?.text)).toEqual({ v: 1, archived: ['local_d'] })
     m.writes.length = 0
-    expect(await mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all', TRASH)).toEqual({ created: 0, updated: 0, deleted: 0 })
+    expect(await mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all', TRASH, {})).toEqual({ created: 0, updated: 0, deleted: 0 })
     expect(m.writes).toEqual([])
   })
 
@@ -555,16 +587,16 @@ describe('自動同步：複製側欄紀錄', () => {
       '/t/local_b.json': { text: r('b', { isArchived: true }), mtime: 10 },
       '/t/archived-sessions.idx': { text: JSON.stringify({ v: 1, archived: ['local_z', 'local_b'] }), mtime: 10 },
     })
-    await mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all', TRASH)
+    await mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all', TRASH, {})
     expect(json(m.files['/t/archived-sessions.idx']?.text)).toEqual({ v: 1, archived: ['local_a', 'local_z'] })
 
     const n = memFs({ '/s/local_a.json': { text: r('a'), mtime: 20 }, '/t/local_x.json': { text: r('x'), mtime: 1 } })
-    await mirrorSessions(n.io, SPEC, '/s', '/t', '/', 'all', TRASH)
+    await mirrorSessions(n.io, SPEC, '/s', '/t', '/', 'all', TRASH, {})
     expect(n.files['/t/archived-sessions.idx']).toBeUndefined()
 
     const odd = JSON.stringify({ v: 2, archived: ['local_q'] })
     const o = memFs({ '/s/local_a.json': { text: r('a', { isArchived: true }), mtime: 20 }, '/t/archived-sessions.idx': { text: odd, mtime: 1 } })
-    await mirrorSessions(o.io, SPEC, '/s', '/t', '/', 'all', TRASH)
+    await mirrorSessions(o.io, SPEC, '/s', '/t', '/', 'all', TRASH, {})
     expect(o.files['/t/archived-sessions.idx']?.text).toBe(odd)
   })
 
@@ -577,14 +609,14 @@ describe('自動同步：複製側欄紀錄', () => {
       '/s/deleted_cli-only': { text: '500', mtime: 9 }, // 對話檔 id 的刪除紀錄：那邊沒有這個名字的紀錄，不動
     })
     const before = m.files['/t/local_x.json']?.text
-    expect(await mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all', TRASH)).toEqual({ created: 0, updated: 0, deleted: 1 })
+    expect(await mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all', TRASH, {})).toEqual({ created: 0, updated: 0, deleted: 1 })
     expect(m.files['/bk/sync-deleted/t/local_x.json']?.text).toBe(before)
     expect(m.removes).toEqual(['/t/local_x.json.tmp', '/t/local_x.json'])
     expect(m.files['/t/deleted_x']?.text).toBe('500')
     expect(json(m.files['/t/archived-sessions.idx']?.text)).toEqual({ v: 1, archived: ['local_y'] })
     expect(m.files['/t/deleted_cli-only']).toBeUndefined()
     m.writes.length = 0
-    expect(await mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all', TRASH)).toEqual({ created: 0, updated: 0, deleted: 0 })
+    expect(await mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all', TRASH, {})).toEqual({ created: 0, updated: 0, deleted: 0 })
     expect(m.writes).toEqual([])
   })
 
@@ -600,7 +632,7 @@ describe('自動同步：複製側欄紀錄', () => {
       '/s/deleted_gone': { text: '500', mtime: 9 },
       '/t/deleted_gone': { text: '300', mtime: 1 },
     })
-    expect((await mirrorSessions(m.io, SPEC, '/s', '/t', '/', ['/w'], TRASH)).deleted).toBe(0)
+    expect((await mirrorSessions(m.io, SPEC, '/s', '/t', '/', ['/w'], TRASH, {})).deleted).toBe(0)
     expect(m.removes).toEqual([])
     expect([m.files['/t/local_used.json'], m.files['/t/local_out.json'], m.files['/t/local_both.json']].every(Boolean)).toBe(true)
     expect(m.files['/t/deleted_gone']?.text).toBe('300')
@@ -608,10 +640,10 @@ describe('自動同步：複製側欄紀錄', () => {
 
   test('刪除紀錄的時間讀不懂就看檔案時間；刪不掉就整個停下來，不留刪除紀錄', async () => {
     const m = memFs({ '/s/deleted_x': { text: '??', mtime: 500 }, '/t/local_x.json': { text: r('x', { lastActivityAt: 400 }), mtime: 1 } })
-    expect((await mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all', TRASH)).deleted).toBe(1)
+    expect((await mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all', TRASH, {})).deleted).toBe(1)
     expect(m.files['/t/deleted_x']?.text).toBe('500')
     const f = memFs({ '/s/deleted_x': { text: '500', mtime: 9 }, '/t/local_x.json': { text: r('x', { lastActivityAt: 400 }), mtime: 1 } }, [], true)
-    await expect(mirrorSessions(f.io, SPEC, '/s', '/t', '/', 'all', TRASH)).rejects.toThrow(/EBUSY/)
+    await expect(mirrorSessions(f.io, SPEC, '/s', '/t', '/', 'all', TRASH, {})).rejects.toThrow(/EBUSY/)
     expect(f.files['/t/local_x.json']).toBeDefined()
     expect(f.files['/t/deleted_x']).toBeUndefined()
   })
@@ -623,14 +655,14 @@ describe('自動同步：複製側欄紀錄', () => {
       if (path.startsWith('/bk/')) throw new Error('EACCES')
       await write(path, text)
     }
-    await expect(mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all', TRASH)).rejects.toThrow(/EACCES/)
+    await expect(mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all', TRASH, {})).rejects.toThrow(/EACCES/)
     expect(m.removes).toEqual([])
     expect(m.files['/t/local_x.json']).toBeDefined()
   })
 
   test('目標資料夾讀不到就整個失敗（不會寫到別的地方）', async () => {
     const m = memFs({ '/s/local_a.json': { text: r('a'), mtime: 20 } })
-    await expect(mirrorSessions(m.io, SPEC, '/s', '/missing', '/', 'all', TRASH)).rejects.toThrow(/ENOENT/)
+    await expect(mirrorSessions(m.io, SPEC, '/s', '/missing', '/', 'all', TRASH, {})).rejects.toThrow(/ENOENT/)
     expect(m.writes).toEqual([])
   })
 

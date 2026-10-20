@@ -14,6 +14,16 @@ echo "######## 試跑";  run --dry-run --plan-json "$W/plan.json" >/dev/null; no
 echo "######## 寫入";  run --plan-json "$W/plan.json" >/dev/null;           node verify.mjs apply "$W" "$W.before"
 echo "######## 重跑";  run | grep -q '沒有需要搬的東西' && echo "  ok  重跑無事可做" || { echo "  NG  重跑還想寫東西"; exit 1; }
 echo "######## 還原";  restore "$W/backups"
+echo "######## 舊版備份（沒記下搬了哪些）：照舊整個換回備份時的樣子"
+BK="$W/backups-old" run --projects "/p/a,/p/c" --presets none >/dev/null
+node -e 'const fs=require("fs"),f=process.argv[1],m=JSON.parse(fs.readFileSync(f));delete m.addedSessions;delete m.addedArchived;fs.writeFileSync(f,JSON.stringify(m))' "$(ls -d "$W/backups-old"/*/)manifest.json"
+restore "$W/backups-old"
+echo "######## 還原只拿掉那次搬進來的：遷移後用過的、之後新開的留著"
+BK="$W/backups-undo" run --projects "/p/a,/p/c" --presets none >/dev/null
+node verify.mjs touch "$W" "$W.before"
+node run-core.mjs --restore "$(ls -d "$W/backups-undo"/*/ | head -1)" >/dev/null; node verify.mjs undone "$W" "$W.before"
+T_DIR="$W/app/claude-code-sessions/22222222-2222-4222-8222-222222222222/22222222-2222-4222-8222-2222222222aa"
+rm -f "$T_DIR"/local_aaaaaaaa-0000-4000-8000-00000000000[an].json; node verify.mjs restored "$W" "$W.before"   # 其餘都和遷移前一樣
 echo "######## 依參數選擇（專案 /p/a、/p/c＋環境 garden）"
 BK="$W/backups-sel" run --projects "/p/a,/p/c" --presets garden --plan-json "$W/plan.json" >/dev/null; node verify.mjs selected "$W" "$W.before"
 restore "$W/backups-sel"

@@ -99,6 +99,16 @@ export async function orgDirOf(io: MirrorIo, root: string, sep: string, account:
   return best?.name ?? null
 }
 
+/**
+ * 同步自己寫出去的檔：資料夾 → 檔名 → 寫完時的樣子（修改時間:大小）。
+ * 換帳號後方向反過來，來源資料夾裡樣子還是這樣的檔就是同步自己的複本、app 沒動過，不寫回去。
+ * 沒有它的話，「修改時間比較新」會把剛複製過去的複本當成新的變更，每次換帳號都把全部紀錄原樣寫回去（2026-10-20 實測）；
+ * 寫得越久，越容易撞上 app 存檔與下一次換帳號。也讓遷移工具的「還原」不會被同步抵銷：另一邊的複本沒動過，就不帶回來。
+ */
+export type MirrorMemory = Record<string, Record<string, string>>
+
+const look = (f: FsEntry) => `${f.mtimeMs}:${f.size}`
+
 /** stopped：目標帳號中途被 app 登入，後面的沒寫（下一次同步方向會反過來）。 */
 export type MirrorResult = { created: number; updated: number; deleted: number; stopped?: true }
 
@@ -115,6 +125,7 @@ export type MirrorResult = { created: number; updated: number; deleted: number; 
  * 只依 src 明確的刪除紀錄刪，src 讀到空的也不會因此刪東西。刪之前先把那筆原樣存到 trash（備份寫不進去就不刪）。
  * 寫過、刪過的紀錄依封存狀態更新 dst 的封存清單（app 載入時用它先載未封存的）。src 一律不寫。
  * 每一筆（一次新增或更新、一整組刪除步驟、封存清單）動手前問 io.stillInactive()，dst 被 app 登入了就停在那裡。
+ * memory 記同步自己寫出去的檔（見 MirrorMemory）：src 裡同步自己寫過、app 沒動過的檔不帶回 dst；寫完把 dst 新寫的記進去。
  */
 export async function mirrorSessions(
   io: MirrorIo,
@@ -124,6 +135,7 @@ export async function mirrorSessions(
   sep: string,
   scope: 'all' | readonly string[],
   trash: { dir: string; sep: string },
+  memory: MirrorMemory,
 ): Promise<MirrorResult> {
   const srcFiles = (await io.list(src)).filter(f => f.kind === 'file')
   const dstFiles = (await io.list(dst)).filter(f => f.kind === 'file')
@@ -152,7 +164,24 @@ export async function mirrorSessions(
   let created = 0
   let updated = 0
   let deleted = 0
-  const stop = (): MirrorResult => ({ created, updated, deleted, stopped: true })
+  const ours = memory[src] ?? {}
+  const written: string[] = []
+  // 寫完（或中途停下）把 dst 這次寫的檔記下來；已經不在的拿掉
+  const remember = async (): Promise<void> => {
+    if (written.length === 0 && deleted === 0) return
+    const now = new Map((await io.list(dst)).filter(f => f.kind === 'file').map(f => [f.name, f]))
+    const kept: Record<string, string> = {}
+    for (const [name, sig] of Object.entries(memory[dst] ?? {})) if (now.has(name)) kept[name] = sig
+    for (const name of written) {
+      const f = now.get(name)
+      if (f) kept[name] = look(f)
+    }
+    memory[dst] = kept
+  }
+  const stop = async (): Promise<MirrorResult> => {
+    await remember()
+    return { created, updated, deleted, stopped: true }
+  }
 
   // 先處理刪除：在 src 刪過、dst 還有的
   const srcNames = new Set(srcFiles.map(f => f.name))
@@ -184,7 +213,7 @@ export async function mirrorSessions(
     }
     const deletedAt = /^\d+$/.test(stamp) ? Number(stamp) : t.mtimeMs
     if (at(old) > deletedAt) continue
-    if (!(await io.stillInactive())) return stop() // 整組刪除步驟之前問一次，不會刪到一半停下
+    if (!(await io.stillInactive())) return await stop() // 整組刪除步驟之前問一次，不會刪到一半停下
     // 先刪紀錄再留刪除紀錄：刪不掉就整個停下來（丟錯），不會留下「有刪除紀錄、紀錄卻還在」的狀態
     await io.write(`${trash.dir}${trash.sep}${name}`, raw) // 備份；寫不進去會丟錯，下面就不刪
     if (dstByName.has(`${name}.tmp`)) await io.remove(`${dst}${sep}${name}.tmp`) // app 載入時會把孤兒 .tmp 救回成紀錄
@@ -199,6 +228,7 @@ export async function mirrorSessions(
     if (!isRecord(f.name)) continue
     const id = f.name.slice(0, -'.json'.length)
     if (tombs.has(id.slice(spec.filePrefix.length))) continue
+    if (ours[f.name] === look(f)) continue // 同步自己寫過來、app 沒動過的複本：不寫回去
     const have = dstByName.get(f.name)
     if (have && f.mtimeMs <= have.mtimeMs) continue
     const rec = await readRec(io, `${src}${sep}${f.name}`)
@@ -216,17 +246,19 @@ export async function mirrorSessions(
       for (const k of toReplace) if (k in rep) next[k] = rep[k]
     }
     if (old) for (const k of accountKeys) if (k in old) next[k] = old[k]
-    if (!(await io.stillInactive())) return stop()
+    if (!(await io.stillInactive())) return await stop()
     await io.write(`${dst}${sep}${f.name}`, JSON.stringify(next))
+    written.push(f.name)
     if (have) updated++
     else created++
     archived.set(id, next.isArchived === true)
   }
 
   if (archived.size > 0) {
-    if (!(await io.stillInactive())) return stop()
+    if (!(await io.stillInactive())) return await stop()
     await updateArchivedIndex(io, spec, dst, sep, dstByName.has(spec.archivedIndex), archived)
   }
+  await remember()
   return { created, updated, deleted }
 }
 

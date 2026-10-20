@@ -403,6 +403,50 @@ function Select-Migration($Copy, $PresetCands, [string]$TargetName) {
 
 # ---------- 還原 ----------
 
+function Test-SameSet($A, $B) { return ((@($A | Sort-Object) -join "`n") -eq (@($B | Sort-Object) -join "`n")) }
+
+# 還原側欄：只拿掉那次寫進去的紀錄（manifest 的 addedSessions），之後新開的、遷移後在新帳號用過的都留著。
+# 不整個資料夾換回備份：開著 braid 的同步時，換掉的紀錄會從另一個帳號再被帶回來，之後新開的對話也會從側欄消失。
+# 不寫刪除紀錄（deleted_<id>）：同步夥伴若就是遷移來源，braid 會照刪除紀錄把來源帳號原本那份也刪掉。
+function Undo-Added($m, [string]$Dir) {
+    $removed = 0
+    $kept = New-Object System.Collections.ArrayList
+    $keptIds = @{}
+    foreach ($entry in (As-Array $m.addedSessions)) {
+        $file = [string]$entry.file
+        $rec = Join-Path $m.sessionsDir $file
+        if (-not (Test-Path -LiteralPath $rec)) { continue }
+        $now = $null
+        try { $now = (Read-JsonFile $rec).lastActivityAt } catch { $now = $null }
+        if ($null -ne $now -and $null -ne $entry.lastActivityAt -and [double]$now -gt [double]$entry.lastActivityAt) {
+            [void]$kept.Add($file); $keptIds[$file.Substring(0, $file.Length - 5)] = $true; continue
+        }
+        $ok = Invoke-Step "拿掉「$file」" {
+            if (Test-Path -LiteralPath "$rec.tmp") { Remove-Item -LiteralPath "$rec.tmp" -Force }   # app 載入時會把孤兒 .tmp 救回成紀錄
+            Remove-Item -LiteralPath $rec -Force
+        }
+        if ($ok) { $removed++ }
+    }
+    $idx = Join-Path $m.sessionsDir $spec.sessions.archivedIndex
+    $idxBak = Join-Path (Join-Path $Dir 'sessions') $spec.sessions.archivedIndex
+    $undo = @((As-Array $m.addedArchived) | Where-Object { -not $keptIds.ContainsKey([string]$_) })
+    if ($undo.Count -gt 0 -and (Test-Path -LiteralPath $idx)) {
+        Invoke-Step '還原封存清單' {
+            $cur = Read-JsonFile $idx
+            $left = @((As-Array $cur.archived) | Where-Object { $undo -notcontains $_ })
+            $was = if (Test-Path -LiteralPath $idxBak) { @(As-Array (Read-JsonFile $idxBak).archived) } else { @() }
+            if (Test-SameSet $left $was) {   # 和備份時一樣：放回備份那份（備份時沒有就拿掉）
+                if (Test-Path -LiteralPath $idxBak) { Copy-Item -LiteralPath $idxBak -Destination $idx -Force } else { Remove-Item -LiteralPath $idx -Force }
+            } else {
+                Set-Prop $cur 'archived' $left
+                Write-JsonFile $idx $cur
+            }
+        } | Out-Null
+    }
+    Say "側欄：拿掉這次搬進來的 $removed 筆。" Green
+    if ($kept.Count -gt 0) { Say "遷移後在新帳號用過的 $($kept.Count) 筆留著：$($kept -join '、')" Yellow }
+}
+
 function Invoke-Restore([string]$Dir) {
     $manifestPath = Join-Path $Dir 'manifest.json'
     if (-not (Test-Path -LiteralPath $manifestPath)) { throw "這不是遷移備份資料夾（找不到 manifest.json）：$Dir" }
@@ -410,10 +454,14 @@ function Invoke-Restore([string]$Dir) {
     Wait-AppClosed
     Say "從備份還原：$Dir"
     if ((Has $m 'sessionsDir') -and (Test-Path -LiteralPath (Join-Path $Dir 'sessions'))) {
-        Invoke-Step '還原 session 清單' {
-            if (Test-Path -LiteralPath $m.sessionsDir) { Remove-Item -LiteralPath $m.sessionsDir -Recurse -Force }
-            Copy-Item -LiteralPath (Join-Path $Dir 'sessions') -Destination $m.sessionsDir -Recurse
-        } | Out-Null
+        if (Has $m 'addedSessions') { Undo-Added $m $Dir }
+        else {
+            Say '這份備份是舊版工具做的，沒有記下搬了哪些：側欄清單整個換回備份時的樣子（之後新開的對話也會從側欄拿掉，對話紀錄檔還在）。' Yellow
+            Invoke-Step '還原 session 清單' {
+                if (Test-Path -LiteralPath $m.sessionsDir) { Remove-Item -LiteralPath $m.sessionsDir -Recurse -Force }
+                Copy-Item -LiteralPath (Join-Path $Dir 'sessions') -Destination $m.sessionsDir -Recurse
+            } | Out-Null
+        }
     }
     if ((Has $m 'mirrorFile') -and (Test-Path -LiteralPath (Join-Path $Dir 'mirror.json'))) {
         Invoke-Step '還原環境清單檔' { Copy-Item -LiteralPath (Join-Path $Dir 'mirror.json') -Destination $m.mirrorFile -Force } | Out-Null
@@ -724,6 +772,9 @@ function Main {
     Invoke-Step '備份' {
         New-Item -ItemType Directory -Path $script:BackupDir -Force | Out-Null
         $manifest = [ordered]@{ createdAt = (Get-Date).ToString('o'); sessionsDir = $target.Dir }
+        # 還原只拿掉這次寫進去的：檔名與寫入時的最後活動時間（之後在新帳號用過的，還原時留著）、這次補進封存清單的
+        $manifest.addedSessions = @($copy | ForEach-Object { [ordered]@{ file = $_.File.Name; lastActivityAt = $(if (Has $_.Data 'lastActivityAt') { $_.Data.lastActivityAt } else { $null }) } })
+        $manifest.addedArchived = @($addArchived)
         Copy-Item -LiteralPath $target.Dir -Destination (Join-Path $script:BackupDir 'sessions') -Recurse
         if ($mergeScopes.Count -gt 0) {
             Copy-Item -LiteralPath $lsDir -Destination (Join-Path $script:BackupDir 'leveldb') -Recurse
@@ -733,7 +784,7 @@ function Main {
                 $manifest.mirrorFile = $mirrorPath
             }
         }
-        [IO.File]::WriteAllText((Join-Path $script:BackupDir 'manifest.json'), (ConvertTo-Json -InputObject $manifest), $Utf8)
+        [IO.File]::WriteAllText((Join-Path $script:BackupDir 'manifest.json'), (ConvertTo-Json -InputObject $manifest -Depth 5), $Utf8)
     } | Out-Null
     Say "已備份到：$script:BackupDir" Green
 

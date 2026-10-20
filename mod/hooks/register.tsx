@@ -27,7 +27,7 @@ import type {
 } from '../types'
 import { backupLabel, desktopPaths, listToolBackups, listTrash, scanDesktop, type DesktopEnv, type DesktopIo, type DesktopPaths } from './desktop'
 import { manualPath, parseDryRun, planLaunch, toolArgs, type ToolRequest } from './launch'
-import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo } from './mirror'
+import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo, type MirrorMemory } from './mirror'
 import { accountCard, backupTiles, header, ownerHero, rankRow, switchHero, syncFlow, usageStrip, useIcon, type Window } from './visual'
 import { ANY, draftGroups, dropRule, normalizePolicy, projectOf, ruleFor, sameSide, setRule, verdictFor, type FolderRemotes, type Verdict } from './policy'
 import { isNewPage, parseIndex, pendingFor, projectSlug, serializeIndex, titleOf, urlIn, type PageEntry, type PageIndex } from './pages'
@@ -482,6 +482,19 @@ async function runMirror($: $, mode: 'tick' | 'urgent' | 'now'): Promise<void> {
   }
 }
 
+/** $.store 裡的同步記憶：認不得的形狀當成空的（最多換帳號時多寫一次，和沒有記憶一樣）。 */
+function memoryFrom(x: unknown): MirrorMemory {
+  const out: MirrorMemory = {}
+  if (typeof x !== 'object' || x === null || Array.isArray(x)) return out
+  for (const [dir, files] of Object.entries(x as Record<string, unknown>)) {
+    if (typeof files !== 'object' || files === null || Array.isArray(files)) continue
+    const kept: Record<string, string> = {}
+    for (const [name, sig] of Object.entries(files as Record<string, unknown>)) if (typeof sig === 'string') kept[name] = sig
+    out[dir] = kept
+  }
+  return out
+}
+
 async function mirrorOnce($: $, platform: BraidPlatform, now: number): Promise<BraidMirror> {
   const base: BraidMirror = { at: now, active: null, to: null, toOrg: null, created: 0, updated: 0, deleted: 0, problem: null, detail: null }
   pathsCache ??= await desktopPaths(desktopIo($), await desktopEnv($), platform)
@@ -534,7 +547,10 @@ async function mirrorOnce($: $, platform: BraidPlatform, now: number): Promise<B
     // 同步刪掉的側欄紀錄先原樣放這裡：braid-backups/sync-deleted/<帳號>/<組織>/local_<id>.json
     const bk = pathsCache.backups
     const trash = { dir: [bk.local, 'sync-deleted', target.to, toOrg].join(bk.sep), sep: bk.sep }
-    const r = await mirrorSessions(io, spec, `${root}${sep}${active}${sep}${fromOrg}`, `${root}${sep}${target.to}${sep}${toOrg}`, sep, target.scope, trash)
+    // 同步自己寫出去的檔記在 $.store（跨對話共用）：換帳號後不把它們原樣寫回去
+    const memory = memoryFrom(await $.store.get('mirrorMemory'))
+    const r = await mirrorSessions(io, spec, `${root}${sep}${active}${sep}${fromOrg}`, `${root}${sep}${target.to}${sep}${toOrg}`, sep, target.scope, trash, memory)
+    await $.store.set('mirrorMemory', memory)
     return { ...base, active, to: target.to, toOrg, ...r }
   } catch (err) {
     return { ...base, active, to: target.to, toOrg, problem: 'failed', detail: err instanceof Error ? err.message : String(err) }
@@ -1896,7 +1912,7 @@ async function drawBackups($: $, ui: UI) {
           value={keep.toolCopies === null ? 'all' : String(keep.toolCopies)}
           onSelect={v => putKeep($, k => ({ ...k, toolCopies: v === 'all' ? null : Number(v) }))}
         />
-        {!ui.Svg && fine(ui, `目前 ${desktop.backups.length} 份。工具寫入前會整份備份一次，可以還原。`)}
+        {!ui.Svg && fine(ui, `目前 ${desktop.backups.length} 份。工具寫入前會整份備份一次；還原只拿掉那次搬進來的對話，之後新開的、用過的留著。`)}
       </Box>
       )}
       {desktop.backups.slice(0, 5).map(b => (

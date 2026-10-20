@@ -962,6 +962,23 @@ describe('同步', () => {
     expect(`${SESS}/${P}/${OP}/local_new.json` in w.files).toBe(false)
   })
 
+  test('換帳號後：剛複製過去的紀錄不原樣寫回來；遷移工具還原拿掉的也不被同步帶回來', async ($, on) => {
+    const WDIR = `${SESS}/${W}/${OW}`
+    const w = world(on, {
+      store: { uses: USES_ALL, sync: SYNC_ON, [`account:${P}`]: PERSONAL },
+      files: { [`${WDIR}/local_a.json`]: rec('a', { cwd: '/w/server' }), [`${WDIR}/local_mig.json`]: rec('mig', { cwd: '/old/proj' }) },
+    })
+    await $.session.start(START)
+    await w.clock.advance(3_000)
+    expect(w.store.get('mirror')).toMatchObject({ active: W, to: P, created: 2 })
+    delete w.files[`${WDIR}/local_mig.json`] // 遷移工具的「還原」：只拿掉那次搬進來的，不留刪除紀錄
+    w.files[`${APP}/config.json`] = JSON.stringify({ lastKnownAccountUuid: P }) // 使用者在 app 換成個人
+    const before = Object.keys(w.files).filter(k => k.startsWith(`${WDIR}/`)).sort()
+    await w.clock.advance(60_000)
+    expect(w.store.get('mirror')).toMatchObject({ active: P, to: W, created: 0, updated: 0 })
+    expect(Object.keys(w.files).filter(k => k.startsWith(`${WDIR}/`)).sort()).toEqual(before)
+  })
+
   test('沒開同步：時間到了也什麼都不寫', async ($, on) => {
     const w = world(on, { store: { uses: USES_ALL, sync: { ...SYNC_ON, on: false } }, files: { [`${SESS}/${W}/${OW}/local_a.json`]: rec('a', { cwd: '/w/server' }) } })
     await $.session.start(START)
