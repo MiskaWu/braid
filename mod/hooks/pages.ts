@@ -99,3 +99,68 @@ export function isNewPage(input: Record<string, unknown>): boolean {
 export function pendingFor(index: PageIndex, isMine: (owner: string | null) => boolean): PageEntry[] {
   return index.pages.filter(p => p.status === 'pending' && p.owner !== ANY && isMine(p.owner))
 }
+
+/** 同一張頁的重送：同專案、同標題、還在排隊的那筆（更新它，不另排一筆）。 */
+export function pendingTwin(index: PageIndex, project: string, title: string): PageEntry | undefined {
+  return index.pages.find(p => p.status === 'pending' && p.project === project && p.title === title)
+}
+
+// ── 新頁被歸屬擋下時，在對話裡問使用者 ──
+
+type Who = { id: string; label: string }
+
+/**
+ * 選項做什麼：publish＝用這個對話的帳號發布（不改表）；own＝還沒設定的資料夾寫回表、歸 owner，publish 時順便現在發布、否則排著；
+ * queue＝排進待發布（歸屬帳號發布，還沒設定的就等之後決定歸誰）；skip＝這次不發。
+ */
+export type PageAction = { kind: 'publish' } | { kind: 'own'; owner: string; publish: boolean } | { kind: 'queue' } | { kind: 'skip' }
+export type PageChoice = { label: string; action: PageAction }
+
+/**
+ * 問題與選項（$.ui.ask：2–4 個選項，只有文字、沒有說明，所以選了會怎樣寫在問題裡）。
+ * 決定只能來自使用者按的選項。選擇框在人不在時自己結束的話回什麼不保證，所以**第一個選項一律是「先排著」**：
+ * 不發布、不改歸屬表，就算被自動帶過也不會替使用者做決定。
+ * canPublish：這個對話能發布（braid 用一年期憑證開的視窗不能，官方只保證 /login 的對話）。
+ * others：還沒設定時另外給的帳號（跟這個對話不同邊的，只列第一個，選項才不會超過四個）。
+ */
+export function pageQuestion(d: {
+  title: string
+  name: string
+  me: Who
+  owner: Who | null
+  others: readonly Who[]
+  canPublish: boolean
+}): { question: string; header: string; choices: PageChoice[] } {
+  const header = '新頁歸屬'
+  const skip: PageChoice = { label: '這次不發', action: { kind: 'skip' } }
+  const token = '這個視窗是 braid 用一年期憑證開的，官方只保證 /login 的對話能發布，所以只能先排著。'
+  if (d.owner) {
+    const o = d.owner.label
+    const m = d.me.label
+    const why = d.canPublish
+      ? `排進待發布的話，之後在「${o}」登入的對話發布；用「${m}」發布的話，頁面會歸「${m}」，之後不能轉移，用「${o}」的對話改不到它。`
+      : `排進待發布的話，之後在「${o}」登入的對話發布。${token}`
+    return {
+      question: `「${d.name}」歸「${o}」，這個對話是「${m}」。${why}新頁「${d.title}」要怎麼處理？`,
+      header,
+      choices: [{ label: '排進待發布', action: { kind: 'queue' } }, ...(d.canPublish ? [{ label: `用「${m}」發布`, action: { kind: 'publish' } } as PageChoice] : []), skip],
+    }
+  }
+  const other = d.others[0]
+  const why = d.canPublish
+    ? '選了歸誰，這個資料夾之後的新頁都用那個帳號發布；頁面歸發布它的帳號，之後不能轉移。'
+    : `選了歸誰，這個資料夾之後的新頁都用那個帳號發布。${token}`
+  const mine: PageChoice = d.canPublish
+    ? { label: `歸「${d.me.label}」並發布`, action: { kind: 'own', owner: d.me.id, publish: true } }
+    : { label: `歸「${d.me.label}」，先排著`, action: { kind: 'own', owner: d.me.id, publish: false } }
+  return {
+    question: `「${d.name}」還沒設定歸哪個帳號。${why}新頁「${d.title}」要怎麼處理？`,
+    header,
+    choices: [
+      { label: '先排著，之後再決定', action: { kind: 'queue' } },
+      mine,
+      ...(other ? [{ label: `歸「${other.label}」，先排著`, action: { kind: 'own', owner: other.id, publish: false } } as PageChoice] : []),
+      skip,
+    ],
+  }
+}

@@ -31,7 +31,7 @@ import { manualPath, parseDryRun, planLaunch, toolArgs, type ToolRequest } from 
 import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo, type MirrorMemory } from './mirror'
 import { accountCard, backupTiles, header, ownerHero, rankRow, switchHero, syncFlow, usageStrip, useIcon, type Window } from './visual'
 import { ANY, draftGroups, dropRule, normalizePolicy, projectOf, ruleFor, sameSide, setRule, verdictFor, type FolderRemotes, type Verdict } from './policy'
-import { isNewPage, parseIndex, pendingFor, projectSlug, serializeIndex, titleOf, urlIn, type PageEntry, type PageIndex } from './pages'
+import { isNewPage, pageQuestion, parseIndex, pendingTwin, projectSlug, serializeIndex, titleOf, urlIn, type PageChoice, type PageEntry, type PageIndex } from './pages'
 import {
   absorbTokenTwin,
   bandFor,
@@ -115,6 +115,7 @@ const pagesAtom = atom({ plugin: 'braid', key: 'pages' } as const, null)
 const draftAtom = atom({ plugin: 'braid', key: 'draft' } as const, null)
 const newOwnerAtom = atom({ plugin: 'braid', key: 'newOwner' } as const, null)
 const skipAskAtom = atom({ plugin: 'braid', key: 'skipAsk' } as const, null)
+const skipWaitingAtom = atom({ plugin: 'braid', key: 'skipWaiting' } as const, false)
 const viaTokenAtom = atom({ plugin: 'braid', key: 'viaToken' } as const, false)
 const helpAtom = atom({ plugin: 'braid', key: 'help' } as const, null)
 const migrateAskedAtom = atom({ plugin: 'braid', key: 'migrateAsked' } as const, [])
@@ -926,7 +927,7 @@ async function handoff($: $, id: string): Promise<void> {
 
 // ── 歸屬（依資料夾決定帳號）──────────────────────────────────
 
-/** 這個對話的資料夾在歸屬表裡的判斷；認不出這個對話的帳號時是 null。「這次就用目前帳號」算對得上。 */
+/** 這個對話的資料夾在歸屬表裡的判斷；認不出這個對話的帳號時是 null。 */
 async function verdictHere($: $): Promise<Verdict | null> {
   const id = await read($, currentAtom)
   const accounts = await read($, accountsAtom)
@@ -934,6 +935,34 @@ async function verdictHere($: $): Promise<Verdict | null> {
   if (!current) return null
   const cwd = await $.session.cwd()
   return verdictFor(await read($, policyAtom), accounts, current, cwd)
+}
+
+// git 的最上層：同一個資料夾問一次就記著（輸入框上方每次重畫都會用到）
+const gitTops = new Map<string, string | null>()
+
+/** 這個對話的專案：git 的最上層（worktree 跟著它的專案），不是 git repo 就是資料夾本身。寫歸屬規則用它。 */
+async function projectHere($: $): Promise<string> {
+  const cwd = await $.session.cwd()
+  if (!gitTops.has(cwd)) {
+    let top: string | null = null
+    try {
+      const r = await $.process.run(['git', '-C', cwd, 'rev-parse', '--show-toplevel'], { timeoutMs: 5_000 })
+      top = r.exitCode === 0 ? r.stdout.trim() || null : null
+    } catch {
+      top = null
+    }
+    gitTops.set(cwd, top)
+  }
+  return projectOf(gitTops.get(cwd) ?? cwd)
+}
+
+/**
+ * 待發布的頁算哪個專案：符合的歸屬規則的資料夾，沒有規則就是 projectHere。
+ * 同一個專案在不同子資料夾重送同一張頁，才會認成同一筆（2026-10-20：acme 底下兩個工作目錄各排了一筆）。
+ */
+async function pageKey($: $): Promise<string> {
+  const rule = ruleFor(await read($, policyAtom), await $.session.cwd())
+  return rule ? rule.folder : projectHere($)
 }
 
 /** 頁面清單與原始檔的資料夾：~/.claude/artifact-sources。 */
@@ -973,66 +1002,129 @@ async function refreshPages($: $, given?: PageIndex): Promise<void> {
 // braid 自己替使用者發布排隊的頁時，攔截的那一關要放行（發布的資料夾不一定是這個對話的資料夾）
 const publishingNow = new Set<string>()
 
-/** 新頁發布前比對歸屬：對得上照常發布並記下網址；對不上或還沒設定就擋下，存原始檔、排進待發布。 */
+/** 新頁發布前比對歸屬：對得上照常發布並記下網址；對不上或還沒設定就在對話裡問使用者（askPage），照他選的做。 */
 async function guardArtifact($: $, e: Record<string, unknown>, next: (e: never) => Promise<unknown>): Promise<unknown> {
   const input = e as Record<string, unknown>
   const filePath = typeof input.file_path === 'string' ? input.file_path : null
   if (!isNewPage(input) || (filePath && publishingNow.has(filePath))) return next(e as never)
   const accounts = await read($, accountsAtom)
   const here = await verdictHere($)
-  const cwd = await $.session.cwd()
-  const project = projectOf(cwd)
+  const project = await pageKey($)
   const me = await read($, currentAtom)
-  const allowed = !here || here.kind === 'ok' || here.kind === 'any'
-  if (allowed) {
-    const result = (await next(e as never)) as { text?: string; isError?: boolean; deny?: string }
-    const url = !result?.deny && !result?.isError ? urlIn(result?.text) : null
-    if (url) {
-      const pages = await readPages($)
-      if (pages) {
-        let html: string | null = null
-        try {
-          html = filePath ? await $.fs.read(filePath) : null
-        } catch {
-          html = null
-        }
-        const owner = here?.kind === 'ok' ? here.owner.id : me
-        pages.index.pages.push({ id: `p${Date.now().toString(36)}`, title: titleOf(input, html), project, source: null, input: {}, owner, by: me, status: 'published', url, at: Date.now() })
-        await writePages($, pages.root, pages.index)
-      }
-    }
-    return result
-  }
-  // 擋下：存原始檔、排進待發布
-  const pages = await readPages($)
-  const ownerId = here.kind === 'mismatch' ? here.owner.id : null
-  const ownerName = here.kind === 'mismatch' ? here.owner.label : null
-  let saved: string | null = null
+  if (!here || here.kind === 'ok' || here.kind === 'any') return publishAndRecord($, e, next, { project, owner: here?.kind === 'ok' ? here.owner.id : me, html: null })
+
+  // 擋下：在對話裡問使用者（決定只能來自他按的選項，Claude 放行不了）
   let html: string | null = null
-  if (pages && filePath) {
+  try {
+    html = filePath ? await $.fs.read(filePath) : null
+  } catch {
+    html = null
+  }
+  const title = titleOf(input, html)
+  const cur = me ? accounts[me] : undefined
+  const owner = here.kind === 'mismatch' ? here.owner : null
+  const name = project.split(/[\\/]/).filter(Boolean).pop() ?? project
+  const others = cur && !owner ? orderedIds(accounts, (await read($, switchAtom)).order).map(id => accounts[id] as BraidAccount).filter(a => !sameSide(a, cur)) : []
+  const q = cur
+    ? pageQuestion({ title, name, me: cur, owner, others, canPublish: !(await read($, viaTokenAtom)) })
+    : null
+  const picked = q ? await askPage($, q) : ({ none: '認不出這個對話用的是哪個帳號' } as const)
+  const queue = async (to: string | null, why: string) => {
+    const saved = await queuePage($, input, filePath, html, { project, owner: to, by: me, title })
+    const where = saved ? `原始檔存到 ${saved}，排進「待發布」。` : '原始檔沒存成，請之後再發布一次。'
+    const who = to && accounts[to] ? accounts[to].label : null
+    const how = who ? `等「${who}」登入的對話發布（那邊的輸入框上方會問）。` : '使用者可以在輸入框上方或 /braid →「歸屬」決定歸誰、再發布。'
+    return { deny: `${why}「${title}」${where}${how}不要改用其他方式發布。` }
+  }
+  if ('choice' in picked) {
+    const a = picked.choice.action
+    if (a.kind === 'skip') return { deny: `使用者選了這次不發布「${title}」。不要再發布它，除非使用者再要求。` }
+    if (a.kind === 'publish') return publishAndRecord($, e, next, { project, owner: me, html })
+    if (a.kind === 'queue') return queue(owner?.id ?? null, owner ? '使用者選了排進待發布：' : '使用者選了先排著、之後再決定歸誰：')
+    await putPolicy($, p => setRule(p, project, a.owner))
+    if (a.publish) return publishAndRecord($, e, next, { project, owner: a.owner, html })
+    return queue(a.owner, `使用者把「${name}」設定為歸「${accounts[a.owner]?.label ?? a.owner}」：`)
+  }
+  if ('text' in picked) {
+    return queue(owner?.id ?? null, `使用者沒有選選項，而是回覆：「${picked.text}」。請照他的回覆處理；要發布就再呼叫一次 Artifact，braid 會再問他。這次先排著：`)
+  }
+  return queue(owner?.id ?? null, `沒有得到使用者的選擇（${picked.none}），先排著：`)
+}
+
+/**
+ * 問使用者這張新頁怎麼處理：$.ui.ask（引擎自己的選擇框，出現在對話裡）。只有使用者按的選項算數，Claude 答不了它。
+ * 關掉選擇框、這裡沒辦法問（-p）都會丟錯，當成沒選；在「其他」打的字原樣交回去。
+ * mod 不能直接呼叫 AskUserQuestion 工具（引擎要求走 $.ui.ask），所以看不出選擇框是不是人不在時自己結束的：
+ * 第一個選項一律是「先排著」（見 pages.ts 的 pageQuestion），被自動帶過也不會替使用者發布或改表。
+ */
+async function askPage($: $, q: { question: string; header: string; choices: PageChoice[] }): Promise<{ choice: PageChoice } | { text: string } | { none: string }> {
+  let said: string
+  try {
+    said = (await $.ui.ask(q.question, { header: q.header, options: q.choices.map(c => c.label) })).trim()
+  } catch {
+    return { none: '選擇框被關掉了，或這裡沒辦法問' }
+  }
+  const choice = q.choices.find(c => c.label === said)
+  if (choice) return { choice }
+  return said ? { text: said } : { none: '使用者沒有回答' }
+}
+
+/** 照常發布並記下網址與歸屬；同一張頁先前排著的那筆一併記成已發布（不留待發布）。 */
+async function publishAndRecord(
+  $: $,
+  e: Record<string, unknown>,
+  next: (e: never) => Promise<unknown>,
+  page: { project: string; owner: string | null; html: string | null },
+): Promise<unknown> {
+  const input = e as Record<string, unknown>
+  const filePath = typeof input.file_path === 'string' ? input.file_path : null
+  const result = (await next(e as never)) as { text?: string; isError?: boolean; deny?: string }
+  const url = !result?.deny && !result?.isError ? urlIn(result?.text) : null
+  if (!url) return result
+  const pages = await readPages($)
+  if (!pages) return result
+  let html = page.html
+  if (html === null && filePath) {
     try {
       html = await $.fs.read(filePath)
-      const id = `p${Date.now().toString(36)}`
-      saved = `${pages.root}/${projectSlug(project)}/${id}${/\.md$/i.test(filePath) ? '.md' : '.html'}`
-      await $.fs.write(saved, html)
-      const rest = Object.fromEntries(Object.entries(input).filter(([k]) => !['tool', 'tool_use_id', 'consent', 'file_path', 'action'].includes(k)))
-      pages.index.pages.push({ id, title: titleOf(input, html), project, source: saved, input: rest, owner: ownerId, by: me, status: 'pending', url: null, at: Date.now() })
-      await writePages($, pages.root, pages.index)
     } catch {
-      saved = null
+      html = null
     }
   }
-  const meName = me ? (accounts[me]?.label ?? '這個帳號') : '這個帳號'
-  const why =
-    here.kind === 'mismatch'
-      ? `這個資料夾歸「${ownerName}」，這個對話是「${meName}」，braid 先不讓新頁用「${meName}」發布（頁面會歸發布它的帳號，事後不能轉移）。`
-      : `這個資料夾還沒設定歸哪個帳號，braid 先不發布新頁（頁面會歸發布它的帳號，事後不能轉移）。`
-  const where = saved ? `原始檔已存到 ${saved}，排進「待發布」。` : '原始檔沒存成，請之後再發布一次。'
-  const how =
-    here.kind === 'mismatch'
-      ? `到「${ownerName}」登入的對話（例如桌面 app 換成「${ownerName}」）打開 /braid →「歸屬」按「發布」；確定要歸「${meName}」也可以在那裡選「就用這個帳號發布」。`
-      : '在輸入框上方選這個資料夾歸哪個帳號：選的是這個對話的帳號（或「不分」）就會直接發布；也可以打開 /braid →「歸屬」設定。'
-  return { deny: `${why}${where}${how}請把這段說明轉告使用者，不要改用其他方式發布。` }
+  const title = titleOf(input, html)
+  const me = await read($, currentAtom)
+  const twin = pendingTwin(pages.index, page.project, title)
+  const done = { status: 'published' as const, url, by: me, owner: page.owner, at: Date.now() }
+  pages.index.pages = twin
+    ? pages.index.pages.map(p => (p.id === twin.id ? { ...p, ...done } : p))
+    : [...pages.index.pages, { id: `p${Date.now().toString(36)}`, title, project: page.project, source: null, input: {}, ...done }]
+  await writePages($, pages.root, pages.index)
+  return result
+}
+
+/** 排進待發布：存原始檔；同專案、同標題還在排的那筆就更新它，不另排一筆。回存到哪裡，存不成是 null。 */
+async function queuePage(
+  $: $,
+  input: Record<string, unknown>,
+  filePath: string | null,
+  html: string | null,
+  page: { project: string; owner: string | null; by: string | null; title: string },
+): Promise<string | null> {
+  const pages = await readPages($)
+  if (!pages || !filePath || html === null) return null
+  try {
+    const twin = pendingTwin(pages.index, page.project, page.title)
+    const id = twin?.id ?? `p${Date.now().toString(36)}`
+    const saved = twin?.source ?? `${pages.root}/${projectSlug(page.project)}/${id}${/\.md$/i.test(filePath) ? '.md' : '.html'}`
+    await $.fs.write(saved, html)
+    const rest = Object.fromEntries(Object.entries(input).filter(([k]) => !['tool', 'tool_use_id', 'consent', 'file_path', 'action'].includes(k)))
+    const entry = { id, title: page.title, project: page.project, source: saved, input: rest, owner: page.owner, by: page.by, status: 'pending' as const, url: null, at: Date.now() }
+    pages.index.pages = twin ? pages.index.pages.map(p => (p.id === id ? entry : p)) : [...pages.index.pages, entry]
+    await writePages($, pages.root, pages.index)
+    return saved
+  } catch {
+    return null
+  }
 }
 
 /** 替使用者發布一張排隊的頁（在這個對話的帳號底下）；發布成功回網址。 */
@@ -1068,6 +1160,16 @@ async function publishPending($: $, pageId: string): Promise<string | null> {
   }
 }
 
+/** 排著等這個帳號（或同一邊的帳號）發布的頁。braid 用一年期憑證開的視窗不給（官方只保證 /login 的對話能發布）；按過「之後再說」的這個對話不再列。 */
+async function waitingHere($: $, cur: BraidAccount): Promise<{ id: string; title: string }[]> {
+  if ((await read($, viaTokenAtom)) || (await read($, skipWaitingAtom))) return []
+  const accounts = await read($, accountsAtom)
+  return ((await read($, pagesAtom))?.list ?? []).filter(p => {
+    const owner = p.owner && p.owner !== ANY ? accounts[p.owner] : undefined
+    return p.status === 'pending' && !!owner && sameSide(owner, cur)
+  })
+}
+
 /**
  * 輸入框上方要不要問「從其他帳號搬過來」：這個對話就是桌面 app 現在登入的帳號、還沒問過，而且別的帳號（同步夥伴除外）有對話還沒在這裡。
  * 桌面資料還沒讀進來就先不問（對話開始時在背景讀）。
@@ -1088,7 +1190,7 @@ async function migrateNudge($: $, current: string): Promise<{ name: string; pend
 async function askHere($: $): Promise<{ project: string; name: string; pending: number } | null> {
   const here = await verdictHere($)
   if (here?.kind !== 'unset' && here?.kind !== 'lost') return null
-  const project = here.project
+  const project = await pageKey($)
   if ((await read($, skipAskAtom)) === project) return null
   const pending = ((await read($, pagesAtom))?.list ?? []).filter(p => p.status === 'pending' && p.project === project).length
   if (pending === 0) return null
@@ -1967,7 +2069,7 @@ async function drawPolicy($: $, ui: UI) {
   const cur = current ? accounts[current] : undefined
   const policy = await read($, policyAtom)
   const cwd = await $.session.cwd()
-  const project = projectOf(cwd)
+  const project = await projectHere($)
   const here = await verdictHere($)
   const confirming = await read($, confirmingAtom)
   const ids = orderedIds(accounts, (await read($, switchAtom)).order)
@@ -2168,6 +2270,7 @@ export const register: Register = on => {
     // 這個對話裡的一次性狀態（等確認的、按過之後再說的）與讀進來的清單，重新載入時從頭來
     await update($, confirmingAtom, () => null)
     await update($, skipAskAtom, () => null)
+    await update($, skipWaitingAtom, () => false)
     await update($, draftAtom, () => null)
     await update($, pagesAtom, () => null)
     const platform = await detectPlatform($)
@@ -2349,6 +2452,40 @@ export const register: Register = on => {
             })}
             <Button key="ask-any" label={publishes(ANY) ? '不分，直接發布' : '不分'} dimColor onPress={() => answerAsk($, ask.project, ANY)} />
             <Button key="ask-later" label="之後再說" role="dismiss" onPress={() => update($, skipAskAtom, () => ask.project)} />
+          </Box>
+        </Box>
+      )
+    }
+
+    // 有新頁排著等這個帳號（或同一邊的帳號）發布：在這裡就能發布，不用進面板
+    const waiting = uses?.policy && cur ? await waitingHere($, cur) : []
+    const first = waiting[0]
+    if (first && cur) {
+      const titles = waiting.slice(0, 2).map(p => `「${p.title}」`).join('、') + (waiting.length > 2 ? '…' : '')
+      return (
+        <Box flexDirection="column">
+          <Text wrap="wrap">
+            <Text color="suggestion" bold>
+              braid
+            </Text>{' '}
+            {`有 ${waiting.length} 張新頁排著等「${cur.label}」發布：${titles}。`}
+          </Text>
+          <Box flexDirection="row" gap={1} flexWrap="wrap">
+            <Button
+              key="wait-publish"
+              label={waiting.length === 1 ? `發布「${first.title}」` : `全部發布（${waiting.length} 張）`}
+              variant="primary"
+              onPress={async () => {
+                const urls: string[] = []
+                for (const p of waiting) {
+                  const url = await publishPending($, p.id)
+                  if (url) urls.push(url)
+                }
+                $.ui.toast(urls.length === waiting.length ? `braid：已發布 ${urls.join('、')}` : `braid：${waiting.length - urls.length} 張沒發布成，打開 /braid →「歸屬」看看。`)
+              }}
+            />
+            <Button key="wait-open" label="到歸屬頁看看" dimColor onPress={() => openPane($, 'policy')} />
+            <Button key="wait-later" label="之後再說" role="dismiss" onPress={() => update($, skipWaitingAtom, () => true)} />
           </Box>
         </Box>
       )

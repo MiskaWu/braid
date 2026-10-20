@@ -39,7 +39,7 @@ import {
 import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo, type SessionSpec } from '../hooks/mirror'
 import { accountCard, backupTiles, fit, header, initial, ownerHero, rankRow, slotOf, switchHero, syncFlow, useIcon } from '../hooks/visual'
 import { ANY, cleanFolder, draftGroups, normalizePolicy, projectOf, remoteKey, ruleFor, setRule, verdictFor } from '../hooks/policy'
-import { isNewPage, parseIndex, projectSlug, titleOf, urlIn } from '../hooks/pages'
+import { isNewPage, pageQuestion, parseIndex, pendingTwin, projectSlug, titleOf, urlIn } from '../hooks/pages'
 import { claudeInstall, claudeLookup, newCredentialId, newestFirst, planTerminal, removeFile, removeToolBackup, secretDelete, wrapperText } from '../hooks/terminal'
 
 // 2026-10-16 14:00（UTC+8）
@@ -493,6 +493,55 @@ function memFs(files: Record<string, { text: string; mtime: number }>, dirs: str
 
 const r = (id: string, over: Record<string, unknown> = {}) => JSON.stringify({ sessionId: `local_${id}`, cliSessionId: `cli-${id}`, cwd: '/w', lastActivityAt: 100, ...over })
 const json = (text: string | undefined) => JSON.parse(text ?? 'null') as Record<string, unknown>
+
+describe('新頁被歸屬擋下時問的選項', () => {
+  const me = { id: 'p', label: '個人' }
+  const work = { id: 'w', label: '公司' }
+  const base = { title: '週報', name: 'acme', me, others: [] as { id: string; label: string }[], canPublish: true }
+
+  test('第一個選項一律是「先排著」：不發布、不改歸屬表（人不在時選擇框自己帶過也不會替使用者決定）', async () => {
+    const cases = [
+      pageQuestion({ ...base, owner: work }),
+      pageQuestion({ ...base, owner: work, canPublish: false }),
+      pageQuestion({ ...base, owner: null, others: [work] }),
+      pageQuestion({ ...base, owner: null, others: [work], canPublish: false }),
+      pageQuestion({ ...base, owner: null }),
+    ]
+    for (const q of cases) {
+      expect(q.choices[0]?.action).toEqual({ kind: 'queue' })
+      expect(q.choices.at(-1)?.action).toEqual({ kind: 'skip' })
+      expect(q.choices.length).toBeGreaterThanOrEqual(2)
+      expect(q.choices.length).toBeLessThanOrEqual(4)
+      expect(q.question.endsWith('？')).toBe(true)
+      expect(q.header.length).toBeLessThanOrEqual(12)
+    }
+  })
+
+  test('歸別的帳號：排著、用這個帳號發布（寫清楚不能轉移）、不發；不能發布的視窗沒有發布', async () => {
+    const q = pageQuestion({ ...base, owner: work })
+    expect(q.choices.map(c => [c.label, c.action.kind])).toEqual([['排進待發布', 'queue'], ['用「個人」發布', 'publish'], ['這次不發', 'skip']])
+    expect(q.question).toMatch(/頁面會歸「個人」，之後不能轉移/)
+    expect(pageQuestion({ ...base, owner: work, canPublish: false }).choices.map(c => c.action.kind)).toEqual(['queue', 'skip'])
+  })
+
+  test('還沒設定：先排著、歸自己並發布、歸另一邊的第一個帳號先排著、不發；不能發布的視窗歸自己也只是排著', async () => {
+    const q = pageQuestion({ ...base, owner: null, others: [work, { id: 'x', label: '第三' }] })
+    expect(q.choices.map(c => [c.label, c.action])).toEqual([
+      ['先排著，之後再決定', { kind: 'queue' }],
+      ['歸「個人」並發布', { kind: 'own', owner: 'p', publish: true }],
+      ['歸「公司」，先排著', { kind: 'own', owner: 'w', publish: false }],
+      ['這次不發', { kind: 'skip' }],
+    ])
+    expect(pageQuestion({ ...base, owner: null, canPublish: false }).choices[1]).toEqual({ label: '歸「個人」，先排著', action: { kind: 'own', owner: 'p', publish: false } })
+  })
+
+  test('同一張頁的重送：同專案、同標題、還在排的那筆', async () => {
+    const page = (id: string, project: string, title: string, status: 'pending' | 'published') => ({ id, title, project, source: null, input: {}, owner: null, by: null, status, url: null, at: 0 })
+    const index = { v: 1 as const, pages: [page('a', '/p', '週報', 'published'), page('b', '/p', '週報', 'pending'), page('c', '/q', '週報', 'pending')] }
+    expect(pendingTwin(index, '/p', '週報')?.id).toBe('b')
+    expect(pendingTwin(index, '/p', '月報')).toBeUndefined()
+  })
+})
 
 describe('自動同步：複製側欄紀錄', () => {
   test('換帳號後方向反過來：同步自己寫過去、app 沒動過的複本不寫回去；app 改過的照常帶回來', async () => {

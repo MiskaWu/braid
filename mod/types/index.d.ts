@@ -155,6 +155,8 @@ declare module 'claude-code' {
       help: string | null
       /** 這個對話是 braid 用一年期憑證開的（官方只保證 /login 的對話能發布頁面） */
       viaToken: boolean
+      /** 這個對話裡按過「之後再說」的「有新頁等這個帳號發布」 */
+      skipWaiting: boolean
       /** 這個對話裡按過「之後再說」的專案（不再問歸屬） */
       skipAsk: string | null
       /** 草稿：依 git 遠端分組的專案資料夾 */

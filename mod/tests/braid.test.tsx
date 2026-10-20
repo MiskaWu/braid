@@ -53,6 +53,8 @@ type Opts = {
   failBash?: string
   /** rm 失敗（檔案被占用） */
   failRm?: boolean
+  /** 對話裡的選擇框（AskUserQuestion）怎麼答：選項的文字、{ afk }＝離開座位時自己結束、{ text }＝打字回覆；沒給＝這裡沒辦法問 */
+  ask?: (q: Asked) => string | { afk: true } | { text: string }
   /** 每寫一個檔之後呼叫（例如模擬同步寫到一半時使用者在 app 換帳號） */
   onWrite?: (path: string, files: Record<string, string>) => void
   /** git -C <資料夾> remote get-url origin 的回答（沒列到的＝不是 git repo） */
@@ -78,6 +80,8 @@ const SPEC = JSON.stringify({
     replaceFromTarget: ['remoteMcpServersConfig'],
   },
 })
+
+type Asked = { question: string; header: string; labels: string[] }
 
 function world(on: On, opts: Opts = {}) {
   const runs: { argv: string[]; env?: Record<string, string> }[] = []
@@ -135,7 +139,22 @@ function world(on: On, opts: Opts = {}) {
     const { Text } = $.ui.resolve(e)
     return <Text>? 看快捷鍵</Text>
   })
-  on('session.cwd', () => ({ value: opts.cwd ?? '/w/server' }))
+  const at = { cwd: opts.cwd ?? '/w/server' }
+  on('session.cwd', () => ({ value: at.cwd }))
+  // 對話裡的選擇框（$.ui.ask 走 AskUserQuestion）：記下問了什麼，照 opts.ask 答（離開座位時自己結束的，答案是第一個選項、另帶 afkTimeoutMs）
+  const asked: Asked[] = []
+  if (opts.ask) {
+    const answer = opts.ask
+    on('tool.call', { tool: 'AskUserQuestion' }, ($, e) => {
+      const q = (e as unknown as { questions: { question: string; header: string; options: { label: string }[] }[] }).questions[0]
+      if (!q) throw new Error('沒有問題')
+      const one: Asked = { question: q.question, header: q.header, labels: q.options.map(o => o.label) }
+      asked.push(one)
+      const a = answer(one)
+      const text = typeof a === 'string' ? a : 'text' in a ? a.text : (q.options[0]?.label ?? '')
+      return { result: { questions: [q], answers: { [q.question]: text }, ...(typeof a === 'object' && 'afk' in a ? { afkTimeoutMs: 60_000 } : {}) } } as never
+    })
+  }
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.usage', () => ({ value: { startedAt: NOW, context: { window: 200_000 }, rateLimits: [] } }))
   on('settings.read', ($, e) => ({ value: e.source === 'policy' ? (opts.policy ?? {}) : {} }))
@@ -223,7 +242,7 @@ function world(on: On, opts: Opts = {}) {
     copies.push(e.text)
     return { value: { isCopied: true as const } }
   })
-  return { runs, files, mtimes, opened, toasts, copies, statuses, clock, store, fetched, reloads, artifacts }
+  return { runs, files, mtimes, opened, toasts, copies, statuses, clock, store, fetched, reloads, artifacts, asked, at }
 }
 
 const SURFACES = ['terminal', 'desktop'] as const
@@ -1080,7 +1099,8 @@ describe('歸屬（依資料夾決定新頁歸哪個帳號；不管對話）', (
     const r = (await $.tool.call(publish())) as { text?: string; deny?: string }
     expect(r.deny).toBeUndefined()
     expect(w.artifacts.length).toBe(1)
-    expect(pages(w).pages).toMatchObject([{ title: '週報', project: '/w/server', owner: W, by: W, status: 'published', url: 'https://claude.ai/code/artifact/page-1' }])
+    expect(pages(w).pages).toMatchObject([{ title: '週報', project: '/w', owner: W, by: W, status: 'published', url: 'https://claude.ai/code/artifact/page-1' }]) // 專案＝規則的資料夾
+    expect(w.asked).toEqual([]) // 對得上：不問
   })
 
   test('第 2、3 格 歸屬對不上的對話：照常，不提醒也不建議換帳號（同步優先，歸屬只管新頁）', async ($, on) => {
@@ -1095,19 +1115,69 @@ describe('歸屬（依資料夾決定新頁歸哪個帳號；不管對話）', (
     }
   })
 
-  test('第 2 格（頁面）：公司專案用個人帳號發布新頁 → 擋下、存原始檔、排進「待公司發布」；更新已有的頁照常', async ($, on) => {
-    const w = world(on, { env: AS_HOME, store: { uses: USES_P, policy: rules(W), [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: PAGE })
+  test('第 2 格（頁面）：公司專案用個人帳號發布新頁 → 在對話裡問；選「排進待發布」就存原始檔、排著等公司發布；同專案別的資料夾重送更新原本那筆；更新已有的頁不問', async ($, on) => {
+    const w = world(on, { env: AS_HOME, store: { uses: USES_P, policy: rules(W), [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: { ...PAGE, '/w/report.html': PAGE['/w/server/report.html'] }, ask: () => '排進待發布' })
     await $.session.start(START)
     const r = (await $.tool.call(publish())) as { deny?: string }
-    expect(r.deny).toMatch(/這個資料夾歸「公司」，這個對話是「個人」/)
-    expect(r.deny).toMatch(/原始檔已存到 \/home\/u\/\.claude\/artifact-sources\/server\/p[0-9a-z]+\.html，排進「待發布」/)
+    expect(w.asked).toEqual([
+      {
+        question: '「w」歸「公司」，這個對話是「個人」。排進待發布的話，之後在「公司」登入的對話發布；用「個人」發布的話，頁面會歸「個人」，之後不能轉移，用「公司」的對話改不到它。新頁「週報」要怎麼處理？',
+        header: '新頁歸屬',
+        labels: ['排進待發布', '用「個人」發布', '這次不發'], // 第一個一律是不發布的那個
+      },
+    ])
+    expect(r.deny).toMatch(/^使用者選了排進待發布：「週報」原始檔存到 \/home\/u\/\.claude\/artifact-sources\/w\/p[0-9a-z]+\.html，排進「待發布」。等「公司」登入的對話發布/)
+    expect(r.deny).toMatch(/不要改用其他方式發布。$/)
     expect(w.artifacts.length).toBe(0)
     const [entry] = pages(w).pages
-    expect(entry).toMatchObject({ title: '週報', project: '/w/server', owner: W, by: P, status: 'pending', url: null })
+    expect(entry).toMatchObject({ title: '週報', project: '/w', owner: W, by: P, status: 'pending', url: null })
     expect(w.files[String(entry?.source)]).toBe(PAGE['/w/server/report.html'])
+    w.at.cwd = '/w' // 同一個專案、另一個工作目錄重送同一張（2026-10-20 acme 就這樣排了兩筆）
+    await $.tool.call(publish({ file_path: '/w/report.html' }))
+    expect(pages(w).pages.map(p => [p.id, p.status])).toEqual([[entry?.id, 'pending']])
     const upd = (await $.tool.call(publish({ url: 'https://claude.ai/code/artifact/old' }))) as { deny?: string }
     expect(upd.deny).toBeUndefined()
     expect(w.artifacts.length).toBe(1)
+    expect(w.asked.length).toBe(2) // 更新已有的頁不問
+  })
+
+  test('第 2 格 選「用個人發布」：當場發布、記下網址，先前排著的同一張記成已發布，不留在待發布', async ($, on) => {
+    const answers = ['排進待發布', '用「個人」發布']
+    const w = world(on, { env: AS_HOME, store: { uses: USES_P, policy: rules(W), [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: PAGE, ask: () => answers.shift() ?? '' })
+    await $.session.start(START)
+    await $.tool.call(publish())
+    const r = (await $.tool.call(publish())) as { deny?: string; text?: string }
+    expect(r.deny).toBeUndefined()
+    expect(w.artifacts.length).toBe(1)
+    expect(pages(w).pages).toMatchObject([{ title: '週報', project: '/w', owner: P, by: P, status: 'published', url: 'https://claude.ai/code/artifact/page-1' }])
+  })
+
+  test('第 2 格 選「這次不發」：不發布也不排隊，跟 Claude 說不要再發', async ($, on) => {
+    const w = world(on, { env: AS_HOME, store: { uses: USES_P, policy: rules(W), [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: PAGE, ask: () => '這次不發' })
+    await $.session.start(START)
+    const r = (await $.tool.call(publish())) as { deny?: string }
+    expect(r.deny).toBe('使用者選了這次不發布「週報」。不要再發布它，除非使用者再要求。')
+    expect([w.artifacts.length, pages(w).pages.length]).toEqual([0, 0])
+  })
+
+  test('沒選就先排著：離開座位時選擇框自己結束（答案是第一個選項）、打字回覆，都不會發布', async ($, on) => {
+    const answers: (string | { afk: true } | { text: string })[] = [{ afk: true }, { text: '等我問一下主管' }]
+    const w = world(on, { env: AS_HOME, store: { uses: USES_P, policy: rules(W), [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: PAGE, ask: () => answers.shift() ?? { afk: true } })
+    await $.session.start(START)
+    const afk = (await $.tool.call(publish())) as { deny?: string }
+    expect(afk.deny).toMatch(/^使用者選了排進待發布：「週報」/) // 看不出是人不在時自己結束的：所以第一個選項放「排進待發布」
+    const said = (await $.tool.call(publish())) as { deny?: string }
+    expect(said.deny).toMatch(/^使用者沒有選選項，而是回覆：「等我問一下主管」。請照他的回覆處理；要發布就再呼叫一次 Artifact，braid 會再問他。/)
+    expect(w.artifacts.length).toBe(0)
+    expect(pages(w).pages).toMatchObject([{ status: 'pending', owner: W }]) // 同一張只排一筆
+  })
+
+  test('braid 用一年期憑證開的視窗：選擇框不給發布的選項（官方只保證 /login 的對話能發布）', async ($, on) => {
+    const w = world(on, { env: { BRAID_ACCOUNT: P, CLAUDE_CODE_ACCOUNT_UUID: '' }, store: { uses: USES_P, policy: rules(W), [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: PAGE, ask: () => '這次不發' })
+    await $.session.start(START)
+    await $.tool.call(publish())
+    expect(w.asked[0]?.labels).toEqual(['排進待發布', '這次不發'])
+    expect(w.asked[0]?.question).toMatch(/這個視窗是 braid 用一年期憑證開的，官方只保證 \/login 的對話能發布，所以只能先排著。/)
   })
 
   test('第 4 格 個人專案 × 個人帳號：不提醒，新頁照常發布', async ($, on) => {
@@ -1120,17 +1190,51 @@ describe('歸屬（依資料夾決定新頁歸哪個帳號；不管對話）', (
     expect(w.artifacts.length).toBe(1)
   })
 
-  test('第 5 格 還沒設定：沒有新頁時不問；新頁擋下排隊後才問歸誰，選這個對話這一邊就寫回表並直接發布', async ($, on) => {
-    const w = world(on, { store: { uses: USES_P, [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: PAGE })
+  test('第 5 格 還沒設定：在對話裡問歸誰；選「歸公司並發布」就寫回表（git 的最上層）、當場發布', async ($, on) => {
+    const w = world(on, { store: { uses: USES_P, [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: PAGE, ask: () => '歸「公司」並發布' })
     await $.session.start(START)
-    let band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
     expect(await band.find({ key: `ask-${W}` })).toBeUndefined() // 歸屬只為頁面服務：沒有頁在等就不打斷對話
     await band.unmount()
     const r = (await $.tool.call(publish())) as { deny?: string }
-    expect(r.deny).toMatch(/這個資料夾還沒設定歸哪個帳號/)
-    expect(r.deny).toMatch(/在輸入框上方選這個資料夾歸哪個帳號/)
+    expect(w.asked).toMatchObject([
+      {
+        question: '「server」還沒設定歸哪個帳號。選了歸誰，這個資料夾之後的新頁都用那個帳號發布；頁面歸發布它的帳號，之後不能轉移。新頁「週報」要怎麼處理？',
+        labels: ['先排著，之後再決定', '歸「公司」並發布', '歸「個人」，先排著', '這次不發'],
+      },
+    ])
+    expect(r.deny).toBeUndefined()
+    expect(w.store.get('policy')).toEqual({ rules: [{ folder: '/w/server', owner: W }] })
+    expect(w.artifacts.length).toBe(1)
+    expect(pages(w).pages).toMatchObject([{ project: '/w/server', owner: W, status: 'published', url: 'https://claude.ai/code/artifact/page-1' }])
+  })
+
+  test('第 5 格 選「歸個人，先排著」：寫回表，頁排著等個人發布，不替你發布', async ($, on) => {
+    const w = world(on, { store: { uses: USES_P, [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: PAGE, ask: () => '歸「個人」，先排著' })
+    await $.session.start(START)
+    const r = (await $.tool.call(publish())) as { deny?: string }
+    expect(r.deny).toMatch(/^使用者把「server」設定為歸「個人」：「週報」原始檔存到 .+，排進「待發布」。等「個人」登入的對話發布/)
+    expect(w.store.get('policy')).toEqual({ rules: [{ folder: '/w/server', owner: P }] })
+    expect(w.artifacts.length).toBe(0)
+    expect(pages(w).pages).toMatchObject([{ owner: P, status: 'pending' }])
+  })
+
+  test('第 5 格 選「先排著，之後再決定」：不改表，頁排著、沒有歸屬（輸入框上方之後會問）', async ($, on) => {
+    const w = world(on, { store: { uses: USES_P, [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: PAGE, ask: q => q.labels[0] ?? '' })
+    await $.session.start(START)
+    const r = (await $.tool.call(publish())) as { deny?: string }
+    expect(r.deny).toMatch(/^使用者選了先排著、之後再決定歸誰：「週報」/)
+    expect(w.store.get('policy')).toBeUndefined() // 歸屬表沒動
     expect(pages(w).pages).toMatchObject([{ owner: null, status: 'pending' }])
-    band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  })
+
+  test('第 5 格 這裡沒辦法問（排著、沒有歸屬）：輸入框上方問歸誰，選這個對話這一邊就寫回表並發布；「之後再說」這個對話不再問', async ($, on) => {
+    const w = world(on, { store: { uses: USES_P, [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: PAGE })
+    await $.session.start(START)
+    const r = (await $.tool.call(publish())) as { deny?: string }
+    expect(r.deny).toMatch(/^沒有得到使用者的選擇（選擇框被關掉了，或這裡沒辦法問），先排著：/)
+    expect(pages(w).pages).toMatchObject([{ owner: null, status: 'pending' }])
+    let band = await $.ui.mount({ ...BAND, surface: 'desktop' })
     expect(await shows(band, /「server」有 1 張新頁在等：這個資料夾歸哪個帳號？/)).toBe(true)
     expect((await band.find({ key: `ask-${W}` }))?.props.label).toBe('歸「公司」並發布')
     expect((await band.find({ key: `ask-${P}` }))?.props.label).toBe('歸「個人」') // 別的帳號：只寫表，頁留著等它
@@ -1139,25 +1243,62 @@ describe('歸屬（依資料夾決定新頁歸哪個帳號；不管對話）', (
     await band.unmount()
     await $.session.start(START) // 新的對話：排著的頁從檔案讀回來，又會問
     await w.clock.advance(1)
-    const again = await $.ui.mount({ ...BAND, surface: 'desktop' })
-    await again.press({ key: `ask-${W}` })
+    band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    await band.press({ key: `ask-${W}` })
     expect(w.store.get('policy')).toEqual({ rules: [{ folder: '/w/server', owner: W }] })
     expect(w.artifacts.length).toBe(1)
     expect(pages(w).pages).toMatchObject([{ owner: W, status: 'published', url: 'https://claude.ai/code/artifact/page-1' }])
-    expect(await again.find({ key: `ask-${W}` })).toBeUndefined()
-    await again.unmount()
+    expect(await band.find({ key: `ask-${W}` })).toBeUndefined()
+    await band.unmount()
   })
 
-  test('第 5 格 選了別的帳號：寫回表，頁留在待發布、改歸那個帳號，不替你發布', async ($, on) => {
-    const w = world(on, { store: { uses: USES_P, [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: PAGE })
+  test('排著等這個帳號發布的頁：輸入框上方直接發布，不用進面板；「之後再說」這個對話不再出現', async ($, on) => {
+    const index = {
+      v: 1,
+      pages: [
+        { id: 'pa', title: '週報', project: '/w', source: `${PAGES}/w/pa.html`, input: { title: '週報' }, owner: W, by: P, status: 'pending', url: null, at: 1 },
+        { id: 'pc', title: '草稿', project: '/w', source: `${PAGES}/w/pc.html`, input: {}, owner: 'tok-00000002', by: P, status: 'pending', url: null, at: 2 },
+        { id: 'pb', title: '筆記', project: '/me/blog', source: `${PAGES}/blog/pb.html`, input: {}, owner: P, by: W, status: 'pending', url: null, at: 3 },
+      ],
+    }
+    const w = world(on, {
+      store: { uses: USES_P, policy: rules(W), [`account:${W}`]: WORK, [`account:${P}`]: HOME, 'account:tok-00000002': WORK2 },
+      files: { [`${PAGES}/index.json`]: JSON.stringify(index), [`${PAGES}/w/pa.html`]: 'A', [`${PAGES}/w/pc.html`]: 'C', [`${PAGES}/blog/pb.html`]: 'B' },
+    })
     await $.session.start(START)
-    await $.tool.call(publish())
+    await w.clock.advance(1) // 對話開始時在背景讀排著的頁
+    for (const surface of SURFACES) {
+      const band = await $.ui.mount({ ...BAND, surface })
+      expect(await shows(band, /有 2 張新頁排著等「公司」發布：「草稿」、「週報」。/)).toBe(true) // 新的在前；同組織的第二個帳號的也算
+      expect((await band.find({ key: 'wait-publish' }))?.props.label).toBe('全部發布（2 張）')
+      await band.unmount()
+    }
+    let band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    await band.press({ key: 'wait-later' })
+    expect(await band.find({ key: 'wait-publish' })).toBeUndefined()
+    await band.unmount()
+    await $.session.start(START)
+    await w.clock.advance(1)
+    band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    await band.press({ key: 'wait-publish' })
+    expect(w.artifacts.map(a => a.file_path)).toEqual([`${PAGES}/w/pc.html`, `${PAGES}/w/pa.html`])
+    expect(pages(w).pages.map(p => [p.id, p.status])).toEqual([['pa', 'published'], ['pc', 'published'], ['pb', 'pending']])
+    expect(w.toasts.at(-1)).toMatch(/^braid：已發布 https:\/\/claude\.ai\/code\/artifact\/page-1、/)
+    expect(await band.find({ key: 'wait-publish' })).toBeUndefined()
+    await band.unmount()
+  })
+
+  test('排著的頁：braid 用一年期憑證開的視窗不給「發布」', async ($, on) => {
+    const index = { v: 1, pages: [{ id: 'pa', title: '週報', project: '/w', source: `${PAGES}/w/pa.html`, input: {}, owner: P, by: W, status: 'pending', url: null, at: 1 }] }
+    const w = world(on, {
+      env: { BRAID_ACCOUNT: P, CLAUDE_CODE_ACCOUNT_UUID: '' },
+      store: { uses: USES_P, policy: rules(P), [`account:${W}`]: WORK, [`account:${P}`]: HOME },
+      files: { [`${PAGES}/index.json`]: JSON.stringify(index), [`${PAGES}/w/pa.html`]: 'A' },
+    })
+    await $.session.start(START)
+    await w.clock.advance(1)
     const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
-    await band.press({ key: `ask-${P}` })
-    expect(w.store.get('policy')).toEqual({ rules: [{ folder: '/w/server', owner: P }] })
-    expect(w.artifacts.length).toBe(0)
-    expect(pages(w).pages).toMatchObject([{ owner: P, status: 'pending' }])
-    expect(await band.find({ key: `ask-${P}` })).toBeUndefined()
+    expect(await band.find({ key: 'wait-publish' })).toBeUndefined()
     await band.unmount()
   })
 
