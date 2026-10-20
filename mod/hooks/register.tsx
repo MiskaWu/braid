@@ -1,8 +1,9 @@
-// braid：Claude 的多帳號工具。/braid 打開面板，四個分頁對應三種用法加帳號清單：
-//   帳號：這台電腦認得的帳號與各自的用量；新增帳號（一年期憑證，存在系統鑰匙圈）
+// braid：Claude 的多帳號工具。/braid 打開面板：帳號頁一定有，其餘分頁依使用者選的用法出現：
+//   帳號：這台電腦認得的帳號與各自的用量；新增帳號（一年期憑證，存在系統鑰匙圈）；
+//         從其他帳號搬過來（遷移是一次性的動作，不是用法；第一次遇到時輸入框上方也會問一次，/braid migrate 也能直接開）
 //   切換：用量快到門檻時，輸入框上方提示，一鍵用另一個帳號在新視窗接著同一段對話
 //   同步：桌面 app 開著時，把現在登入的帳號的側欄對話自動複製到另一個帳號，換過去就看得到
-//   遷移：桌面 app 換帳號後，把舊帳號的對話與環境搬過來（/braid migrate 也可以直接開）
+//   歸屬：依資料夾決定新頁（artifact）用哪個帳號發布
 // 自動同步只寫沒登入的那個帳號的側欄資料夾（app 開著也安全，見 mirror.ts）。其餘寫入桌面 app 資料的事
 // （遷移、同步環境、還原）一律交給 tool/ 的工具在獨立視窗做：它會等 app 結束、先備份。
 // mod 本身不碰登入憑證：新增帳號與接著做都是 tool/cli、tool/windows 的腳本在新視窗裡自己取用。
@@ -48,6 +49,7 @@ import {
   fmtBytes,
   fmtReset,
   meter,
+  migrateSources,
   mirrorTarget,
   nameOf,
   normalizeAccount,
@@ -89,7 +91,7 @@ const PANE = 'braid'
 
 const platformAtom = atom({ plugin: 'braid', key: 'platform' } as const, null)
 const usesAtom = atom({ plugin: 'braid', key: 'uses' } as const, null)
-const draftUsesAtom = atom({ plugin: 'braid', key: 'draftUses' } as const, { migrate: false, switch: false, sync: false, policy: false })
+const draftUsesAtom = atom({ plugin: 'braid', key: 'draftUses' } as const, { switch: false, sync: false, policy: false })
 const tabAtom = atom({ plugin: 'braid', key: 'tab' } as const, 'accounts')
 const accountsAtom = atom({ plugin: 'braid', key: 'accounts' } as const, {})
 const currentAtom = atom({ plugin: 'braid', key: 'current' } as const, null)
@@ -115,6 +117,7 @@ const newOwnerAtom = atom({ plugin: 'braid', key: 'newOwner' } as const, null)
 const skipAskAtom = atom({ plugin: 'braid', key: 'skipAsk' } as const, null)
 const viaTokenAtom = atom({ plugin: 'braid', key: 'viaToken' } as const, false)
 const helpAtom = atom({ plugin: 'braid', key: 'help' } as const, null)
+const migrateAskedAtom = atom({ plugin: 'braid', key: 'migrateAsked' } as const, [])
 const tzAtom = atom({ plugin: 'braid', key: 'tz' } as const, 0)
 
 // ── 指令 ────────────────────────────────────────────────────
@@ -272,6 +275,7 @@ async function loadStore($: $): Promise<void> {
   const mirror = normalizeMirror(await $.store.get('mirror'))
   const keep = normalizeKeep(await $.store.get('keep'))
   const policy = normalizePolicy(await $.store.get('policy'))
+  const asked = await $.store.get('migrateAsked')
   await update($, usesAtom, () => uses)
   await update($, switchAtom, () => sw)
   await update($, syncAtom, () => sy)
@@ -280,6 +284,14 @@ async function loadStore($: $): Promise<void> {
   await update($, mirrorAtom, () => mirror)
   await update($, keepAtom, () => keep)
   await update($, policyAtom, () => policy)
+  await update($, migrateAskedAtom, () => (Array.isArray(asked) ? asked.filter((x): x is string => typeof x === 'string') : []))
+}
+
+/** 輸入框上方「要不要從其他帳號搬過來」問過這個帳號了：之後不再問（帳號頁一直都能搬）。 */
+async function markMigrateAsked($: $, id: string): Promise<void> {
+  const asked = [...new Set([...(await read($, migrateAskedAtom)), id])]
+  await $.store.set('migrateAsked', asked)
+  await update($, migrateAskedAtom, () => asked)
 }
 
 async function putPolicy($: $, change: (p: BraidPolicy) => BraidPolicy): Promise<void> {
@@ -395,7 +407,7 @@ async function launchTool($: $, req: ToolRequest): Promise<string> {
     }
   }
   if (req.dryRun) {
-    return '已在另一個視窗開啟遷移工具（試跑：只列計畫、不寫入，Claude 不用結束）。\n看完計畫按任意鍵關閉那個視窗；要正式搬就打 /braid migrate。'
+    return '已在另一個視窗開啟遷移工具（試跑：只列計畫、不寫入，Claude 不用結束）。\n看完計畫按任意鍵關閉那個視窗；要正式搬就按帳號頁的「搬過來…」，或打 /braid migrate。'
   }
   const quit = platform === 'mac' ? '選單列 Claude →「結束 Claude」（⌘Q）' : '右下角系統匣的 Claude 圖示按右鍵 →「結束」'
   const what = req.restore ? '還原工具' : req.from && req.projects ? '同步工具' : '遷移工具'
@@ -416,14 +428,14 @@ async function openPane($: $, tab?: BraidTab): Promise<void> {
   if (tab) await update($, tabAtom, () => tab)
   await $.ui.open({ id: PANE, title: 'braid', columns: 64 })
   const shown = tab ?? (await read($, tabAtom))
-  if (shown !== 'accounts') await ensureDesktop($)
+  await ensureDesktop($)
   if (shown === 'policy') await refreshPages($)
 }
 
 async function setTab($: $, tab: BraidTab): Promise<void> {
   await update($, tabAtom, () => tab)
   await say($, null)
-  if (tab !== 'accounts') await ensureDesktop($)
+  await ensureDesktop($)
   if (tab === 'policy') await refreshPages($)
 }
 
@@ -696,7 +708,7 @@ function mirrorName(accounts: Record<string, BraidAccount>, id: string, org: str
 }
 
 function mirrorLook(accounts: Record<string, BraidAccount>, id: string, org: string | null): { label: string; color: string } {
-  return lookOf(accounts, id, org ? [{ account: id, org, sessions: 0, lastActivity: 0, folders: [] }] : [])
+  return lookOf(accounts, id, org ? [{ account: id, org, sessions: 0, lastActivity: 0, folders: [], names: [], deleted: [] }] : [])
 }
 
 // ── 新增帳號 ────────────────────────────────────────────────
@@ -1056,6 +1068,22 @@ async function publishPending($: $, pageId: string): Promise<string | null> {
   }
 }
 
+/**
+ * 輸入框上方要不要問「從其他帳號搬過來」：這個對話就是桌面 app 現在登入的帳號、還沒問過，而且別的帳號（同步夥伴除外）有對話還沒在這裡。
+ * 桌面資料還沒讀進來就先不問（對話開始時在背景讀）。
+ */
+async function migrateNudge($: $, current: string): Promise<{ name: string; pending: number; more: number } | null> {
+  const desktop = await read($, desktopAtom)
+  if (!desktop || desktop.error || desktop.active !== current) return null
+  if ((await read($, migrateAskedAtom)).includes(current)) return null
+  const uses = await read($, usesAtom)
+  const sy = await read($, syncAtom)
+  const sources = migrateSources(desktop.profiles, current, uses?.sync && sy.on ? partnerOf(sy, current) : null)
+  const top = sources[0]
+  if (!top) return null
+  return { name: nameOf(await read($, accountsAtom), top.account, desktop.profiles), pending: top.pending, more: sources.length - 1 }
+}
+
 /** 這個資料夾還沒設定歸屬、又有新頁排著等它：輸入框上方要問歸誰。按過「之後再說」的這個對話不再問。 */
 async function askHere($: $): Promise<{ project: string; name: string; pending: number } | null> {
   const here = await verdictHere($)
@@ -1248,7 +1276,6 @@ async function drawOnboarding($: $, ui: UI) {
   const draft = await read($, draftUsesAtom)
   const uses = await read($, usesAtom)
   const options: { id: keyof BraidUses; title: string; desc: string }[] = [
-    { id: 'migrate', title: '換帳號了，把舊對話搬過來', desc: '舊帳號的對話與環境複製到新帳號，搬一次就好。' },
     { id: 'switch', title: '用量用完，換帳號接著做', desc: '快到上限時提醒，一鍵用另一個帳號接著同一段對話。' },
     { id: 'sync', title: '兩個帳號一起用', desc: '桌面 app 的兩個帳號自動同步對話，換過去就能接著做。' },
     { id: 'policy', title: '新頁歸對帳號', desc: '依資料夾決定新頁（artifact）用哪個帳號發布；對話照常，不受影響。' },
@@ -1258,6 +1285,7 @@ async function drawOnboarding($: $, ui: UI) {
   return (
     <Box flexDirection="column" gap={1}>
       {pageHead(ui, 'ob-head', '你想用 braid 做什麼？', '可以複選；沒選的不會出現，之後按「用法」再改。帳號頁一定會有。')}
+      {fine(ui, '換帳號了要把舊對話搬過來，不用選：帳號頁會列出還沒搬過來的帳號，搬一次就好。')}
       {options.map(o =>
         Svg ? (
           <Box key={`ob-${o.id}`} flexDirection="row" gap={2} alignItems="center" borderStyle="round" borderColor={draft[o.id] ? 'text' : undefined} paddingX={1} paddingY={1}>
@@ -1286,7 +1314,7 @@ async function drawOnboarding($: $, ui: UI) {
           onPress={async () => {
             await putUses($, draft)
             await update($, editingAtom, () => null)
-            await setTab($, draft.switch ? 'switch' : draft.sync ? 'sync' : draft.policy ? 'policy' : draft.migrate ? 'migrate' : 'accounts')
+            await setTab($, draft.switch ? 'switch' : draft.sync ? 'sync' : draft.policy ? 'policy' : 'accounts')
             await refreshStatus($)
           }}
         />
@@ -1425,6 +1453,7 @@ async function drawAccounts($: $, ui: UI, width: number) {
       {others.length === 0 && <Text dimColor>還沒有其他帳號。在桌面 app 用別的帳號開過對話、或按下面的按鈕新增，就會出現在這裡。</Text>}
       {others.map(a => block(a, false))}
       {await drawAdd($, ui)}
+      {await drawMigrateHere($, ui)}
     </Box>
   )
 }
@@ -2078,44 +2107,46 @@ async function drawPolicy($: $, ui: UI) {
   )
 }
 
-async function drawMigrate($: $, ui: UI) {
+/**
+ * 帳號頁的「從其他帳號搬過來」：遷移是一次性的動作，不是常駐的用法。只列還有對話沒在目標帳號（桌面 app 現在登入的帳號）的帳號，
+ * 搬完就不再列；同步夥伴不列（同步會把對話帶過來）。有遷移工具的備份時，備份與還原也放這裡（同步頁也有一份）。
+ */
+async function drawMigrateHere($: $, ui: UI) {
   const { Box, Text, Button } = ui
-  const platform = await read($, platformAtom)
-  if (platform === 'other') return <Text>Claude 桌面 app 只有 Windows 與 macOS 版，這台電腦上沒有桌面 app 的資料可以遷移。</Text>
+  if ((await read($, platformAtom)) === 'other') return null
   const desktop = await read($, desktopAtom)
-  if (desktop === null) return <Text dimColor>讀取桌面 app 的資料中…</Text>
+  if (!desktop || desktop.error) return null
   const accounts = await read($, accountsAtom)
-  const current = await read($, currentAtom)
+  const uses = await read($, usesAtom)
+  const sy = await read($, syncAtom)
   const tz = await read($, tzAtom)
-  const cur = current ? accounts[current] : undefined
-  const sources = desktop.profiles.filter(p => p.account !== current)
+  const partner = uses?.sync && sy.on ? partnerOf(sy, desktop.active) : null
+  const sources = migrateSources(desktop.profiles, desktop.active, partner)
+  const partnerWaiting = !!partner && migrateSources(desktop.profiles, desktop.active, null).some(x => x.account === partner)
+  if (sources.length === 0 && !partnerWaiting && desktop.backups.length === 0) return null
+  const target = desktop.active ? nameOf(accounts, desktop.active, desktop.profiles) : null
   return (
-    <Box flexDirection="column" gap={1}>
-      {pageHead(ui, 'mig-head', '遷移', '換帳號後，舊帳號在 Code 分頁的對話和已儲存的環境會不見。這裡把它們複製到現在登入的帳號。')}
-      {sectionHead(ui, 'mig-to-head', '搬到這裡')}
-      <Text>
-        {cur?.source === 'desktop' ? `${cur.label}${cur.email ? `（${cur.email}）` : ''}` : '桌面 app 現在登入的帳號'}
-        <Text dimColor>　工具寫入前會顯示信箱讓你確認</Text>
-      </Text>
-      {sectionHead(ui, 'mig-from-head', '這台電腦上其他帳號的資料')}
-      {desktop.error && <Text color="warning">讀不到桌面 app 的資料。</Text>}
-      {!desktop.error && sources.length === 0 && <Text dimColor>沒有其他帳號的對話。</Text>}
-      {sources.map(p => (
-        <Box key={`src-${p.account}-${p.org}`} flexDirection="column" borderStyle="round" paddingX={1}>
+    <Box key="mig-box" flexDirection="column" gap={1}>
+      {(sources.length > 0 || partnerWaiting) &&
+        sectionHead(ui, 'mig-head', '從其他帳號搬過來', `換帳號後，舊帳號的對話與環境不會跟過來。這裡複製到${target ? `「${target}」` : '桌面 app 現在登入的帳號'}，搬一次就好。`)}
+      {sources.map(x => (
+        <Box key={`src-${x.account}-${x.org}`} flexDirection="column" borderStyle="round" paddingX={1}>
           <Text>
-            <Text bold>{nameOf(accounts, p.account, desktop.profiles)}</Text>
-            <Text dimColor>{p.lastActivity ? `  最近 ${dateOf(p.lastActivity, tz)}` : ''}</Text>
+            <Text bold>{nameOf(accounts, x.account, desktop.profiles)}</Text>
+            <Text dimColor>{x.lastActivity ? `  最近 ${dateOf(x.lastActivity, tz)}` : ''}</Text>
           </Text>
-          <Text>{`${p.sessions} 個對話 · ${p.folders.length} 個資料夾`}</Text>
+          <Text>{`還有 ${x.pending} 個對話沒搬過來`}</Text>
           <Box flexDirection="row" gap={1}>
-            <Button key={`mig-dry-${p.account}-${p.org}`} label="試跑" onPress={async () => say($, await launchTool($, { dryRun: true, from: p.account }))} />
-            <Button key={`mig-run-${p.account}-${p.org}`} label="開始遷移…" variant="primary" onPress={async () => say($, await launchTool($, { from: p.account }))} />
+            <Button key={`mig-dry-${x.account}-${x.org}`} label="試跑" onPress={async () => say($, await launchTool($, { dryRun: true, from: x.account }))} />
+            <Button key={`mig-run-${x.account}-${x.org}`} label="搬過來…" variant="primary" onPress={async () => say($, await launchTool($, { from: x.account }))} />
           </Box>
         </Box>
       ))}
-      {fine(ui, '開始之後：勾選要搬的資料夾與環境 → 結束 Claude（系統匣或選單列）→ 確認信箱、輸入 Y → 搬完問你要不要重開。')}
-      {await drawBackups($, ui)}
-      <Button key="rescan" label="重新讀取" dimColor onPress={() => ensureDesktop($, true)} />
+      {sources.length > 0 && fine(ui, '開始之後：勾選要搬的資料夾與環境 → 結束 Claude（系統匣或選單列）→ 確認信箱、輸入 Y → 搬完問你要不要重開。')}
+      {partnerWaiting && partner
+        ? fine(ui, `「${nameOf(accounts, partner, desktop.profiles)}」和這個帳號在同步，對話會自動跟過來，不用搬；已儲存的環境在「同步」頁按「帶過來…」。`)
+        : null}
+      {desktop.backups.length > 0 ? await drawBackups($, ui) : null}
     </Box>
   )
 }
@@ -2150,9 +2181,7 @@ export const register: Register = on => {
     const knownAccounts = await read($, accountsAtom)
     if (login && !knownAccounts[login.id]) await putAccount($, upsertSeen(knownAccounts, login, await $.clock.now()))
     await update($, cliLoginAtom, () => login?.id ?? null)
-    // 上面丟掉的桌面資料在背景重讀：面板開著時重新載入，才不會一直停在「讀取中」
     const uses = await read($, usesAtom)
-    if (uses?.sync || uses?.migrate) $.clock.after(1, () => ensureDesktop($))
     // 排著的頁也重讀：這個資料夾有頁在等歸屬時，輸入框上方才問得到
     if (uses?.policy) $.clock.after(1, () => refreshPages($))
     const seen = await seenNow($)
@@ -2170,6 +2199,9 @@ export const register: Register = on => {
       await putAccount($, account)
       await update($, currentAtom, () => account.id)
     }
+    // 上面丟掉的桌面資料在背景重讀：開了同步、或這個桌面 app 帳號還沒問過「要不要從其他帳號搬過來」
+    const askMigrate = seen?.source === 'desktop' && !(await read($, migrateAskedAtom)).includes(seen.id)
+    if (uses?.sync || askMigrate) $.clock.after(1, () => ensureDesktop($))
     // 自動同步：開始後先做一次，之後每分鐘一次（沒開同步時 runMirror 直接回來）
     mirrorTimer?.cancel()
     mirrorTimer = $.clock.every(MIRROR_EVERY_MS, async () => {
@@ -2321,6 +2353,33 @@ export const register: Register = on => {
         </Box>
       )
     }
+
+    // 換帳號後舊帳號的對話不會跟過來：這個桌面 app 帳號第一次遇到「別的帳號有對話還沒在這裡」時問一次（按了就不再問）
+    const nudge = cur ? await migrateNudge($, cur.id) : null
+    if (nudge && cur) {
+      return (
+        <Box flexDirection="column">
+          <Text wrap="wrap">
+            <Text color="suggestion" bold>
+              braid
+            </Text>{' '}
+            {`這台電腦的「${nudge.name}」有 ${nudge.pending} 個對話還沒在這個帳號${nudge.more > 0 ? `（另外還有 ${nudge.more} 個帳號也有）` : ''}：換帳號後舊的對話不會自動跟過來。`}
+          </Text>
+          <Box flexDirection="row" gap={1}>
+            <Button
+              key="mig-nudge-open"
+              label="看看要搬什麼"
+              variant="primary"
+              onPress={async () => {
+                await markMigrateAsked($, cur.id)
+                await openPane($, 'accounts')
+              }}
+            />
+            <Button key="mig-nudge-skip" label="不用了" role="dismiss" onPress={() => markMigrateAsked($, cur.id)} />
+          </Box>
+        </Box>
+      )
+    }
     return next(e)
   })
 
@@ -2377,7 +2436,6 @@ export const register: Register = on => {
       ...(uses.switch ? [{ id: 'switch' as const, label: '切換' }] : []),
       ...(uses.sync ? [{ id: 'sync' as const, label: '同步' }] : []),
       ...(uses.policy ? [{ id: 'policy' as const, label: '歸屬' }] : []),
-      ...(uses.migrate ? [{ id: 'migrate' as const, label: '遷移' }] : []),
     ]
     const saved = await read($, tabAtom)
     const tab = tabs.some(t => t.id === saved) ? saved : 'accounts'
@@ -2389,9 +2447,7 @@ export const register: Register = on => {
           ? drawSync($, ui)
           : tab === 'policy'
             ? drawPolicy($, ui)
-            : tab === 'migrate'
-              ? drawMigrate($, ui)
-              : drawAccounts($, ui, e.props.bodyColumns)
+            : drawAccounts($, ui, e.props.bodyColumns)
     // 一頁畫壞了就說出來、給重讀的按鈕，不要讓整個面板變成空白
     const body = await drawTab().catch((err: unknown) => (
       <Box key="pane-error" flexDirection="column" gap={1}>

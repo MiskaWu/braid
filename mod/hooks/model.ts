@@ -27,7 +27,7 @@ export const COLOR_NAMES: Record<string, string> = Object.fromEntries(SLOTS.map(
 // 0.3.4 以前的顏色換成新配色裡最接近的那個（紫色沒有對應，併到桃紅）
 const LEGACY_COLORS: Record<string, string> = { '#3b6fe0': '#2a78d6', '#14a38e': '#1baf7a', '#d9822b': '#eb6834', '#8e6bd8': '#e87ba4', '#c2417a': '#e87ba4' }
 
-export const DEFAULT_USES: BraidUses = { migrate: false, switch: false, sync: false, policy: false }
+export const DEFAULT_USES: BraidUses = { switch: false, sync: false, policy: false }
 export const DEFAULT_SWITCH: BraidSwitch = { on: true, fiveHour: 90, sevenDay: 95, order: [] }
 export const DEFAULT_SYNC: BraidSync = { on: false, pair: [], all: true, folders: [] }
 export const DEFAULT_KEEP: BraidKeep = { deletedDays: 30, toolCopies: 5 }
@@ -44,7 +44,8 @@ const num = (x: unknown, fallback: number): number => (typeof x === 'number' && 
 
 export function normalizeUses(x: unknown): BraidUses | null {
   if (!isObj(x)) return null
-  return { migrate: x.migrate === true, switch: x.switch === true, sync: x.sync === true, policy: x.policy === true }
+  // 舊版的 migrate 不再讀：遷移改成一次性的動作，在帳號頁做
+  return { switch: x.switch === true, sync: x.sync === true, policy: x.policy === true }
 }
 
 export function normalizeSwitch(x: unknown): BraidSwitch {
@@ -483,6 +484,33 @@ export function syncRows(profiles: readonly BraidProfile[], mine: string, partne
   return [...paths]
     .map(path => ({ path, mine: a.get(path) ?? 0, theirs: b.get(path) ?? 0, checked: picked.includes(path) }))
     .sort((x, y) => Number(y.checked) - Number(x.checked) || y.mine + y.theirs - (x.mine + x.theirs) || x.path.localeCompare(y.path))
+}
+
+// ── 遷移：一次性的動作 ──
+
+/** 帳號頁與輸入框上方「要不要搬過來」的一列：其他帳號還沒在目標帳號的對話有幾個。 */
+export type MigrateSource = { account: string; org: string; pending: number; lastActivity: number }
+
+const recordId = (name: string) => name.replace(/^local_/, '').replace(/\.json$/, '')
+
+/**
+ * 其他帳號在這台電腦、還沒搬到 target（桌面 app 現在登入的帳號）的對話：target 沒有同名的紀錄、也沒刪過（和遷移工具略過的一樣）。
+ * 不列 exclude（同步夥伴：同步會把對話帶過來）。搬完了就是 0、自然不再列——不用另外記「搬過了」。
+ */
+export function migrateSources(profiles: readonly BraidProfile[], target: string | null, exclude: string | null): MigrateSource[] {
+  if (!target) return []
+  const have = new Set<string>()
+  const gone = new Set<string>()
+  for (const p of profiles) {
+    if (p.account !== target) continue
+    for (const n of p.names ?? []) have.add(n)
+    for (const d of p.deleted ?? []) gone.add(d)
+  }
+  return profiles
+    .filter(p => p.account !== target && p.account !== exclude)
+    .map(p => ({ account: p.account, org: p.org, lastActivity: p.lastActivity, pending: (p.names ?? []).filter(n => !have.has(n) && !gone.has(recordId(n))).length }))
+    .filter(s => s.pending > 0)
+    .sort((a, b) => b.lastActivity - a.lastActivity)
 }
 
 /** 帳號 id 的短寫，給沒有信箱可顯示的帳號用。 */

@@ -5,14 +5,14 @@ Claude 的多帳號工具。名稱取「辮子」：每個帳號是一股線，�
 
 | 用法 | 方向 | 時機 | 範圍 | 狀態 |
 |---|---|---|---|---|
-| 遷移（migrate） | 單向 | 手動一次 | 勾選的資料夾 | 已完成（桌面 app） |
+| 遷移（migrate） | 單向 | 手動一次 | 勾選的資料夾 | 0.8.0 起是一次性的動作、不是「用法」：帳號頁「從其他帳號搬過來」、第一次遇到時輸入框上方問一次、`/braid migrate` |
 | 用量切換（switch） | 跟著使用者走 | 到用量門檻時 | 全部資料夾（不看歸屬） | 0.2.0：提示＋一鍵用另一個帳號在新視窗接著做 |
 | 同步（sync） | app 登入的帳號 → 同一對的另一個（換帳號後方向跟著反過來） | 自動：約每分鐘、到用量門檻時馬上一次 | 全部或挑的資料夾 | 0.3.0：側欄紀錄由 mod 自己寫（`hooks/mirror.ts`）；環境要結束 app，交給遷移工具 |
 
 三種用法共用一份帳號清單（`$.store` 的 `account:<id>`）與同一個遷移工具；寫入桌面 app 資料的規則只在 `mod/tool/spec.json`。
 第四個用法「歸屬」（policy）不是另一股線：它只決定新頁（artifact）用哪個帳號發布，不管對話往哪個帳號走。
 同步優先、歸屬輔助（2026-10-20 拍板），見「坑」的「歸屬只管新頁」。
-`/braid` 打開面板（帳號、切換、同步、遷移四頁，依使用者選的用法出現），`/braid migrate` 直接開遷移工具。
+`/braid` 打開面板（帳號頁一定有；切換、同步、歸屬依使用者選的用法出現），`/braid migrate` 直接開遷移工具。
 repo 本身是 marketplace（`.claude-plugin/`），plugin 在 `mod/`。設計稿（八個畫面）：
 https://claude.ai/artifact/VV3y5gmG3DH5rvmU5jxHDa
 
@@ -23,7 +23,7 @@ https://claude.ai/artifact/VV3y5gmG3DH5rvmU5jxHDa
 mod/                              plugin 本體（從 marketplace 安裝時只會複製這個資料夾）
   .claude-plugin/plugin.json
   .claude-plugin/types/           引擎載入 mod 時寫入的型別（gitignore，不要手改）
-  hooks/register.tsx              指令、面板四頁、輸入框上方的提示、交接後的防呆；所有 $ 呼叫都在這個檔
+  hooks/register.tsx              指令、面板各頁、輸入框上方的提示、交接後的防呆；所有 $ 呼叫都在這個檔
   hooks/model.ts                  純邏輯：帳號、用量、門檻、換帳號規則、同步範圍（不碰 $）
   hooks/launch.ts                 遷移工具的參數與開視窗的方式（純函式）
   hooks/terminal.ts               帳號腳本（接著做、新增帳號）開新視窗的方式、去哪裡找 claude（純函式）
@@ -159,6 +159,14 @@ tests/                            工具的測試（Node＋classic-level 造資�
   因為發布用終端機是另一個 `CLAUDE_CONFIG_DIR`，讀不到這邊的 `$.store`。官方只保證 `/login` 的對話能發布，
   braid 用一年期憑證開的視窗（`BRAID_ACCOUNT`）不給「發布」。CLI 自己 `/login` 的帳號（`~/.claude.json`）
   沒有 braid 的憑證也能「接著做」：腳本收到憑證 id「-」就不帶憑證直接開 claude。
+- **遷移是一次性的動作，不是用法**（2026-10-20 拍板，0.8.0）：它本質是「換帳號那一刻做一次」，做完分頁就閒置，
+  所以「用法」裡拿掉了（舊版存的 `uses.migrate` 不再讀）。入口改成三個：帳號頁最後的「從其他帳號搬過來」（一直都在）、
+  輸入框上方問一次、`/braid migrate`。「還有幾個沒搬過來」由 `model.ts` 的 `migrateSources` 算：目標（`BraidDesktop.active`，
+  桌面 app 的 `config.json` 記的登入帳號，遷移工具也搬到它）沒有同名的 `local_<id>.json`、也沒有 `deleted_<id>` 的才算，
+  和工具略過的一樣；搬完自然是 0、不再列，**不另外記「搬過了」**（記了就會和實際狀態分岔）。同步夥伴不列（同步會帶過來，
+  帳號頁改說明環境在同步頁「帶過來…」）。輸入框上方只在「這個對話就是 app 登入的帳號、還沒問過（`$.store` 的 `migrateAsked`）」
+  時問，按任一個按鈕就記下不再問；排在用量提示與歸屬的問題之後。對話開始時只有「桌面 app 的對話、還沒問過」或開了同步才在背景讀桌面資料
+  （`scanDesktop` 要讀每一筆紀錄，在 `/mnt/c` 上不便宜）。
 - **多個 braid 同時同步：刻意不加鎖檔**（2026-10-20 判斷）。每個對話都載入一份 braid、各有每分鐘的計時器，
   彼此只靠 `$.store` 的 `mirrorAt` 錯開（不到 55 秒就跳過）。這有兩個縫：`$.store` 在程序之間是否即時讀得到最新值官方沒寫；
   WSL 與 Windows 本機的對話是兩份 `$.store`，兩邊都開同步會各跑各的，`mirrorMemory` 也不共用（換帳號時回聲會回來一部分）。

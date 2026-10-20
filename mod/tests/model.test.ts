@@ -25,6 +25,7 @@ import {
   normalizeMirror,
   normalizeSwitch,
   normalizeSync,
+  migrateSources,
   normalizeUses,
   orderedIds,
   isOrgId,
@@ -72,7 +73,7 @@ const ACCOUNTS = { work, work2, home }
 describe('讀回儲存的資料', () => {
   test('壞掉或舊版的值換成預設，不讓畫面掛掉', async () => {
     expect(normalizeUses('x')).toBe(null)
-    expect(normalizeUses({ migrate: true, switch: 'yes' })).toEqual({ migrate: true, switch: false, sync: false, policy: false })
+    expect(normalizeUses({ migrate: true, switch: 'yes' })).toEqual({ switch: false, sync: false, policy: false }) // 舊版的 migrate 不再是用法
     expect(normalizeSwitch(null)).toEqual(DEFAULT_SWITCH)
     // 舊版的資料夾限制（restrict／restricted）不再讀：資料夾歸屬改由歸屬表決定
     expect(normalizeSwitch({ on: false, fiveHour: 'x', sevenDay: null, order: ['a', 3], restrict: true, restricted: ['/a'] })).toEqual({
@@ -265,9 +266,9 @@ describe('同步', () => {
 
   test('資料夾清單：兩邊的聯集，勾過的在前，同一個帳號不同組織的併在一起', async () => {
     const profiles = [
-      { account: 'a', org: 'o1', sessions: 3, lastActivity: 1, folders: [{ path: '/x', sessions: 2, lastActivity: 1 }, { path: '/y', sessions: 1, lastActivity: 1 }] },
-      { account: 'a', org: 'o2', sessions: 1, lastActivity: 1, folders: [{ path: '/x', sessions: 1, lastActivity: 1 }] },
-      { account: 'b', org: 'o3', sessions: 5, lastActivity: 1, folders: [{ path: '/z', sessions: 5, lastActivity: 1 }] },
+      { account: 'a', org: 'o1', sessions: 3, lastActivity: 1, folders: [{ path: '/x', sessions: 2, lastActivity: 1 }, { path: '/y', sessions: 1, lastActivity: 1 }], names: [], deleted: [] },
+      { account: 'a', org: 'o2', sessions: 1, lastActivity: 1, folders: [{ path: '/x', sessions: 1, lastActivity: 1 }], names: [], deleted: [] },
+      { account: 'b', org: 'o3', sessions: 5, lastActivity: 1, folders: [{ path: '/z', sessions: 5, lastActivity: 1 }], names: [], deleted: [] },
     ]
     expect(syncRows(profiles, 'a', 'b', ['/y']).map(r => [r.path, r.mine, r.theirs, r.checked])).toEqual([
       ['/y', 1, 0, true],
@@ -276,8 +277,22 @@ describe('同步', () => {
     ])
   })
 
+  test('還沒搬過來的：目標沒有同名紀錄、也沒刪過的才算；同步夥伴不列；搬完的帳號不列；不知道目標是誰就不列', async () => {
+    const prof = (account: string, names: string[], deleted: string[] = [], lastActivity = 1) => ({ account, org: `o-${account}`, sessions: names.length, lastActivity, folders: [], names, deleted })
+    const profiles = [
+      prof('new', ['local_1.json', 'local_a.json'], ['b']),
+      prof('old', ['local_a.json', 'local_b.json', 'local_c.json', 'local_d.json'], [], 5),
+      prof('done', ['local_a.json'], [], 9),
+      prof('partner', ['local_p.json'], [], 7),
+    ]
+    expect(migrateSources(profiles, 'new', 'partner')).toEqual([{ account: 'old', org: 'o-old', pending: 2, lastActivity: 5 }]) // a 已經有、b 刪過
+    expect(migrateSources(profiles, 'new', null).map(x => x.account)).toEqual(['partner', 'old']) // 最近用過的在前
+    expect(migrateSources(profiles, null, null)).toEqual([])
+    expect(migrateSources([prof('old', ['local_x.json'])], 'brand-new', null)).toEqual([{ account: 'old', org: 'o-old', pending: 1, lastActivity: 1 }]) // 目標還沒有資料夾
+  })
+
   test('不認得的桌面帳號：組織正好對到一個 braid 新增的帳號就借它的名稱；認得 id 的同組織帳號不借、對到兩個也不借', async () => {
-    const profiles = [{ account: 'desk-p', org: 'org-h', sessions: 1, lastActivity: 1, folders: [] }, { account: 'desk-w', org: 'org-w', sessions: 1, lastActivity: 1, folders: [] }]
+    const profiles = [{ account: 'desk-p', org: 'org-h', sessions: 1, lastActivity: 1, folders: [], names: [], deleted: [] }, { account: 'desk-w', org: 'org-w', sessions: 1, lastActivity: 1, folders: [], names: [], deleted: [] }]
     const tok = account('tok-1', { orgId: 'org-h', label: 'MiskaWu' })
     expect(nameOf({ work, 'tok-1': tok }, 'desk-p', profiles)).toBe('MiskaWu')
     expect(nameOf({ work, 'tok-1': tok }, 'desk-w', profiles)).toBe('帳號 desk-w…') // work 有真正的 id：是另一個帳號
@@ -936,8 +951,8 @@ describe('桌面版的圖（第二批）', () => {
     expect(t.source.length).toBeLessThan(131072)
   })
 
-  test('用法插圖：四種都有，說明文字給看不到圖的人', async () => {
-    for (const k of ['migrate', 'switch', 'sync', 'policy'] as const) {
+  test('用法插圖：三種都有，說明文字給看不到圖的人', async () => {
+    for (const k of ['switch', 'sync', 'policy'] as const) {
       const i = useIcon(k)
       expect(i.source.startsWith('<svg')).toBe(true)
       expect(i.alt).toMatch(/的圖示$/)

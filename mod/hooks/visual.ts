@@ -456,13 +456,10 @@ export function rankRow(d: { rank: number; label: string; color: string; status:
 }
 
 /** 用法卡的插圖（48×48）。 */
-export function useIcon(kind: 'migrate' | 'switch' | 'sync' | 'policy'): { source: string; alt: string } {
+export function useIcon(kind: 'switch' | 'sync' | 'policy'): { source: string; alt: string } {
   const s = 48
   let b = `<rect x="0" y="0" width="${s}" height="${s}" rx="12" class="panel"/>`
-  if (kind === 'migrate') {
-    b += `<rect x="9" y="12" width="16" height="20" rx="3" class="k0"/><rect x="23" y="16" width="16" height="20" rx="3" class="c0"/>`
-    b += `<path d="M15 38h14m-4-4 4 4-4 4" fill="none" class="tick" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`
-  } else if (kind === 'switch') {
+  if (kind === 'switch') {
     b += `<rect x="9" y="17" width="30" height="5" rx="2.5" class="k1"/><rect x="9" y="17" width="26" height="5" rx="2.5" fill="${STATUS.warning}"/>`
     b += `<rect x="9" y="27" width="30" height="5" rx="2.5" class="k0"/><rect x="9" y="27" width="8" height="5" rx="2.5" class="c0"/>`
     b += `<path d="M33 37l4 3-4 3M17 40h20" fill="none" class="tick" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`
@@ -473,7 +470,7 @@ export function useIcon(kind: 'migrate' | 'switch' | 'sync' | 'policy'): { sourc
     b += `<path d="M9 16a3 3 0 0 1 3-3h7l3 3h14a3 3 0 0 1 3 3v15a3 3 0 0 1-3 3H12a3 3 0 0 1-3-3z" class="k2"/><path d="M9 16a3 3 0 0 1 3-3h7l3 3h14a3 3 0 0 1 3 3v15a3 3 0 0 1-3 3H12a3 3 0 0 1-3-3z" fill="none" class="s2" stroke-width="1.4"/>`
     b += `<circle cx="20" cy="27" r="5" class="c0"/><circle cx="31" cy="27" r="5" class="c1"/>`
   }
-  const alt = { migrate: '遷移的圖示', switch: '用量切換的圖示', sync: '同步的圖示', policy: '歸屬的圖示' }[kind]
+  const alt = { switch: '用量切換的圖示', sync: '同步的圖示', policy: '歸屬的圖示' }[kind]
   return { source: svg(s, s, b), alt }
 }
 

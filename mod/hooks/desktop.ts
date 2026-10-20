@@ -1,5 +1,5 @@
 // 讀桌面 app 的側欄資料（只讀）：每個帳號、組織底下有哪些對話，依資料夾彙總；還有遷移工具留下的備份。
-// 遷移頁與同步頁用它顯示「有什麼可以搬」。寫入一律交給 tool/ 裡的工具，它會等 app 結束、先備份。
+// 帳號頁（從其他帳號搬過來）與同步頁用它顯示「有什麼可以搬」。寫入一律交給 tool/ 裡的工具，它會等 app 結束、先備份。
 // 引擎不准把 $ 傳過 import，所以這裡收一組讀檔、執行指令的函式（register.tsx 用 $ 組好），環境變數由它先讀好。
 import type { FsEntry } from 'claude-code'
 
@@ -67,7 +67,10 @@ async function readProfile(io: DesktopIo, dir: string, sep: string, account: str
   const byFolder = new Map<string, BraidFolder>()
   let sessions = 0
   let lastActivity = 0
+  const names: string[] = []
+  const deleted: string[] = []
   for (const f of await list(io, dir)) {
+    if (f.kind === 'file' && f.name.startsWith('deleted_')) deleted.push(f.name.slice('deleted_'.length))
     if (f.kind !== 'file' || !/^local_.+\.json$/.test(f.name)) continue
     let data: { cwd?: unknown; originCwd?: unknown; lastActivityAt?: unknown }
     try {
@@ -82,11 +85,12 @@ async function readProfile(io: DesktopIo, dir: string, sep: string, account: str
     folder.sessions++
     folder.lastActivity = Math.max(folder.lastActivity, at)
     byFolder.set(path, folder)
+    names.push(f.name)
     sessions++
     lastActivity = Math.max(lastActivity, at)
   }
   const folders = [...byFolder.values()].sort((a, b) => b.lastActivity - a.lastActivity)
-  return { account, org, sessions, lastActivity, folders }
+  return { account, org, sessions, lastActivity, folders, names, deleted }
 }
 
 /** 遷移工具的整份備份：備份資料夾底下名稱像時間、裡面有 manifest.json 的資料夾。 */
@@ -116,8 +120,16 @@ export async function listTrash(io: DesktopIo, backups: DesktopPaths['backups'])
 
 export async function scanDesktop(io: DesktopIo, env: DesktopEnv, platform: BraidPlatform): Promise<BraidDesktop> {
   const paths = await desktopPaths(io, env, platform)
-  if (!paths) return { profiles: [], backups: [], backupRoot: null, trash: { count: 0, bytes: 0 }, error: platform === 'other' ? 'no-desktop' : 'no-paths' }
+  if (!paths) return { active: null, profiles: [], backups: [], backupRoot: null, trash: { count: 0, bytes: 0 }, error: platform === 'other' ? 'no-desktop' : 'no-paths' }
   const sep = platform === 'windows' ? '\\' : '/'
+  // 桌面 app 現在登入誰：遷移工具搬到這個帳號
+  let active: string | null = null
+  try {
+    const v: unknown = (JSON.parse(await io.read(`${paths.appData}${sep}config.json`)) as Record<string, unknown>).lastKnownAccountUuid
+    active = typeof v === 'string' && v ? v : null
+  } catch {
+    active = null
+  }
   const root = `${paths.appData}${sep}claude-code-sessions`
   const profiles: BraidProfile[] = []
   for (const a of await list(io, root)) {
@@ -133,6 +145,7 @@ export async function scanDesktop(io: DesktopIo, env: DesktopEnv, platform: Brai
   backups.sort((x, y) => y.name.localeCompare(x.name))
   const trash = await listTrash(io, paths.backups)
   return {
+    active,
     profiles: profiles.sort((x, y) => y.lastActivity - x.lastActivity),
     backups,
     backupRoot: paths.backups.win,

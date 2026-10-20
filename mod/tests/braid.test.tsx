@@ -240,7 +240,7 @@ const BAND = {
 }
 const START = { cwd: '/w/server', surface: 'desktop' as const, isInteractive: true }
 const RUN = (args = '') => ({ command: 'braid', args, origin: { kind: 'composer' as const }, presentation: { isFullscreen: true, columns: 160 } })
-const USES_ALL = { migrate: true, switch: true, sync: true, policy: true }
+const USES_ALL = { switch: true, sync: true, policy: true }
 const SYNC_ON = { on: true, pair: [W, P], all: true, folders: [] }
 /** 一筆桌面 app 的側欄紀錄（local_<id>.json）：必要欄位加上要改的 */
 const rec = (id: string, over: Record<string, unknown>) =>
@@ -273,12 +273,13 @@ describe('第一次打開：選用法', () => {
       await ui.unmount()
     }
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await ui.find({ key: 'use-migrate' })).toBeUndefined() // 遷移不是用法：帳號頁會列出還沒搬過來的帳號
+    expect(await shows(ui, /換帳號了要把舊對話搬過來，不用選/)).toBe(true)
     await ui.press({ key: 'use-switch' })
-    await ui.press({ key: 'use-migrate' })
     await ui.press({ key: 'use-save' })
-    expect(await w.store.get('uses')).toEqual({ migrate: true, switch: true, sync: false, policy: false })
+    expect(await w.store.get('uses')).toEqual({ switch: true, sync: false, policy: false })
     expect(await ui.find({ key: 'tab-switch' })).toBeDefined()
-    expect(await ui.find({ key: 'tab-migrate' })).toBeDefined()
+    expect(await ui.find({ key: 'tab-migrate' })).toBeUndefined()
     expect(await ui.find({ key: 'tab-sync' })).toBeUndefined()
     expect(await shows(ui, /接手順序/)).toBe(true) // 選了用量切換，直接到切換頁
     await ui.unmount()
@@ -440,7 +441,7 @@ describe('用量快用完：輸入框上方的提示', () => {
   })
 
   test('沒開用量切換就不提示，也不佔狀態列', async ($, on) => {
-    const w = world(on, { store: { uses: { migrate: true, switch: false, sync: false } } })
+    const w = world(on, { store: { uses: { switch: false, sync: false } } })
     await $.session.start(START)
     await $.session.measure(measure(99) as never)
     const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
@@ -1046,7 +1047,7 @@ describe('輸入框下方的迷你量表', () => {
   })
 
   test('沒開用量切換、或還沒有用量：不加', async ($, on) => {
-    const w = world(on, { store: { uses: { migrate: true, switch: false, sync: true } } })
+    const w = world(on, { store: { uses: { switch: false, sync: true } } })
     await $.session.start(START)
     await $.session.measure(measure(50) as never)
     const desk = await $.ui.mount({ ...HINT, surface: 'desktop' } as never)
@@ -1387,21 +1388,106 @@ describe('備份保留', () => {
 
 })
 
-describe('遷移頁', () => {
-  test('列出其他帳號的對話（壞掉的檔略過），試跑、開始各帶 -From；備份可以還原', async ($, on) => {
-    const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL } })
+describe('從其他帳號搬過來（一次性，不是用法）', () => {
+  // 預設情境：桌面 app 登入公司帳號 W（1 個對話），個人帳號 P 有 3 個對話（另有一個壞掉的檔）都還沒在 W
+  test('帳號頁列出還沒搬過來的帳號與筆數（壞掉的檔不算），試跑、搬過來各帶 -From；備份可以還原；舊版選過的「遷移」不再是分頁', async ($, on) => {
+    const w = world(on, { store: { uses: { migrate: true, switch: false, sync: false, policy: false }, [`account:${P}`]: PERSONAL } })
     await $.session.start(START)
     await $.command.run(RUN())
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-    await ui.press({ key: 'tab-migrate' })
-    expect(await shows(ui, /3 個對話 · 2 個資料夾/)).toBe(true)
+    expect(await ui.find({ key: 'tab-migrate' })).toBeUndefined()
+    expect(await shows(ui, /從其他帳號搬過來/)).toBe(true)
+    expect(await shows(ui, /還有 3 個對話沒搬過來/)).toBe(true)
     expect(await ui.find({ key: `src-${W}-${OW}` })).toBeUndefined() // 目前的帳號不列
     await ui.press({ key: `mig-dry-${P}-${OP}` })
     expect(w.runs.at(-1)?.argv.slice(1)).toEqual([expect.stringMatching(/\/tool\/launch-from-wsl\.sh$/), '-DryRun', '-From', P])
     expect(await shows(ui, /試跑：只列計畫/)).toBe(true)
+    await ui.press({ key: `mig-run-${P}-${OP}` })
+    expect(w.runs.at(-1)?.argv.slice(1)).toEqual([expect.stringMatching(/\/tool\/launch-from-wsl\.sh$/), '-From', P])
     await ui.press({ key: 'restore-20261016-140211' })
     expect(w.runs.at(-1)?.argv.slice(2)).toEqual(['-Restore', 'C:\\Users\\u\\braid-backups\\20261016-140211'])
     expect(await ui.find({ key: 'restore-not-a-backup' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('都搬過來了（或刪過）就不再列：不用記「搬過了」', async ($, on) => {
+    const w = world(on, {
+      store: { uses: USES_ALL, [`account:${P}`]: PERSONAL },
+      files: {
+        [`${SESS}/${W}/${OW}/local_2.json`]: rec('2', { cwd: '/w/server' }),
+        [`${SESS}/${W}/${OW}/local_3.json`]: rec('3', { cwd: '/side/blog' }),
+        [`${SESS}/${W}/${OW}/deleted_4`]: '1792000000000',
+      },
+    })
+    await $.session.start(START)
+    await $.command.run(RUN('帳號'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await ui.find({ key: 'restore-20261016-140211' })).toBeDefined() // 桌面資料讀進來了（有備份就有還原）
+    expect(await shows(ui, /從其他帳號搬過來/)).toBe(false)
+    await ui.unmount()
+    await w.clock.advance(1)
+    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    expect(await band.find({ key: 'mig-nudge-open' })).toBeUndefined()
+    await band.unmount()
+  })
+
+  test('輸入框上方問一次：按「不用了」就不再問這個帳號（換個對話也一樣），帳號頁一直都能搬', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL } })
+    await $.session.start(START)
+    await w.clock.advance(1) // 對話開始時在背景讀桌面資料
+    let band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    expect(await shows(band, /這台電腦的「個人」有 3 個對話還沒在這個帳號/)).toBe(true)
+    await band.press({ key: 'mig-nudge-skip' })
+    expect(await band.find({ key: 'mig-nudge-open' })).toBeUndefined()
+    await band.unmount()
+    expect(w.store.get('migrateAsked')).toEqual([W])
+    await $.session.start(START)
+    await w.clock.advance(1)
+    band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    expect(await band.find({ key: 'mig-nudge-open' })).toBeUndefined()
+    await band.unmount()
+    // 帳號頁一直都能搬
+    await $.command.run(RUN('帳號'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await shows(ui, /還有 3 個對話沒搬過來/)).toBe(true)
+    await ui.unmount()
+  })
+
+  test('按「看看要搬什麼」：打開帳號頁，也算問過', async ($, on) => {
+    const v = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL } })
+    await $.session.start(START)
+    await v.clock.advance(1)
+    const again = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    await again.press({ key: 'mig-nudge-open' })
+    expect(v.opened).toContain('braid')
+    expect(v.store.get('migrateAsked')).toEqual([W])
+    await again.unmount()
+  })
+
+  test('不問同步夥伴：同步會帶過來，帳號頁說明環境在同步頁', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL, sync: SYNC_ON, [`account:${P}`]: PERSONAL } })
+    await $.session.start(START)
+    await w.clock.advance(1)
+    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    expect(await band.find({ key: 'mig-nudge-open' })).toBeUndefined()
+    await band.unmount()
+    await $.command.run(RUN('帳號'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await ui.find({ key: `mig-run-${P}-${OP}` })).toBeUndefined()
+    expect(await shows(ui, /「個人」和這個帳號在同步，對話會自動跟過來，不用搬/)).toBe(true)
+    await ui.unmount()
+  })
+
+  test('不問：這個對話不是桌面 app 現在登入的帳號（遷移工具搬到的是 app 登入的那個）', async ($, on) => {
+    const v = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL }, files: { [`${APP}/config.json`]: JSON.stringify({ lastKnownAccountUuid: P }) } })
+    await $.session.start(START)
+    await v.clock.advance(1)
+    const other = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    expect(await other.find({ key: 'mig-nudge-open' })).toBeUndefined()
+    await other.unmount()
+    await $.command.run(RUN('帳號'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await ui.find({ key: `mig-run-${W}-${OW}` })).toBeDefined() // 帳號頁照 app 登入的 P 算：W 那 1 個對話還沒搬過去
     await ui.unmount()
   })
 })

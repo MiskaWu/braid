@@ -27,7 +27,8 @@ export type BraidAccount = {
   lastSeen: number
 }
 
-export type BraidUses = { migrate: boolean; switch: boolean; sync: boolean; policy: boolean }
+/** 常駐的用法。遷移不在這裡：它是一次性的動作，在帳號頁（與第一次遇到時的提示）做，`/braid migrate` 也能直接開。 */
+export type BraidUses = { switch: boolean; sync: boolean; policy: boolean }
 
 export type BraidSwitch = {
   on: boolean
@@ -83,16 +84,19 @@ export type BraidUpdate = {
 /** 備份留多久：同步刪掉的對話備份留幾天、遷移工具的整份備份留最新幾份；null＝一直留著。 */
 export type BraidKeep = { deletedDays: number | null; toolCopies: number | null }
 
-export type BraidTab = 'accounts' | 'switch' | 'sync' | 'policy' | 'migrate'
+export type BraidTab = 'accounts' | 'switch' | 'sync' | 'policy'
 
 export type BraidPlatform = 'wsl' | 'windows' | 'mac' | 'other'
 
 /** 桌面 app 一個帳號（某個組織底下）的側欄對話，依資料夾彙總。 */
 export type BraidFolder = { path: string; sessions: number; lastActivity: number }
-export type BraidProfile = { account: string; org: string; sessions: number; lastActivity: number; folders: BraidFolder[] }
+/** names：側欄紀錄的檔名（local_<id>.json）；deleted：在這個帳號刪過的對話 id（deleted_<id>）。算「還沒搬過來的」用。 */
+export type BraidProfile = { account: string; org: string; sessions: number; lastActivity: number; folders: BraidFolder[]; names: string[]; deleted: string[] }
 export type BraidBackup = { name: string; dir: string }
 /** 備份資料夾（給人看的寫法）、遷移工具的整份備份、同步刪掉的對話備份有幾筆多大。 */
 export type BraidDesktop = {
+  /** 桌面 app 現在登入的帳號（config.json 的 lastKnownAccountUuid）：遷移工具搬到這個帳號；讀不到是 null */
+  active: string | null
   profiles: BraidProfile[]
   backups: BraidBackup[]
   backupRoot: string | null
@@ -145,6 +149,8 @@ declare module 'claude-code' {
       pages: { pending: number; list: { id: string; title: string; project: string; owner: string | null; url: string | null; status: string }[] } | null
       /** 歸屬頁「其他資料夾」要歸給誰 */
       newOwner: string | null
+      /** 輸入框上方問過「要不要從其他帳號搬過來」的帳號（按了任一個按鈕就不再問；帳號頁一直都能搬） */
+      migrateAsked: string[]
       /** 展開的說明（例如同步頁的「怎麼運作」）；null＝都收著 */
       help: string | null
       /** 這個對話是 braid 用一年期憑證開的（官方只保證 /login 的對話能發布頁面） */
