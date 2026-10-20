@@ -13,8 +13,10 @@ Claude 的多帳號工具。名稱取「辮子」：每個帳號是一股線，�
 第四個用法「歸屬」（policy）不是另一股線：它只決定新頁（artifact）用哪個帳號發布，不管對話往哪個帳號走。
 同步優先、歸屬輔助（2026-10-20 拍板），見「坑」的「歸屬只管新頁」。
 `/braid` 打開面板（帳號頁一定有；切換、同步、歸屬依使用者選的用法出現），`/braid migrate` 直接開遷移工具。
-repo 本身是 marketplace（`.claude-plugin/`），plugin 在 `mod/`。設計稿（八個畫面）：
-https://claude.ai/artifact/VV3y5gmG3DH5rvmU5jxHDa
+repo 本身是 marketplace（`.claude-plugin/`），plugin 在 `mod/`。設計稿（八個畫面，在另一個帳號底下，其中的遷移頁已經過時）：
+https://claude.ai/artifact/VV3y5gmG3DH5rvmU5jxHDa 。之後的改動另成一份：
+遷移入口（0.8.0）https://claude.ai/artifact/GCTgWNvMid5K8BEZL155rX 、
+新頁歸屬選擇（0.9.0）https://claude.ai/artifact/AwjMSJZwVcvFqdJE1sgPU9
 
 ## 結構
 
