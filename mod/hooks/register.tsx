@@ -488,14 +488,17 @@ async function mirrorOnce($: $, platform: BraidPlatform, now: number): Promise<B
   if (!pathsCache) return { ...base, problem: 'no-desktop' }
   const sep = platform === 'windows' ? '\\' : '/'
   // 桌面 app 現在登入誰：app 換帳號當下就改 config.json 的這一欄
-  let active: string | null = null
-  try {
-    const cfg: unknown = JSON.parse(await $.fs.read(`${pathsCache.appData}${sep}config.json`))
-    const v = typeof cfg === 'object' && cfg !== null ? (cfg as Record<string, unknown>).lastKnownAccountUuid : null
-    active = typeof v === 'string' && v ? v : null
-  } catch {
-    active = null
+  const configPath = `${pathsCache.appData}${sep}config.json`
+  const readActive = async (): Promise<string | null> => {
+    try {
+      const cfg: unknown = JSON.parse(await $.fs.read(configPath))
+      const v = typeof cfg === 'object' && cfg !== null ? (cfg as Record<string, unknown>).lastKnownAccountUuid : null
+      return typeof v === 'string' && v ? v : null
+    } catch {
+      return null
+    }
   }
+  const active = await readActive()
   if (!active) return { ...base, problem: 'no-active' }
   const target = mirrorTarget(await read($, syncAtom), active)
   if (!target) return { ...base, active }
@@ -514,6 +517,11 @@ async function mirrorOnce($: $, platform: BraidPlatform, now: number): Promise<B
     remove: async path => {
       await $.process.run(removeFile(platform, path), { timeoutMs: 15_000 })
       if (await $.fs.exists(path)) throw new Error(`刪不掉 ${path}`)
+    },
+    // 每寫一筆前重看一次：使用者在 app 換成目標帳號了就停（讀不到也停，寧可這次少同步幾筆）
+    stillInactive: async () => {
+      const now = await readActive()
+      return now !== null && now !== target.to
     },
   }
   const root = `${pathsCache.appData}${sep}claude-code-sessions`
@@ -838,8 +846,11 @@ async function forget($: $, id: string): Promise<void> {
   if (account.credentialId) await removeSecret($, account.credentialId)
   await dropAccount($, id)
   await putSwitch($, sw => ({ ...sw, order: sw.order.filter(x => x !== id) }))
+  // 同步夥伴被移除：同步跟著關掉、清掉這一對，不再往它的資料夾寫（要再同步就到同步頁重新選）
+  const synced = (await read($, syncAtom)).pair.includes(id)
+  if (synced) await putSync($, s => ({ ...s, on: false, pair: [] }))
   await update($, editingAtom, () => null)
-  await say($, `已移除「${account.label}」${account.credentialId ? '，登入憑證也刪掉了' : ''}。`)
+  await say($, `已移除「${account.label}」${account.credentialId ? '，登入憑證也刪掉了' : ''}${synced ? '；和它的自動同步也關掉了' : ''}。`)
 }
 
 // ── 接著做：用另一個帳號在新視窗接著同一段對話 ──────────────────────
@@ -1303,7 +1314,7 @@ async function drawAccounts($: $, ui: UI, width: number) {
         </Box>
       ) : editing === `forget:${a.id}` ? (
         <Box key={`forget-ask-${a.id}`} flexDirection="row" gap={1}>
-          <Text color="warning">{a.credentialId ? '移除後登入憑證也會刪掉。' : '只是從清單拿掉。'}</Text>
+          <Text color="warning">{`${a.credentialId ? '移除後登入憑證也會刪掉。' : '只是從清單拿掉。'}${sy.pair.includes(a.id) ? '和它的自動同步也會關掉。' : ''}`}</Text>
           <Button key={`forget-yes-${a.id}`} label="確定移除" onPress={() => forget($, a.id)} />
           <Button key={`forget-no-${a.id}`} label="取消" onPress={() => update($, editingAtom, () => null)} />
         </Box>

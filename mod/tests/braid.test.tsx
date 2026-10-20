@@ -53,6 +53,8 @@ type Opts = {
   failBash?: string
   /** rm 失敗（檔案被占用） */
   failRm?: boolean
+  /** 每寫一個檔之後呼叫（例如模擬同步寫到一半時使用者在 app 換帳號） */
+  onWrite?: (path: string, files: Record<string, string>) => void
   /** git -C <資料夾> remote get-url origin 的回答（沒列到的＝不是 git repo） */
   remotes?: Record<string, string>
   /** GitHub 上的 braid 版本；null＝連不上 */
@@ -171,6 +173,7 @@ function world(on: On, opts: Opts = {}) {
   on('fs.write', ($, e) => {
     files[e.path] = e.text
     mtimes[e.path] = NOW + ++writes
+    opts.onWrite?.(e.path, files)
     return { value: undefined }
   })
   on('fs.exists', ($, e) => ({ value: e.path in files || e.path in dirs }))
@@ -921,6 +924,42 @@ describe('同步', () => {
     expect(await shows(band, /在桌面 app 換成「個人」就能接著做，對話都已同步過去/)).toBe(true)
     expect(await shows(band, /公司程式碼會經由|歸哪個帳號/)).toBe(false)
     await band.unmount()
+  })
+
+  test('同步寫到一半，使用者在 app 換成目標帳號：剩下的不再寫進去，下一次方向反過來', async ($, on) => {
+    const many: Record<string, string> = {}
+    for (let i = 0; i < 5; i++) many[`${SESS}/${W}/${OW}/local_m${i}.json`] = rec(`m${i}`, { cwd: '/w/server' })
+    const into: string[] = []
+    const w = world(on, {
+      store: { uses: USES_ALL, sync: SYNC_ON, [`account:${P}`]: PERSONAL },
+      files: many,
+      onWrite: (path, files) => {
+        if (!path.startsWith(`${SESS}/${P}/`)) return
+        into.push(path)
+        files[`${APP}/config.json`] = JSON.stringify({ lastKnownAccountUuid: P }) // 第一筆寫完，使用者就換過去了
+      },
+    })
+    await $.session.start(START)
+    await w.clock.advance(3_000)
+    expect(into.length).toBe(1)
+    expect(w.store.get('mirror')).toMatchObject({ active: W, to: P, created: 1 })
+    await w.clock.advance(60_000)
+    expect(w.store.get('mirror')).toMatchObject({ active: P, to: W })
+  })
+
+  test('移除同步夥伴的帳號：說明同步也會關掉；按了之後同步關掉、這一對清掉，不再往它的資料夾寫', async ($, on) => {
+    const w = world(on, { store: { uses: USES_ALL, sync: SYNC_ON, [`account:${P}`]: PERSONAL }, files: { [`${SESS}/${W}/${OW}/local_a.json`]: rec('a', { cwd: '/w/server' }) } })
+    await $.session.start(START)
+    await $.command.run(RUN('帳號'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    await ui.press({ key: `forget-${P}` })
+    expect(await shows(ui, /和它的自動同步也會關掉/)).toBe(true)
+    await ui.press({ key: `forget-yes-${P}` })
+    await ui.unmount()
+    expect(w.store.get('sync')).toMatchObject({ on: false, pair: [] })
+    w.files[`${SESS}/${W}/${OW}/local_new.json`] = rec('new', { cwd: '/w/server' })
+    await w.clock.advance(60_000)
+    expect(`${SESS}/${P}/${OP}/local_new.json` in w.files).toBe(false)
   })
 
   test('沒開同步：時間到了也什麼都不寫', async ($, on) => {

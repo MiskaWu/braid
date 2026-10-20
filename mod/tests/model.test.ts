@@ -441,7 +441,10 @@ function memFs(files: Record<string, { text: string; mtime: number }>, dirs: str
   const writes: string[] = []
   const removes: string[] = []
   let clock = 1_000
+  // 目標帳號還沒被 app 登入；測試可以改成某次寫入之後就被登入
+  const app = { activeAfterWrites: Infinity }
   const io: MirrorIo = {
+    stillInactive: async () => writes.length < app.activeAfterWrites,
     list: async path => {
       const out = new Map<string, { name: string; kind: 'file' | 'dir'; size: number; mtimeMs: number; isLink: boolean }>()
       for (const [f, v] of Object.entries(files)) {
@@ -470,13 +473,30 @@ function memFs(files: Record<string, { text: string; mtime: number }>, dirs: str
       delete files[path]
     },
   }
-  return { io, files, writes, removes }
+  return { io, files, writes, removes, app }
 }
 
 const r = (id: string, over: Record<string, unknown> = {}) => JSON.stringify({ sessionId: `local_${id}`, cliSessionId: `cli-${id}`, cwd: '/w', lastActivityAt: 100, ...over })
 const json = (text: string | undefined) => JSON.parse(text ?? 'null') as Record<string, unknown>
 
 describe('自動同步：複製側欄紀錄', () => {
+  test('目標帳號中途被 app 登入：在那一筆之前停下，後面的新增、刪除、封存清單都不寫', async () => {
+    const m = memFs({
+      '/s/local_a.json': { text: r('a'), mtime: 10 },
+      '/s/local_b.json': { text: r('b', { isArchived: true }), mtime: 10 },
+      '/s/local_c.json': { text: r('c'), mtime: 10 },
+      '/s/deleted_x': { text: '500', mtime: 10 },
+      '/t/local_x.json': { text: r('x'), mtime: 1 },
+    })
+    m.app.activeAfterWrites = 0 // 一開始就被登入了：連刪除的備份都不寫
+    expect(await mirrorSessions(m.io, SPEC, '/s', '/t', '/', 'all', TRASH)).toEqual({ created: 0, updated: 0, deleted: 0, stopped: true })
+    expect([m.writes, m.removes]).toEqual([[], []])
+    const n = memFs({ '/s/local_a.json': { text: r('a'), mtime: 10 }, '/s/local_b.json': { text: r('b', { isArchived: true }), mtime: 10 }, '/s/local_c.json': { text: r('c'), mtime: 10 }, '/t/local_z.json': { text: r('z'), mtime: 1 } })
+    n.app.activeAfterWrites = 1 // 寫完第一筆就換過去了
+    expect(await mirrorSessions(n.io, SPEC, '/s', '/t', '/', 'all', TRASH)).toEqual({ created: 1, updated: 0, deleted: 0, stopped: true })
+    expect(n.writes).toEqual(['/t/local_a.json']) // 封存清單也沒寫
+  })
+
   test('新增：拿掉綁帳號的欄位、清空 nullKeys、連接器換成目標帳號最近一筆的；刪過的、缺欄位的、壞掉的、範圍外的不帶；來源一個檔都不寫', async () => {
     const m = memFs({
       '/s/local_a.json': { text: r('a', { bridgeSessionIds: ['b'], sshReattach: { pid: 1 }, sshRemoteProcessId: 7, scheduledTaskId: 't', startedFromEnvironmentId: 'e', remoteMcpServersConfig: { slack: 1 }, title: 'A' }), mtime: 10 },

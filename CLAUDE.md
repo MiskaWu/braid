@@ -83,7 +83,10 @@ tests/                            工具的測試（Node＋classic-level 造資�
   例外是自動同步：它只寫**沒登入**的帳號的側欄資料夾。依據是 app 2.42304 的 `LocalSessionManager.doInitialize`：
   帳號或組織一變就 `flushPendingSaves` 舊的、`sessions.clear()`、再 `loadSessions` 從磁碟讀新帳號的資料夾；
   哪個帳號作用中看 app 的 `config.json` 的 `lastKnownAccountUuid`（換帳號當下就改）。app 改版後這段要重查。
-  同步的對象由 `model.ts` 的 `mirrorTarget` 決定，它保證不會是作用中的帳號。
+  同步的對象由 `model.ts` 的 `mirrorTarget` 決定，它保證不會是作用中的帳號；但那只是開始同步那一刻的判斷，
+  所以 `mirror.ts` 每寫一筆、刪一筆之前還要問 `MirrorIo.stillInactive()`（重讀 `config.json`），目標被登入了就停
+  （2026-10-20 實測：只在開始時看一次，換帳號後剩下 5 筆有 4 筆照樣寫進作用中的帳號）。
+  從 braid 移除同步夥伴的帳號時，同步跟著關掉、這一對清掉（`forget`），不再往它的資料夾寫。
   刪除只依作用中帳號資料夾裡明確的 `deleted_<id>`（app 刪對話時寫，內容是刪除時間），刪前先備份到
   `braid-backups/sync-deleted/`、刪後留同樣時間的 `deleted_<id>`；目標那筆最後活動晚於刪除時間就不刪。
   app 刪對話本身會停程序、刪 worktree 與分支（共用的），WSL 的對話檔不刪（`holdsLocalTranscripts` 只認 local）。

@@ -14,6 +14,12 @@ export type MirrorIo = {
   write: (path: string, text: string) => Promise<void>
   /** 刪一個檔；刪不掉要丟錯 */
   remove: (path: string) => Promise<void>
+  /**
+   * 目標帳號仍然不是 app 登入中的帳號。每寫一筆、刪一筆之前問一次，不是就停：
+   * 使用者可能在同步跑到一半時在 app 換成目標帳號，app 這時正從磁碟讀它的資料夾，再寫就會被蓋掉或讀到一半。
+   * 只在開始時看一次不夠（2026-10-20 實測：換帳號後剩下的 5 筆有 4 筆照樣寫進作用中的帳號）。
+   */
+  stillInactive: () => Promise<boolean>
 }
 
 /** tool/spec.json 的 sessions 段：側欄紀錄的檔名規則與綁帳號的欄位。 */
@@ -93,7 +99,8 @@ export async function orgDirOf(io: MirrorIo, root: string, sep: string, account:
   return best?.name ?? null
 }
 
-export type MirrorResult = { created: number; updated: number; deleted: number }
+/** stopped：目標帳號中途被 app 登入，後面的沒寫（下一次同步方向會反過來）。 */
+export type MirrorResult = { created: number; updated: number; deleted: number; stopped?: true }
 
 /**
  * 把 src 資料夾的側欄紀錄複製到 dst（同一個 app、另一個帳號的資料夾）。scope 是 'all' 或要同步的資料夾。
@@ -107,6 +114,7 @@ export type MirrorResult = { created: number; updated: number; deleted: number }
  * 不刪的情況：dst 那筆的最後活動晚於刪除時間（刪掉之後又在那邊用過）、不在同步範圍、src 其實還有那筆。
  * 只依 src 明確的刪除紀錄刪，src 讀到空的也不會因此刪東西。刪之前先把那筆原樣存到 trash（備份寫不進去就不刪）。
  * 寫過、刪過的紀錄依封存狀態更新 dst 的封存清單（app 載入時用它先載未封存的）。src 一律不寫。
+ * 每一筆（一次新增或更新、一整組刪除步驟、封存清單）動手前問 io.stillInactive()，dst 被 app 登入了就停在那裡。
  */
 export async function mirrorSessions(
   io: MirrorIo,
@@ -144,6 +152,7 @@ export async function mirrorSessions(
   let created = 0
   let updated = 0
   let deleted = 0
+  const stop = (): MirrorResult => ({ created, updated, deleted, stopped: true })
 
   // 先處理刪除：在 src 刪過、dst 還有的
   const srcNames = new Set(srcFiles.map(f => f.name))
@@ -175,6 +184,7 @@ export async function mirrorSessions(
     }
     const deletedAt = /^\d+$/.test(stamp) ? Number(stamp) : t.mtimeMs
     if (at(old) > deletedAt) continue
+    if (!(await io.stillInactive())) return stop() // 整組刪除步驟之前問一次，不會刪到一半停下
     // 先刪紀錄再留刪除紀錄：刪不掉就整個停下來（丟錯），不會留下「有刪除紀錄、紀錄卻還在」的狀態
     await io.write(`${trash.dir}${trash.sep}${name}`, raw) // 備份；寫不進去會丟錯，下面就不刪
     if (dstByName.has(`${name}.tmp`)) await io.remove(`${dst}${sep}${name}.tmp`) // app 載入時會把孤兒 .tmp 救回成紀錄
@@ -206,13 +216,17 @@ export async function mirrorSessions(
       for (const k of toReplace) if (k in rep) next[k] = rep[k]
     }
     if (old) for (const k of accountKeys) if (k in old) next[k] = old[k]
+    if (!(await io.stillInactive())) return stop()
     await io.write(`${dst}${sep}${f.name}`, JSON.stringify(next))
     if (have) updated++
     else created++
     archived.set(id, next.isArchived === true)
   }
 
-  if (archived.size > 0) await updateArchivedIndex(io, spec, dst, sep, dstByName.has(spec.archivedIndex), archived)
+  if (archived.size > 0) {
+    if (!(await io.stillInactive())) return stop()
+    await updateArchivedIndex(io, spec, dst, sep, dstByName.has(spec.archivedIndex), archived)
+  }
   return { created, updated, deleted }
 }
 
