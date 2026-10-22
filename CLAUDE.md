@@ -25,7 +25,7 @@ https://claude.ai/artifact/VV3y5gmG3DH5rvmU5jxHDa 。之後的改動另成一份
 mod/                              plugin 本體（從 marketplace 安裝時只會複製這個資料夾）
   .claude-plugin/plugin.json
   .claude-plugin/types/           引擎載入 mod 時寫入的型別（gitignore，不要手改）
-  hooks/register.tsx              指令、面板各頁、輸入框上方的提示、交接後的防呆；所有 $ 呼叫都在這個檔
+  hooks/register.tsx              指令、面板各頁、輸入框上方的提示、新頁發布前的歸屬把關（guardArtifact）；所有 $ 呼叫都在這個檔
   hooks/model.ts                  純邏輯：帳號、用量、門檻、換帳號規則、同步範圍（不碰 $）
   hooks/band.ts                   輸入框上方的提示：一則提示的形狀（Notice）、佔幾列、列數很緊時怎麼收（純函式）
   hooks/launch.ts                 遷移工具的參數與開視窗的方式（純函式）
