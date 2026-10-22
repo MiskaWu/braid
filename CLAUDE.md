@@ -27,6 +27,7 @@ mod/                              plugin 本體（從 marketplace 安裝時只�
   .claude-plugin/types/           引擎載入 mod 時寫入的型別（gitignore，不要手改）
   hooks/register.tsx              指令、面板各頁、輸入框上方的提示、交接後的防呆；所有 $ 呼叫都在這個檔
   hooks/model.ts                  純邏輯：帳號、用量、門檻、換帳號規則、同步範圍（不碰 $）
+  hooks/band.ts                   輸入框上方的提示：一則提示的形狀（Notice）、佔幾列、列數很緊時怎麼收（純函式）
   hooks/launch.ts                 遷移工具的參數與開視窗的方式（純函式）
   hooks/terminal.ts               帳號腳本（新增帳號）開新視窗的方式、去哪裡找 claude（純函式）
   hooks/desktop.ts                讀桌面 app 的側欄資料與備份（收一組讀檔函式，不收 $）
@@ -200,6 +201,14 @@ tests/                            工具的測試（Node＋classic-level 造資�
   設計稿先在暫存資料夾用產生器輸出拼 462px 寬的假面板、Playwright 深淺色截圖看過再接進來。
 - **用量顯示**：狀態列（`$.ui.status`）只能放文字，寫 5 小時與 7 天；桌面版另外在輸入框下方那行（`PromptHint`）
   先拿 `next(e)` 畫好的 app 提示，再在旁邊接 `usageStrip` 的 SVG 量表，不蓋掉 app 自己的提示。
+- **輸入框上方是所有 mod 共用的**（0.11.1）：引擎只畫最外層 hook 回的那一棵樹，而 braid 裝在最前面、是最外層。
+  0.11.0 以前四種提示各自直接回樹、不叫 `next`，提示一出現，裝在後面的 canopy、ue-agent、baton 的指令卡片就整個不見
+  （2026-10-22 在 baton 那場實測）。現在照 baton README「和其他 mod 共用輸入框上方」的約定只疊、不佔：每種提示只在 `bandNotice`
+  回一則 `band.ts` 的 `Notice`，AbovePrompt 的 hook 一處決定排版（`noticeLayout`：放得下攤開、放不下收成一列、沒有列就讓路）、
+  往下傳的 `maxRows` 扣掉自己佔的列數、把自己的疊在 `next` 畫回來的上面。加新的提示就在 `bandNotice` 多回一種 `Notice`，
+  不要在 hook 裡另外回樹。braid 不攔 `ui.scroll`：共用時整條由引擎捲，別人的內容才捲得到。
+  測試世界墊底的 AbovePrompt 一定畫一行字，`mountBand` 每次掛上都確認它還在——以前墊底是空的 `<Box />`，被蓋掉也看不出來；
+  鏈上的另一個 mod 用行內外掛（`tier: 'append'`，站在 braid 裡層）測，別的外掛畫的字從 `ui.drawn()` 的樹讀（`ui.find` 只找 braid 自己的）。
 - **認帳號與換帳號的說法看對話在哪裡跑**（0.11.0）：`seenNow` 依序看 `BRAID_ACCOUNT`、桌面 app 的 `CLAUDE_CODE_ACCOUNT_UUID`、
   Claude Code 自己的 `.claude.json`，把**怎麼認的**記成 `signIn`（`model.ts` 的 `SignIn`）。`.claude.json` 在哪由 `claudeJsonAt` 決定：
   `CLAUDE_CONFIG_DIR` 優先，Windows 的家目錄看 `USERPROFILE`（Claude Code 的 `os.homedir()` 也是），不看 `HOME`——

@@ -30,6 +30,7 @@ import type {
 import { backupLabel, desktopPaths, listToolBackups, listTrash, scanDesktop, type DesktopEnv, type DesktopIo, type DesktopPaths } from './desktop'
 import { manualPath, parseDryRun, planLaunch, toolArgs, type ToolRequest } from './launch'
 import { mirrorSessions, orgDirOf, parseSpec, type MirrorIo, type MirrorMemory } from './mirror'
+import { noticeLayout, type Notice } from './band'
 import { accountCard, backupTiles, header, ownerHero, rankRow, switchHero, syncFlow, usageStrip, useIcon, type Window } from './visual'
 import { ANY, draftGroups, dropRule, normalizePolicy, projectOf, ruleFor, sameSide, setRule, verdictFor, type FolderRemotes, type Verdict } from './policy'
 import { isNewPage, pageQuestion, parseIndex, pendingTwin, projectSlug, serializeIndex, titleOf, urlIn, type PageChoice, type PageEntry, type PageIndex } from './pages'
@@ -1305,6 +1306,123 @@ async function snooze($: $, key: string): Promise<void> {
   await update($, snoozeAtom, () => key)
 }
 
+// ── 輸入框上方的提示 ─────────────────────────────────────────
+// 一次只說一則，依序是：用量快用完、新頁的歸屬、排著的頁、從其他帳號搬過來。這裡只決定要說什麼（band.ts 的 Notice）；
+// 怎麼畫、佔幾列、怎麼和鏈上其他 mod 疊在一起，都在 AbovePrompt 的 hook 一處。
+
+async function bandNotice($: $): Promise<Notice | null> {
+  const uses = await read($, usesAtom)
+  const accounts = await read($, accountsAtom)
+  const current = await read($, currentAtom)
+  const cur = current ? accounts[current] : undefined
+  if (!cur) return null
+
+  // 變數不能叫 h：JSX 編譯成全域的 h(...)，同名的區域變數會把它蓋掉
+  const now = await $.clock.now()
+  const sy = await read($, syncAtom)
+  const m = await read($, mirrorAtom)
+  // 桌面 app 的這個帳號有在自動同步：對話已經複製到另一個帳號，在 app 換過去就能接著做
+  const syncedTo = uses?.sync && sy.on && m && m.active === current && m.to && !m.problem ? m.to : null
+
+  // 用量快用完：提醒在桌面 app 換成哪個帳號（braid 不替你換）。不看歸屬：歸屬只管新頁歸誰
+  const by = switchByOf(await read($, signInAtom))
+  const band = uses?.switch ? bandFor(accounts, current, await read($, liveAtom), await read($, switchAtom), now, await read($, snoozeAtom), by) : null
+  if (band) {
+    const reset = fmtReset(band.resetsAt, now, await read($, tzAtom))
+    const head = band.kind === 'out' ? `${cur.label} ${WINDOW_NAMES[band.window]}用量用完了` : `${cur.label} ${WINDOW_NAMES[band.window]}用量 ${band.pct}%`
+    const synced = by === 'desktop' && syncedTo ? mirrorName(accounts, syncedTo, m?.toOrg ?? null) : null
+    const detail = by === 'login'
+      ? `${band.next ? `用 /login 換成「${band.next.label}」` : '用 /login 換成另一個帳號'}就能接著做，這段對話不用搬。`
+      : synced
+      ? `在桌面 app 換成「${synced}」就能接著做，對話都已同步過去。`
+      : band.next
+        ? `可以在桌面 app 換成「${band.next.label}」${uses?.sync ? '' : '；在 braid 開啟同步，對話就會自動跟過去'}。`
+        : band.elsewhere
+          ? `「${band.elsewhere.label}」還沒在桌面 app 登入過：先在桌面 app 登入它，就能換過去。`
+          : '沒有其他帳號可以換：在桌面 app 登入另一個帳號，braid 就會認得它。'
+    return {
+      tone: 'warning',
+      text: `${head}${reset ? `，${reset} 重置` : ''}。`,
+      detail,
+      buttons: [
+        ...(synced ? [] : [{ key: 'band-open', label: '打開 braid', dim: true, onPress: () => openPane($, uses?.sync ? 'sync' : 'switch') }]),
+        { key: 'band-snooze', label: reset ? `${reset} 前別再提醒` : '先別提醒', dismiss: true, onPress: () => snooze($, band.snoozeKey) },
+      ],
+    }
+  }
+
+  // 有新頁被擋下、這個資料夾還沒設定歸屬：問歸誰。選的是這個對話這一邊（或不分）就直接發布排著的頁；
+  // 沒有排著的頁就不問——歸屬只為頁面服務，不為了它打斷對話
+  const ask = uses?.policy ? await askHere($) : null
+  if (ask) {
+    const owners = orderedIds(accounts, (await read($, switchAtom)).order)
+    const viaToken = await read($, viaTokenAtom)
+    const publishes = (id: string) => !viaToken && (id === ANY || (!!accounts[id] && sameSide(accounts[id] as BraidAccount, cur)))
+    return {
+      tone: 'suggestion',
+      text: `「${ask.name}」有 ${ask.pending} 張新頁在等：這個資料夾歸哪個帳號？之後在這裡做的新頁都用它發布。`,
+      buttons: [
+        ...owners.map(id => {
+          const label = accounts[id]?.label ?? id
+          return { key: `ask-${id}`, label: publishes(id) ? `歸「${label}」並發布` : `歸「${label}」`, onPress: () => answerAsk($, ask.project, id) }
+        }),
+        { key: 'ask-any', label: publishes(ANY) ? '不分，直接發布' : '不分', dim: true, onPress: () => answerAsk($, ask.project, ANY) },
+        { key: 'ask-later', label: '之後再說', dismiss: true, onPress: () => update($, skipAskAtom, () => ask.project) },
+      ],
+    }
+  }
+
+  // 有新頁排著等這個帳號（或同一邊的帳號）發布：在這裡就能發布，不用進面板
+  const waiting = uses?.policy ? await waitingHere($, cur) : []
+  const first = waiting[0]
+  if (first) {
+    const titles = waiting.slice(0, 2).map(p => `「${p.title}」`).join('、') + (waiting.length > 2 ? '…' : '')
+    return {
+      tone: 'suggestion',
+      text: `有 ${waiting.length} 張新頁排著等「${cur.label}」發布：${titles}。`,
+      buttons: [
+        {
+          key: 'wait-publish',
+          label: waiting.length === 1 ? `發布「${first.title}」` : `全部發布（${waiting.length} 張）`,
+          primary: true,
+          onPress: async () => {
+            const urls: string[] = []
+            for (const p of waiting) {
+              const url = await publishPending($, p.id)
+              if (url) urls.push(url)
+            }
+            $.ui.toast(urls.length === waiting.length ? `braid：已發布 ${urls.join('、')}` : `braid：${waiting.length - urls.length} 張沒發布成，打開 /braid →「歸屬」看看。`)
+          },
+        },
+        { key: 'wait-open', label: '到歸屬頁看看', dim: true, onPress: () => openPane($, 'policy') },
+        { key: 'wait-later', label: '之後再說', dismiss: true, onPress: () => update($, skipWaitingAtom, () => true) },
+      ],
+    }
+  }
+
+  // 換帳號後舊帳號的對話不會跟過來：這個桌面 app 帳號第一次遇到「別的帳號有對話還沒在這裡」時問一次（按了就不再問）
+  const nudge = await migrateNudge($, cur.id)
+  if (nudge) {
+    return {
+      tone: 'suggestion',
+      text: `這台電腦的「${nudge.name}」有 ${nudge.pending} 個對話還沒在這個帳號${nudge.more > 0 ? `（另外還有 ${nudge.more} 個帳號也有）` : ''}：換帳號後舊的對話不會自動跟過來。`,
+      buttons: [
+        {
+          key: 'mig-nudge-open',
+          label: '看看要搬什麼',
+          primary: true,
+          onPress: async () => {
+            await markMigrateAsked($, cur.id)
+            await openPane($, 'accounts')
+          },
+        },
+        { key: 'mig-nudge-skip', label: '不用了', dismiss: true, onPress: () => markMigrateAsked($, cur.id) },
+      ],
+    }
+  }
+  return null
+}
+
 // ── 畫面：共用的小元件 ───────────────────────────────────────
 // 每頁同一套層次：頁首（標題＋一句話）→ 區塊標題 → 內容；說明一律是小字淡色，帳號一律是色點＋名稱。
 
@@ -2423,143 +2541,63 @@ export const register: Register = on => {
     return (await guardArtifact($, e as unknown as Record<string, unknown>, next as never)) as never
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'braid 判斷這張頁該歸哪個帳號時出錯，先不發布。請打開 /braid →「歸屬」看看，或在「用法」關掉「歸屬」。' }))
 
-  // ── 輸入框上方：用量快到門檻時提醒換帳號、新頁的歸屬、排著的頁、從其他帳號搬過來 ──
+  // ── 輸入框上方：braid 的一則提示（bandNotice）疊在鏈上其他 mod 畫的上面 ──
+  // 這一塊所有 mod 共用，引擎只畫最外層回的那棵樹，而 braid 裝在最前面、是最外層：只疊、不佔（band.ts 開頭）。
+  // 先叫 next，往下傳的 maxRows 扣掉自己佔的列數，再把自己的放在上面；問卷佔著、沒東西要說、連一列都沒有就整個讓路。
+  // braid 不攔 ui.scroll：和別人共用時整條由引擎捲，別人的內容才捲得到。
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
+    const notice = await bandNotice($)
+    const layout = notice ? noticeLayout(notice, e.props.bodyColumns, e.props.maxRows) : null
+    if (!notice || !layout) return next(e)
+    const below = await next({ ...e, props: { ...e.props, maxRows: Math.max(0, e.props.maxRows - layout.rows) } })
     const { Box, Text, Button } = $.ui.resolve(e)
-    const uses = await read($, usesAtom)
-    const accounts = await read($, accountsAtom)
-    const current = await read($, currentAtom)
-
-    // 變數不能叫 h：JSX 編譯成全域的 h(...)，同名的區域變數會把它蓋掉
-    const now = await $.clock.now()
-    const cur = current ? accounts[current] : undefined
-    const sy = await read($, syncAtom)
-    const m = await read($, mirrorAtom)
-    // 桌面 app 的這個帳號有在自動同步：對話已經複製到另一個帳號，在 app 換過去就能接著做
-    const syncedTo = uses?.sync && sy.on && m && m.active === current && m.to && !m.problem ? m.to : null
-
-    // 用量快用完：提醒在桌面 app 換成哪個帳號（braid 不替你換）。不看歸屬：歸屬只管新頁歸誰
-    const by = switchByOf(await read($, signInAtom))
-    const band = uses?.switch ? bandFor(accounts, current, await read($, liveAtom), await read($, switchAtom), now, await read($, snoozeAtom), by) : null
-    if (band && cur) {
-      const reset = fmtReset(band.resetsAt, now, await read($, tzAtom))
-      const head = band.kind === 'out' ? `${cur.label} ${WINDOW_NAMES[band.window]}用量用完了` : `${cur.label} ${WINDOW_NAMES[band.window]}用量 ${band.pct}%`
-      const synced = by === 'desktop' && syncedTo ? mirrorName(accounts, syncedTo, m?.toOrg ?? null) : null
-      const detail = by === 'login'
-        ? `${band.next ? `用 /login 換成「${band.next.label}」` : '用 /login 換成另一個帳號'}就能接著做，這段對話不用搬。`
-        : synced
-        ? `在桌面 app 換成「${synced}」就能接著做，對話都已同步過去。`
-        : band.next
-          ? `可以在桌面 app 換成「${band.next.label}」${uses?.sync ? '' : '；在 braid 開啟同步，對話就會自動跟過去'}。`
-          : band.elsewhere
-            ? `「${band.elsewhere.label}」還沒在桌面 app 登入過：先在桌面 app 登入它，就能換過去。`
-            : '沒有其他帳號可以換：在桌面 app 登入另一個帳號，braid 就會認得它。'
-      return (
-        <Box flexDirection="column">
-          <Text wrap="wrap">
-            <Text color="warning" bold>
-              braid
-            </Text>{' '}
-            {head}
-            {reset ? `，${reset} 重置` : ''}。<Text dimColor>{detail}</Text>
+    const buttons = layout.buttons.map(b => (
+      <Button
+        key={b.key}
+        label={b.label}
+        onPress={b.onPress}
+        {...(b.primary ? { variant: 'primary' as const } : {})}
+        {...(b.dim ? { dimColor: true } : {})}
+        {...(b.dismiss ? { role: 'dismiss' as const } : {})}
+      />
+    ))
+    const tag = (
+      <Text color={notice.tone} bold>
+        braid
+      </Text>
+    )
+    // 列數很緊時收成一列：字截斷、補充不畫、只留第一顆按鈕和關掉的那顆
+    const mine = layout.compact ? (
+      <Box flexDirection="row" gap={1}>
+        <Box flexGrow={1} flexShrink={1}>
+          <Text wrap="truncate-end">
+            {tag}
+            {' '}
+            {notice.text}
           </Text>
-          <Box flexDirection="row" gap={1}>
-            {!synced && <Button key="band-open" label="打開 braid" dimColor onPress={() => openPane($, uses?.sync ? 'sync' : 'switch')} />}
-            <Button key="band-snooze" label={reset ? `${reset} 前別再提醒` : '先別提醒'} role="dismiss" onPress={() => snooze($, band.snoozeKey)} />
-          </Box>
         </Box>
-      )
-    }
-
-    // 有新頁被擋下、這個資料夾還沒設定歸屬：問歸誰。選的是這個對話這一邊（或不分）就直接發布排著的頁；
-    // 沒有排著的頁就不問——歸屬只為頁面服務，不為了它打斷對話
-    const ask = uses?.policy && cur ? await askHere($) : null
-    if (ask && cur) {
-      const owners = orderedIds(accounts, (await read($, switchAtom)).order)
-      const viaToken = await read($, viaTokenAtom)
-      const publishes = (id: string) => !viaToken && (id === ANY || (!!accounts[id] && sameSide(accounts[id] as BraidAccount, cur)))
-      return (
-        <Box flexDirection="column">
-          <Text wrap="wrap">
-            <Text color="suggestion" bold>
-              braid
-            </Text>{' '}
-            {`「${ask.name}」有 ${ask.pending} 張新頁在等：這個資料夾歸哪個帳號？之後在這裡做的新頁都用它發布。`}
-          </Text>
-          <Box flexDirection="row" gap={1} flexWrap="wrap">
-            {owners.map(id => {
-              const label = accounts[id]?.label ?? id
-              return <Button key={`ask-${id}`} label={publishes(id) ? `歸「${label}」並發布` : `歸「${label}」`} onPress={() => answerAsk($, ask.project, id)} />
-            })}
-            <Button key="ask-any" label={publishes(ANY) ? '不分，直接發布' : '不分'} dimColor onPress={() => answerAsk($, ask.project, ANY)} />
-            <Button key="ask-later" label="之後再說" role="dismiss" onPress={() => update($, skipAskAtom, () => ask.project)} />
-          </Box>
+        {buttons}
+      </Box>
+    ) : (
+      <Box flexDirection="column">
+        <Text wrap="wrap">
+          {tag}
+          {' '}
+          {notice.text}
+          {notice.detail ? <Text dimColor>{notice.detail}</Text> : ''}
+        </Text>
+        <Box flexDirection="row" gap={1} flexWrap="wrap">
+          {buttons}
         </Box>
-      )
-    }
-
-    // 有新頁排著等這個帳號（或同一邊的帳號）發布：在這裡就能發布，不用進面板
-    const waiting = uses?.policy && cur ? await waitingHere($, cur) : []
-    const first = waiting[0]
-    if (first && cur) {
-      const titles = waiting.slice(0, 2).map(p => `「${p.title}」`).join('、') + (waiting.length > 2 ? '…' : '')
-      return (
-        <Box flexDirection="column">
-          <Text wrap="wrap">
-            <Text color="suggestion" bold>
-              braid
-            </Text>{' '}
-            {`有 ${waiting.length} 張新頁排著等「${cur.label}」發布：${titles}。`}
-          </Text>
-          <Box flexDirection="row" gap={1} flexWrap="wrap">
-            <Button
-              key="wait-publish"
-              label={waiting.length === 1 ? `發布「${first.title}」` : `全部發布（${waiting.length} 張）`}
-              variant="primary"
-              onPress={async () => {
-                const urls: string[] = []
-                for (const p of waiting) {
-                  const url = await publishPending($, p.id)
-                  if (url) urls.push(url)
-                }
-                $.ui.toast(urls.length === waiting.length ? `braid：已發布 ${urls.join('、')}` : `braid：${waiting.length - urls.length} 張沒發布成，打開 /braid →「歸屬」看看。`)
-              }}
-            />
-            <Button key="wait-open" label="到歸屬頁看看" dimColor onPress={() => openPane($, 'policy')} />
-            <Button key="wait-later" label="之後再說" role="dismiss" onPress={() => update($, skipWaitingAtom, () => true)} />
-          </Box>
-        </Box>
-      )
-    }
-
-    // 換帳號後舊帳號的對話不會跟過來：這個桌面 app 帳號第一次遇到「別的帳號有對話還沒在這裡」時問一次（按了就不再問）
-    const nudge = cur ? await migrateNudge($, cur.id) : null
-    if (nudge && cur) {
-      return (
-        <Box flexDirection="column">
-          <Text wrap="wrap">
-            <Text color="suggestion" bold>
-              braid
-            </Text>{' '}
-            {`這台電腦的「${nudge.name}」有 ${nudge.pending} 個對話還沒在這個帳號${nudge.more > 0 ? `（另外還有 ${nudge.more} 個帳號也有）` : ''}：換帳號後舊的對話不會自動跟過來。`}
-          </Text>
-          <Box flexDirection="row" gap={1}>
-            <Button
-              key="mig-nudge-open"
-              label="看看要搬什麼"
-              variant="primary"
-              onPress={async () => {
-                await markMigrateAsked($, cur.id)
-                await openPane($, 'accounts')
-              }}
-            />
-            <Button key="mig-nudge-skip" label="不用了" role="dismiss" onPress={() => markMigrateAsked($, cur.id)} />
-          </Box>
-        </Box>
-      )
-    }
-    return next(e)
+      </Box>
+    )
+    return (
+      <Box flexDirection="column">
+        {mine}
+        {below}
+      </Box>
+    )
   })
 
   // ── 輸入框下方那行：桌面版在 app 自己的提示旁邊接一條迷你量表（終端機照舊，用狀態列的文字） ──

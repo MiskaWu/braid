@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { BraidAccount, BraidSwitch } from '../types'
+import { buttonRows, cells, noticeLayout, noticeRows, textRows, type Notice } from '../hooks/band'
 import { backupLabel } from '../hooks/desktop'
 import { parseDryRun, planLaunch, toolArgs } from '../hooks/launch'
 import {
@@ -1068,5 +1069,45 @@ describe('桌面版的圖（第二批）', () => {
       expect(i.source.startsWith('<svg')).toBe(true)
       expect(i.alt).toMatch(/的圖示$/)
     }
+  })
+})
+
+describe('輸入框上方的提示佔幾列', () => {
+  const noop = () => undefined
+  const NOTICE: Notice = {
+    tone: 'warning',
+    text: '公司 5 小時用量 92%，16:00 重置。',
+    detail: '可以在桌面 app 換成「個人」。',
+    buttons: [
+      { key: 'open', label: '打開 braid', dim: true, onPress: noop },
+      { key: 'later', label: '先別提醒', dismiss: true, onPress: noop },
+    ],
+  }
+
+  test('字寬：中日韓全形兩欄；會折行的字照欄寬折，換行另起一列', async () => {
+    expect(cells('braid 公司「個人」，')).toBe(6 + 4 + 8 + 2)
+    expect(textRows('一二三四五', 10)).toBe(1)
+    expect(textRows('一二三四五六', 10)).toBe(2)
+    expect(textRows('a\nb', 10)).toBe(2)
+  })
+
+  test('按鈕：終端機畫成 [ label ]，照順序排、放不下才換列', async () => {
+    expect(buttonRows([], 40)).toBe(0)
+    expect(buttonRows(['打開 braid', '先別提醒'], 40)).toBe(1) // 14 + 1 + 12 = 27
+    expect(buttonRows(['打開 braid', '先別提醒'], 27)).toBe(1)
+    expect(buttonRows(['打開 braid', '先別提醒'], 26)).toBe(2)
+  })
+
+  test('排版：放得下就攤開；放不下收成一列，只留第一顆與關掉的那顆；連一列都沒有就不畫', async () => {
+    expect(noticeRows(NOTICE, 120)).toBe(2)
+    expect(noticeLayout(NOTICE, 120, 12)).toMatchObject({ compact: false, rows: 2 })
+    expect(noticeLayout(NOTICE, 40, 3)).toMatchObject({ compact: false, rows: 3 })
+    const tight = noticeLayout({ ...NOTICE, buttons: [{ key: 'go', label: '發布', primary: true, onPress: noop }, { key: 'see', label: '看看', dim: true, onPress: noop }, ...NOTICE.buttons.slice(1)] }, 40, 2)
+    expect(tight?.compact).toBe(true)
+    expect(tight?.rows).toBe(1)
+    expect(tight?.buttons.map(b => b.key)).toEqual(['go', 'later'])
+    // 第一顆就是關掉的那顆（例如對話都已同步過去，用量提醒只剩「先別提醒」）：不重複
+    expect(noticeLayout({ ...NOTICE, buttons: NOTICE.buttons.slice(1) }, 10, 1)?.buttons.map(b => b.key)).toEqual(['later'])
+    expect(noticeLayout(NOTICE, 120, 0)).toBeNull()
   })
 })

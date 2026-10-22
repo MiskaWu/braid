@@ -52,7 +52,8 @@ export function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
 }
 
-const wide = (ch: string) => /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/.test(ch)
+/** 中日韓全形字：圖裡一個字級寬、終端機佔兩欄（band.ts 估列數也用它）。 */
+export const wide = (ch: string) => /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/.test(ch)
 
 /** 估計的字寬（px）。 */
 export function textWidth(s: string, size: number): number {

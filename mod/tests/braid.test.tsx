@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
+import type { Engine, Plugin } from 'claude-code/testing'
 import type { FsEntry, On } from 'claude-code'
 
 // 情境：WSL 裡、桌面 app 開的對話，登入公司帳號 W（公司組織 OW）。
@@ -131,9 +132,10 @@ function world(on: On, opts: Opts = {}) {
   on('session.measure', ($, e) => ({ changed: e.changed }))
   on('prompt.submit', ($, e) => ({ text: e.text, wait: false }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
+  // 墊底的（站在引擎的位置）一定畫一行字：以前這裡是空的 <Box />，braid 的提示把底下整個蓋掉也看不出來（mountBand 會檢查）
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
-    const { Box } = $.ui.resolve(e)
-    return <Box />
+    const { Text } = $.ui.resolve(e)
+    return <Text>{`墊底 maxRows=${e.props.maxRows}`}</Text>
   })
   on('ui.render', { component: 'PromptHint' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
@@ -258,6 +260,24 @@ const BAND = {
   plugin: 'braid',
   component: 'AbovePrompt' as const,
   props: { hasSurvey: false, isWorking: false, maxRows: 12, bodyColumns: 120, scroll: { offset: 0, bodyRows: 12 }, view: {} },
+}
+type El = { type?: unknown; children?: unknown }
+const plain = (node: unknown): string =>
+  typeof node === 'string' || typeof node === 'number' ? String(node) : Array.isArray(node) ? node.map(plain).join('') : typeof node === 'object' && node !== null ? plain((node as El).children) : ''
+/** 畫出來的樹裡每個 Text 的字（Text 裡再包的接成一段）。ui.find 只找 braid 自己的元素，別的外掛畫的從 ui.drawn() 的樹讀 */
+function texts(node: unknown): string[] {
+  if (Array.isArray(node)) return node.flatMap(texts)
+  if (typeof node !== 'object' || node === null) return []
+  return (node as El).type === 'Text' ? [plain((node as El).children)] : texts((node as El).children)
+}
+/**
+ * 掛上輸入框上方那一塊，並確認鏈上在 braid 底下的照樣畫得出來：這一塊所有 mod 共用，braid 只能疊、不能佔
+ * （0.11.0 以前提示一出現，裝在它後面的 mod 和引擎的問卷就整個不見）。
+ */
+async function mountBand($: Engine, surface: (typeof SURFACES)[number], props: Partial<typeof BAND.props> = {}) {
+  const ui = await $.ui.mount({ ...BAND, surface, props: { ...BAND.props, ...props } })
+  expect(texts(await ui.drawn()).some(t => /^墊底 maxRows=\d+$/.test(t))).toBe(true)
+  return ui
 }
 const START = { cwd: '/w/server', surface: 'desktop' as const, isInteractive: true }
 const RUN = (args = '') => ({ command: 'braid', args, origin: { kind: 'composer' as const }, presentation: { isFullscreen: true, columns: 160 } })
@@ -420,7 +440,7 @@ describe('VS Code 插件（Windows 本機）：帳號是 Claude Code 自己的�
     const w = world(on, { env: VSCODE, files: LOGIN, store: { uses: USES_ALL, sync: SYNC_ON, [`account:${P}`]: PERSONAL } })
     await $.session.start(START)
     await $.session.measure(measure(92) as never)
-    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const band = await mountBand($, 'desktop')
     expect(await shows(band, /用 \/login 換成「個人」就能接著做，這段對話不用搬。/)).toBe(true)
     expect(await shows(band, /桌面 app/)).toBe(false)
     await band.unmount()
@@ -470,13 +490,13 @@ describe('用量快用完：輸入框上方的提示', () => {
     await $.session.start(START)
     await $.session.measure(measure(92) as never)
     for (const surface of SURFACES) {
-      const ui = await $.ui.mount({ ...BAND, surface })
+      const ui = await mountBand($, surface)
       expect(await shows(ui, /公司 5 小時用量 92%，16:00 重置/)).toBe(true)
       expect(await shows(ui, /可以在桌面 app 換成「個人」。/)).toBe(true)
       expect(await ui.find({ key: 'band-handoff' })).toBeUndefined()
       await ui.unmount()
     }
-    const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const ui = await mountBand($, 'desktop')
     await ui.press({ key: 'band-open' })
     expect(w.opened).toContain('braid')
     await ui.unmount()
@@ -489,7 +509,7 @@ describe('用量快用完：輸入框上方的提示', () => {
     world(on, { store: { uses: { switch: true, sync: false, policy: false }, 'account:tok-00000002': WORK2 } })
     await $.session.start(START)
     await $.session.measure(measure(95) as never)
-    const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const ui = await mountBand($, 'desktop')
     expect(await shows(ui, /「公司 2」還沒在桌面 app 登入過：先在桌面 app 登入它，就能換過去。/)).toBe(true)
     await ui.unmount()
   })
@@ -498,7 +518,7 @@ describe('用量快用完：輸入框上方的提示', () => {
     world(on, { store: { uses: { switch: true, sync: false, policy: true }, policy: { rules: [{ folder: '/w', owner: W }] }, [`account:${P}`]: PERSONAL } })
     await $.session.start(START)
     await $.session.measure(measure(95) as never)
-    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    const ui = await mountBand($, 'terminal')
     expect(await shows(ui, /可以在桌面 app 換成「個人」；在 braid 開啟同步，對話就會自動跟過去。/)).toBe(true)
     expect(await shows(ui, /公司程式碼會經由/)).toBe(false)
     await ui.unmount()
@@ -508,18 +528,18 @@ describe('用量快用完：輸入框上方的提示', () => {
     const w = world(on, { store: { uses: USES_ALL } })
     await $.session.start(START)
     await $.session.measure(measure(50) as never)
-    let ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    let ui = await mountBand($, 'desktop')
     expect(await ui.find({ key: 'band-snooze' })).toBeUndefined()
     await ui.unmount()
     await $.session.measure(measure(91) as never)
-    ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    ui = await mountBand($, 'desktop')
     expect((await ui.find({ key: 'band-snooze' }))?.props.label).toBe('16:00 前別再提醒')
     await ui.press({ key: 'band-snooze' })
     expect(await ui.find({ key: 'band-snooze' })).toBeUndefined()
     expect(typeof (await w.store.get('snooze'))).toBe('string')
     await ui.unmount()
     await $.session.measure(measure(100) as never)
-    ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    ui = await mountBand($, 'desktop')
     expect(await shows(ui, /用量用完了/)).toBe(true)
     await ui.unmount()
   })
@@ -528,7 +548,7 @@ describe('用量快用完：輸入框上方的提示', () => {
     const w = world(on, { store: { uses: { switch: false, sync: false } } })
     await $.session.start(START)
     await $.session.measure(measure(99) as never)
-    const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const ui = await mountBand($, 'desktop')
     expect(await ui.find({ key: 'band-snooze' })).toBeUndefined()
     await ui.unmount()
     expect(w.statuses.filter(s => s !== undefined)).toEqual([])
@@ -990,7 +1010,7 @@ describe('同步', () => {
     await $.session.measure(measure(92) as never)
     await w.clock.advance(1)
     expect(w.files[`${SESS}/${P}/${OP}/local_n.json`]).toBeDefined() // 不等一分鐘
-    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const band = await mountBand($, 'desktop')
     expect(await shows(band, /在桌面 app 換成「個人」就能接著做，對話都已同步過去/)).toBe(true)
     await band.unmount()
   })
@@ -1005,7 +1025,7 @@ describe('同步', () => {
     expect(w.files[`${SESS}/${P}/${OP}/local_a.json`]).toBeDefined() // 歸公司的資料夾也同步：同步不看歸屬表
     await $.session.measure(measure(92) as never)
     await w.clock.advance(1)
-    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const band = await mountBand($, 'desktop')
     expect(await shows(band, /在桌面 app 換成「個人」就能接著做，對話都已同步過去/)).toBe(true)
     expect(await shows(band, /公司程式碼會經由|歸哪個帳號/)).toBe(false)
     await band.unmount()
@@ -1157,7 +1177,7 @@ describe('歸屬（依資料夾決定新頁歸哪個帳號；不管對話）', (
   test('第 1 格 公司專案 × 公司帳號：不提醒；新頁照常發布，記下網址與歸屬', async ($, on) => {
     const w = world(on, { store: { uses: USES_P, policy: rules(W), [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: PAGE })
     await $.session.start(START)
-    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const band = await mountBand($, 'desktop')
     expect(await band.find({ key: 'pol-go' })).toBeUndefined()
     expect(await band.find({ key: `ask-${W}` })).toBeUndefined()
     await band.unmount()
@@ -1172,7 +1192,7 @@ describe('歸屬（依資料夾決定新頁歸哪個帳號；不管對話）', (
     world(on, { env: AS_HOME, store: { uses: USES_P, policy: rules(W), [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: { ...PAGE, ...CLI_LOGIN } })
     await $.session.start(START)
     for (const surface of SURFACES) {
-      const band = await $.ui.mount({ ...BAND, surface })
+      const band = await mountBand($, surface)
       expect(await shows(band, /braid/)).toBe(false)
       expect(await band.find({ key: 'pol-go' })).toBeUndefined()
       expect(await band.find({ key: 'pol-stay' })).toBeUndefined()
@@ -1248,7 +1268,7 @@ describe('歸屬（依資料夾決定新頁歸哪個帳號；不管對話）', (
   test('第 4 格 個人專案 × 個人帳號：不提醒，新頁照常發布', async ($, on) => {
     const w = world(on, { env: AS_HOME, store: { uses: USES_P, policy: rules(P), [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: PAGE })
     await $.session.start(START)
-    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const band = await mountBand($, 'desktop')
     expect(await band.find({ key: 'pol-go' })).toBeUndefined()
     await band.unmount()
     expect(((await $.tool.call(publish())) as { deny?: string }).deny).toBeUndefined()
@@ -1258,7 +1278,7 @@ describe('歸屬（依資料夾決定新頁歸哪個帳號；不管對話）', (
   test('第 5 格 還沒設定：在對話裡問歸誰；選「歸公司並發布」就寫回表（git 的最上層）、當場發布', async ($, on) => {
     const w = world(on, { store: { uses: USES_P, [`account:${W}`]: WORK, [`account:${P}`]: HOME }, files: PAGE, ask: () => '歸「公司」並發布' })
     await $.session.start(START)
-    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const band = await mountBand($, 'desktop')
     expect(await band.find({ key: `ask-${W}` })).toBeUndefined() // 歸屬只為頁面服務：沒有頁在等就不打斷對話
     await band.unmount()
     const r = (await $.tool.call(publish())) as { deny?: string }
@@ -1299,7 +1319,7 @@ describe('歸屬（依資料夾決定新頁歸哪個帳號；不管對話）', (
     const r = (await $.tool.call(publish())) as { deny?: string }
     expect(r.deny).toMatch(/^沒有得到使用者的選擇（選擇框被關掉了，或這裡沒辦法問），先排著：/)
     expect(pages(w).pages).toMatchObject([{ owner: null, status: 'pending' }])
-    let band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    let band = await mountBand($, 'desktop')
     expect(await shows(band, /「server」有 1 張新頁在等：這個資料夾歸哪個帳號？/)).toBe(true)
     expect((await band.find({ key: `ask-${W}` }))?.props.label).toBe('歸「公司」並發布')
     expect((await band.find({ key: `ask-${P}` }))?.props.label).toBe('歸「個人」') // 別的帳號：只寫表，頁留著等它
@@ -1308,7 +1328,7 @@ describe('歸屬（依資料夾決定新頁歸哪個帳號；不管對話）', (
     await band.unmount()
     await $.session.start(START) // 新的對話：排著的頁從檔案讀回來，又會問
     await w.clock.advance(1)
-    band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    band = await mountBand($, 'desktop')
     await band.press({ key: `ask-${W}` })
     expect(w.store.get('policy')).toEqual({ rules: [{ folder: '/w/server', owner: W }] })
     expect(w.artifacts.length).toBe(1)
@@ -1333,18 +1353,18 @@ describe('歸屬（依資料夾決定新頁歸哪個帳號；不管對話）', (
     await $.session.start(START)
     await w.clock.advance(1) // 對話開始時在背景讀排著的頁
     for (const surface of SURFACES) {
-      const band = await $.ui.mount({ ...BAND, surface })
+      const band = await mountBand($, surface)
       expect(await shows(band, /有 2 張新頁排著等「公司」發布：「草稿」、「週報」。/)).toBe(true) // 新的在前；同組織的第二個帳號的也算
       expect((await band.find({ key: 'wait-publish' }))?.props.label).toBe('全部發布（2 張）')
       await band.unmount()
     }
-    let band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    let band = await mountBand($, 'desktop')
     await band.press({ key: 'wait-later' })
     expect(await band.find({ key: 'wait-publish' })).toBeUndefined()
     await band.unmount()
     await $.session.start(START)
     await w.clock.advance(1)
-    band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    band = await mountBand($, 'desktop')
     await band.press({ key: 'wait-publish' })
     expect(w.artifacts.map(a => a.file_path)).toEqual([`${PAGES}/w/pc.html`, `${PAGES}/w/pa.html`])
     expect(pages(w).pages.map(p => [p.id, p.status])).toEqual([['pa', 'published'], ['pc', 'published'], ['pb', 'pending']])
@@ -1362,7 +1382,7 @@ describe('歸屬（依資料夾決定新頁歸哪個帳號；不管對話）', (
     })
     await $.session.start(START)
     await w.clock.advance(1)
-    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const band = await mountBand($, 'desktop')
     expect(await band.find({ key: 'wait-publish' })).toBeUndefined()
     await band.unmount()
   })
@@ -1632,7 +1652,7 @@ describe('從其他帳號搬過來（一次性，不是用法）', () => {
     expect(await shows(ui, /從其他帳號搬過來/)).toBe(false)
     await ui.unmount()
     await w.clock.advance(1)
-    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const band = await mountBand($, 'desktop')
     expect(await band.find({ key: 'mig-nudge-open' })).toBeUndefined()
     await band.unmount()
   })
@@ -1641,7 +1661,7 @@ describe('從其他帳號搬過來（一次性，不是用法）', () => {
     const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL } })
     await $.session.start(START)
     await w.clock.advance(1) // 對話開始時在背景讀桌面資料
-    let band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    let band = await mountBand($, 'desktop')
     expect(await shows(band, /這台電腦的「個人」有 3 個對話還沒在這個帳號/)).toBe(true)
     await band.press({ key: 'mig-nudge-skip' })
     expect(await band.find({ key: 'mig-nudge-open' })).toBeUndefined()
@@ -1649,7 +1669,7 @@ describe('從其他帳號搬過來（一次性，不是用法）', () => {
     expect(w.store.get('migrateAsked')).toEqual([W])
     await $.session.start(START)
     await w.clock.advance(1)
-    band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    band = await mountBand($, 'desktop')
     expect(await band.find({ key: 'mig-nudge-open' })).toBeUndefined()
     await band.unmount()
     // 帳號頁一直都能搬
@@ -1663,7 +1683,7 @@ describe('從其他帳號搬過來（一次性，不是用法）', () => {
     const v = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL } })
     await $.session.start(START)
     await v.clock.advance(1)
-    const again = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const again = await mountBand($, 'desktop')
     await again.press({ key: 'mig-nudge-open' })
     expect(v.opened).toContain('braid')
     expect(v.store.get('migrateAsked')).toEqual([W])
@@ -1674,7 +1694,7 @@ describe('從其他帳號搬過來（一次性，不是用法）', () => {
     const w = world(on, { store: { uses: USES_ALL, sync: SYNC_ON, [`account:${P}`]: PERSONAL } })
     await $.session.start(START)
     await w.clock.advance(1)
-    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const band = await mountBand($, 'desktop')
     expect(await band.find({ key: 'mig-nudge-open' })).toBeUndefined()
     await band.unmount()
     await $.command.run(RUN('帳號'))
@@ -1688,7 +1708,7 @@ describe('從其他帳號搬過來（一次性，不是用法）', () => {
     const v = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL }, files: { [`${APP}/config.json`]: JSON.stringify({ lastKnownAccountUuid: P }) } })
     await $.session.start(START)
     await v.clock.advance(1)
-    const other = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const other = await mountBand($, 'desktop')
     expect(await other.find({ key: 'mig-nudge-open' })).toBeUndefined()
     await other.unmount()
     await $.command.run(RUN('帳號'))
@@ -1753,3 +1773,142 @@ describe('手機', () => {
   })
 })
 
+
+describe('和其他 mod 共用輸入框上方（baton README 的約定：疊、不佔）', () => {
+  // 鏈上站在 braid 裡層的另一個 mod（tier append，像裝在 braid 後面的 canopy、ue-agent、baton）：
+  // 也照約定疊，把拿到的 maxRows 寫進自己的字，按鈕按下去發一則 toast。register 會被單獨載入，不能用到這個檔裡的任何東西
+  const BELOW: Plugin = {
+    name: 'below',
+    tier: 'append',
+    register(on) {
+      on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+        const { Box, Text, Button } = $.ui.resolve(e)
+        const rest = await next({ ...e, props: { ...e.props, maxRows: Math.max(0, e.props.maxRows - 2) } })
+        return (
+          <Box flexDirection="column">
+            <Text>{`下層 maxRows=${e.props.maxRows}`}</Text>
+            <Button key="below-ok" label="下層的按鈕" onPress={() => $.ui.toast('下層按到了')} />
+            {rest}
+          </Box>
+        )
+      })
+    },
+  }
+  const PAGES = '/home/u/.claude/artifact-sources'
+  const below = async (ui: { drawn: () => Promise<unknown> }) => texts(await ui.drawn()).find(t => t.startsWith('下層 '))
+
+  // braid 的四種提示，一次只出一則。rows 是 bodyColumns 120 時 braid 佔的列數：一段字一列、按鈕一列
+  const CASES: { name: string; setup: ($: Engine, on: On) => Promise<ReturnType<typeof world>>; text: RegExp; dismiss: string; rows: number }[] = [
+    {
+      name: '用量提醒',
+      setup: async ($, on) => {
+        const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL } })
+        await $.session.start(START)
+        await $.session.measure(measure(92) as never)
+        return w
+      },
+      text: /公司 5 小時用量 92%，16:00 重置。/,
+      dismiss: 'band-snooze',
+      rows: 2,
+    },
+    {
+      name: '新頁的歸屬',
+      setup: async ($, on) => {
+        const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL }, files: { '/w/server/report.html': '<html><title>週報</title></html>' } })
+        await $.session.start(START)
+        await $.tool.call({ tool: 'Artifact', file_path: '/w/server/report.html' } as never) // 這裡沒辦法問：先排著，輸入框上方問歸誰
+        return w
+      },
+      text: /「server」有 1 張新頁在等：這個資料夾歸哪個帳號？/,
+      dismiss: 'ask-later',
+      rows: 2,
+    },
+    {
+      name: '排著的頁',
+      setup: async ($, on) => {
+        const index = { v: 1, pages: [{ id: 'pa', title: '週報', project: '/w', source: `${PAGES}/w/pa.html`, input: {}, owner: W, by: P, status: 'pending', url: null, at: 1 }] }
+        const w = world(on, {
+          // 搬過來問過了：不然按「之後再說」後，排在後面的那則會接著出現
+          store: { uses: USES_ALL, policy: { rules: [{ folder: '/w', owner: W }] }, [`account:${P}`]: PERSONAL, migrateAsked: [W] },
+          files: { [`${PAGES}/index.json`]: JSON.stringify(index), [`${PAGES}/w/pa.html`]: 'A' },
+        })
+        await $.session.start(START)
+        await w.clock.advance(1) // 對話開始時在背景讀排著的頁
+        return w
+      },
+      text: /有 1 張新頁排著等「公司」發布：「週報」。/,
+      dismiss: 'wait-later',
+      rows: 2,
+    },
+    {
+      name: '從其他帳號搬過來',
+      setup: async ($, on) => {
+        const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL } })
+        await $.session.start(START)
+        await w.clock.advance(1) // 對話開始時在背景讀桌面資料
+        return w
+      },
+      text: /這台電腦的「個人」有 3 個對話還沒在這個帳號/,
+      dismiss: 'mig-nudge-skip',
+      rows: 2,
+    },
+  ]
+
+  for (const c of CASES) {
+    test(`${c.name}：疊在裡層的 mod 上面，裡層照樣畫得出來、拿到的 maxRows 扣掉了 braid 佔的列數；兩邊的按鈕都按得到`, { plugins: [BELOW] }, async ($, on) => {
+      const w = await c.setup($, on)
+      for (const surface of SURFACES) {
+        const ui = await mountBand($, surface)
+        expect(await shows(ui, c.text)).toBe(true)
+        expect(await below(ui)).toBe(`下層 maxRows=${12 - c.rows}`)
+        const all = texts(await ui.drawn())
+        expect(all.findIndex(t => c.text.test(t))).toBeLessThan(all.findIndex(t => t.startsWith('下層 '))) // braid 在上面
+        await ui.unmount()
+      }
+      const ui = await mountBand($, 'desktop')
+      await ui.press({ key: 'below-ok', plugin: 'below' })
+      expect(w.toasts).toContain('下層按到了')
+      await ui.press({ key: c.dismiss })
+      expect(await shows(ui, c.text)).toBe(false)
+      expect(await below(ui)).toBe('下層 maxRows=12') // braid 讓開了，列數還給下層
+      await ui.unmount()
+    })
+  }
+
+  test('窄的時候字折行：braid 佔的列數跟著多，往下傳的跟著少', { plugins: [BELOW] }, async ($, on) => {
+    await CASES[0]?.setup($, on)
+    const ui = await mountBand($, 'terminal', { bodyColumns: 40 })
+    expect(await shows(ui, /可以在桌面 app 換成「個人」。/)).toBe(true)
+    expect(await below(ui)).toBe('下層 maxRows=9') // 一段字折成兩列＋按鈕一列
+    await ui.unmount()
+  })
+
+  test('列數很緊：braid 收成一列（不畫補充，只留第一顆和關掉的那顆），按鈕照樣按得到；連一列都沒有就整個讓路', { plugins: [BELOW] }, async ($, on) => {
+    const w = await CASES[0]?.setup($, on)
+    for (const surface of SURFACES) {
+      const ui = await mountBand($, surface, { bodyColumns: 40, maxRows: 2 })
+      expect(await shows(ui, /公司 5 小時用量 92%/)).toBe(true)
+      expect(await shows(ui, /可以在桌面 app 換成/)).toBe(false)
+      expect(await ui.find({ key: 'band-open' })).toBeDefined()
+      expect(await ui.find({ key: 'band-snooze' })).toBeDefined()
+      expect(await below(ui)).toBe('下層 maxRows=1')
+      await ui.unmount()
+    }
+    let ui = await mountBand($, 'desktop', { maxRows: 0 })
+    expect(await shows(ui, /braid/)).toBe(false)
+    expect(await below(ui)).toBe('下層 maxRows=0')
+    await ui.unmount()
+    ui = await mountBand($, 'desktop', { bodyColumns: 40, maxRows: 2 })
+    await ui.press({ key: 'band-open' })
+    expect(w?.opened).toContain('braid')
+    await ui.unmount()
+  })
+
+  test('問卷佔著帶子：braid 整個讓路', { plugins: [BELOW] }, async ($, on) => {
+    await CASES[0]?.setup($, on)
+    const ui = await mountBand($, 'desktop', { hasSurvey: true })
+    expect(await shows(ui, /braid/)).toBe(false)
+    expect(await below(ui)).toBe('下層 maxRows=12')
+    await ui.unmount()
+  })
+})
