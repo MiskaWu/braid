@@ -1,4 +1,5 @@
-// 開一個新的終端機視窗跑 braid 的帳號腳本：用另一個帳號接著同一段對話（resume）、新增帳號（add）。
+// 開一個新的終端機視窗跑 braid 的帳號腳本：新增帳號（add）。
+// 以前還有「用另一個帳號在新視窗接著做」（resume），2026-10-22 拿掉：使用者自己在桌面 app 換帳號，braid 只做同步。
 // 純函式：給平台、plugin 根目錄與工作，回要執行的動作。腳本本身在 tool/cli（bash）與 tool/windows（PowerShell）。
 //
 // 參數怎麼送進新視窗：
@@ -9,9 +10,7 @@
 import type { BraidPlatform } from '../types'
 import { TOOL_BACKUP_NAME } from './model'
 
-export type Job =
-  | { kind: 'resume'; account: string; credentialId: string; session: string; cwd: string; claude: string; label: string }
-  | { kind: 'add'; credentialId: string; result: string; claude: string }
+export type Job = { kind: 'add'; credentialId: string; result: string; claude: string }
 
 export type Step = { run: string[]; env?: Record<string, string> } | { write: { path: string; text: string } }
 
@@ -22,9 +21,7 @@ const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
 const psq = (s: string) => `'${s.replace(/'/g, "''")}'`
 
 function cliArgs(job: Job): { script: string; args: string[] } {
-  return job.kind === 'resume'
-    ? { script: 'resume.sh', args: [job.credentialId, job.session, job.cwd, job.claude, job.label, job.account] }
-    : { script: 'add-account.sh', args: [job.credentialId, job.result, job.claude] }
+  return { script: 'add-account.sh', args: [job.credentialId, job.result, job.claude] }
 }
 
 /** 一次性的小腳本：先刪掉自己，再把參數交給真正的腳本。 */
@@ -64,11 +61,8 @@ export function planTerminal(platform: BraidPlatform, root: string, job: Job, tm
     }
     case 'windows': {
       const dir = `${root.replace(/\//g, '\\')}\\tool\\windows`
-      const script = job.kind === 'resume' ? 'resume.ps1' : 'add-account.ps1'
-      const env: Record<string, string> =
-        job.kind === 'resume'
-          ? { BRAID_ACCOUNT: job.account, BRAID_CREDENTIAL: job.credentialId, BRAID_SESSION: job.session, BRAID_CWD: job.cwd, BRAID_CLAUDE: job.claude, BRAID_LABEL: job.label }
-          : { BRAID_ACCOUNT: job.credentialId, BRAID_RESULT: job.result, BRAID_CLAUDE: job.claude }
+      const script = 'add-account.ps1'
+      const env: Record<string, string> = { BRAID_ACCOUNT: job.credentialId, BRAID_RESULT: job.result, BRAID_CLAUDE: job.claude }
       const list = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', `"${dir}\\${script}"`].map(psq).join(',')
       return { steps: [{ run: ['powershell.exe', '-NoProfile', '-Command', `Start-Process -FilePath 'powershell.exe' -ArgumentList ${list}`], env }], manual: null }
     }
@@ -109,7 +103,7 @@ export function newCredentialId(random: () => number): string {
 }
 
 // ── 找 claude 執行檔 ─────────────────────────────────────────
-// 新增帳號、接著做、面板內更新都要跑 claude。開出去的視窗不一定有使用者平常的 PATH
+// 新增帳號、面板內更新都要跑 claude。開出去的視窗不一定有使用者平常的 PATH
 // （WSL 是 wsl.exe -e bash，不讀 .bashrc），所以一律交完整路徑。
 // 只裝桌面 app 的電腦 PATH 上沒有 claude，但桌面 app 自己帶了一份，可以單獨執行。
 

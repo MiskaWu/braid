@@ -1,12 +1,12 @@
 // braid：Claude 的多帳號工具。/braid 打開面板：帳號頁一定有，其餘分頁依使用者選的用法出現：
 //   帳號：這台電腦認得的帳號與各自的用量；新增帳號（一年期憑證，存在系統鑰匙圈）；
 //         從其他帳號搬過來（遷移是一次性的動作，不是用法；第一次遇到時輸入框上方也會問一次，/braid migrate 也能直接開）
-//   切換：用量快到門檻時，輸入框上方提示，一鍵用另一個帳號在新視窗接著同一段對話
+//   切換：用量快到門檻時，輸入框上方提醒你在桌面 app 換成哪個帳號（braid 不替你換、不開視窗接著做）
 //   同步：桌面 app 開著時，把現在登入的帳號的側欄對話自動複製到另一個帳號，換過去就看得到
 //   歸屬：依資料夾決定新頁（artifact）用哪個帳號發布
 // 自動同步只寫沒登入的那個帳號的側欄資料夾（app 開著也安全，見 mirror.ts）。其餘寫入桌面 app 資料的事
 // （遷移、同步環境、還原）一律交給 tool/ 的工具在獨立視窗做：它會等 app 結束、先備份。
-// mod 本身不碰登入憑證：新增帳號與接著做都是 tool/cli、tool/windows 的腳本在新視窗裡自己取用。
+// mod 本身不碰登入憑證：新增帳號是 tool/cli、tool/windows 的腳本在新視窗裡自己取用。
 // 引擎不准把 $ 經由資料結構傳遞，所以動作的分派寫成 switch，畫面的函式直接收 $。
 import { atom, read, update } from 'claude-code'
 import type { ElementTable, EngineInterface, Register } from 'claude-code'
@@ -35,7 +35,6 @@ import { isNewPage, pageQuestion, parseIndex, pendingTwin, projectSlug, serializ
 import {
   absorbTokenTwin,
   bandFor,
-  canHandoff,
   candidates,
   classifyOrg,
   DEFAULT_KEEP,
@@ -103,13 +102,11 @@ const addAtom = atom({ plugin: 'braid', key: 'add' } as const, null)
 const addFormAtom = atom({ plugin: 'braid', key: 'addForm' } as const, { label: '', email: '', org: '' })
 const editingAtom = atom({ plugin: 'braid', key: 'editing' } as const, null)
 const noticeAtom = atom({ plugin: 'braid', key: 'notice' } as const, null)
-const handoffAtom = atom({ plugin: 'braid', key: 'handoff' } as const, null)
 const snoozeAtom = atom({ plugin: 'braid', key: 'snooze' } as const, null)
 const mirrorAtom = atom({ plugin: 'braid', key: 'mirror' } as const, null)
 const keepAtom = atom({ plugin: 'braid', key: 'keep' } as const, DEFAULT_KEEP)
 const updateAtom = atom({ plugin: 'braid', key: 'update' } as const, null)
 const policyAtom = atom({ plugin: 'braid', key: 'policy' } as const, { rules: [] })
-const cliLoginAtom = atom({ plugin: 'braid', key: 'cliLogin' } as const, null)
 const confirmingAtom = atom({ plugin: 'braid', key: 'confirming' } as const, null)
 const pagesAtom = atom({ plugin: 'braid', key: 'pages' } as const, null)
 const draftAtom = atom({ plugin: 'braid', key: 'draft' } as const, null)
@@ -128,7 +125,7 @@ type Action = { name: ActionName; aliases: readonly string[]; usage: string; sum
 
 const ACTIONS: readonly Action[] = [
   { name: 'accounts', aliases: ['帳號'], usage: 'accounts', summary: '打開面板的帳號頁：這台電腦的帳號與用量、新增帳號' },
-  { name: 'switch', aliases: ['切換'], usage: 'switch', summary: '打開面板的切換頁：用量快用完時換哪個帳號接著做' },
+  { name: 'switch', aliases: ['切換'], usage: 'switch', summary: '打開面板的切換頁：用量快用完時提醒你換哪個帳號' },
   { name: 'sync', aliases: ['同步'], usage: 'sync', summary: '打開面板的同步頁：桌面 app 的兩個帳號自動同步對話，額度用完換過去就能接著做' },
   { name: 'policy', aliases: ['歸屬'], usage: 'policy', summary: '打開面板的歸屬頁：資料夾歸哪個帳號、待發布的頁' },
   {
@@ -172,7 +169,7 @@ async function tmpDir($: $, platform: BraidPlatform): Promise<string> {
 }
 
 /**
- * claude 執行檔的完整路徑；哪裡都找不到是 null。新增帳號、接著做、更新都從這裡拿，不各自猜。
+ * claude 執行檔的完整路徑；哪裡都找不到是 null。新增帳號、更新都從這裡拿，不各自猜。
  * 找的順序在 terminal.ts 的 claudeLookup：跑這個對話的那支、PATH、常見安裝位置、桌面 app 自帶的（新版先）。
  */
 async function findClaude($: $, platform: BraidPlatform): Promise<string | null> {
@@ -354,7 +351,7 @@ async function onUsage($: $, rateLimits: readonly RateLimit[]): Promise<void> {
   await refreshStatus($)
   // 快用完了：馬上再同步一次，換過去時連剛剛的對話都在（不在這個事件裡等，讀寫桌面 app 的資料夾要一點時間）
   const now = await $.clock.now()
-  if (bandFor(await read($, accountsAtom), id, usage, await read($, switchAtom), await read($, cliLoginAtom), now, null)) $.clock.after(1, () => runMirror($, 'urgent'))
+  if (bandFor(await read($, accountsAtom), id, usage, await read($, switchAtom), now, null)) $.clock.after(1, () => runMirror($, 'urgent'))
 }
 
 /** 狀態列：開了用量切換才顯示目前帳號與用量（5 小時、7 天）。 */
@@ -694,6 +691,11 @@ function drawUpdate($: $, ui: UI, u: BraidUpdate | null) {
           {u.step !== 'running' && <Button key="upd-go" label="更新並重新載入" variant="primary" onPress={() => runUpdate($)} />}
         </Box>
       )}
+      {has && u.step !== 'running' && (
+        <Text size="footnote" dimColor>
+          也可以自己更新：在 /plugin 更新 braid，再執行 /reload-plugins。
+        </Text>
+      )}
       {u.message && (
         <Text size="footnote" color={u.step === 'failed' ? 'warning' : undefined} dimColor={u.step !== 'failed'}>
           {u.message}
@@ -849,7 +851,7 @@ async function finishAdd($: $): Promise<void> {
   }
   await putAccount($, saved)
   await update($, addAtom, () => null)
-  await say($, same ? `已更新「${saved.label}」的登入憑證。` : `已新增「${saved.label}」。到「切換」設定什麼時候換過去。`)
+  await say($, same ? `已更新「${saved.label}」的登入憑證。` : `已新增「${saved.label}」。要換過去就在桌面 app 登入它。`)
 }
 
 async function removeSecret($: $, credentialId: string): Promise<void> {
@@ -880,49 +882,6 @@ async function forget($: $, id: string): Promise<void> {
   if (synced) await putSync($, s => ({ ...s, on: false, pair: [] }))
   await update($, editingAtom, () => null)
   await say($, `已移除「${account.label}」${account.credentialId ? '，登入憑證也刪掉了' : ''}${synced ? '；和它的自動同步也關掉了' : ''}。`)
-}
-
-// ── 接著做：用另一個帳號在新視窗接著同一段對話 ──────────────────────
-
-async function handoff($: $, id: string): Promise<void> {
-  const account = (await read($, accountsAtom))[id]
-  const cliLogin = await read($, cliLoginAtom)
-  if (!account || !canHandoff(account, cliLogin)) return
-  // braid 有憑證就帶憑證；CLI 自己 /login 的帳號不帶（憑證 id 寫「-」，腳本直接開 claude）
-  const credentialId = account.credential && account.credentialId ? account.credentialId : '-'
-  const platform = (await read($, platformAtom)) ?? 'other'
-  const claude = await findClaude($, platform)
-  if (!claude) {
-    const missing = noClaudeText(platform, '沒辦法開新視窗接著做')
-    await $.ui.copy({ text: missing.command })
-    $.ui.toast(`braid：${missing.text}${missing.command}（已複製）`)
-    return
-  }
-  const plan = planTerminal(
-    platform,
-    $.plugin.root,
-    {
-      kind: 'resume',
-      account: account.id,
-      credentialId,
-      session: await $.session.id(),
-      cwd: await $.session.cwd(),
-      claude,
-      label: account.label,
-    },
-    await tmpDir($, platform),
-  )
-  const ran = await runPlan($, plan)
-  if (ran !== 'ok' && ran !== 'manual') {
-    $.ui.toast(`braid：開不了新視窗（${ran.error}）`)
-    return
-  }
-  if (ran === 'manual' && 'steps' in plan && plan.manual) {
-    await $.ui.copy({ text: plan.manual })
-    $.ui.toast(`braid：這台電腦開不了新視窗。請在另一個終端機執行（已複製）：${plan.manual}`)
-  }
-  await update($, handoffAtom, () => ({ account: id, label: account.label, confirmed: false, noticed: false }))
-  await update($, confirmingAtom, () => null)
 }
 
 // ── 歸屬（依資料夾決定帳號）──────────────────────────────────
@@ -1328,8 +1287,8 @@ function chip(ui: UI, look: { label: string; color: string }) {
 }
 
 const WHY_TEXT: Record<Why, string> = {
-  ok: '可以接手',
-  'no-credential': 'braid 沒有它的登入憑證，只能在桌面 app 手動換',
+  ok: '可以換過去',
+  elsewhere: '還沒在桌面 app 登入過',
   busy: '也快用完了',
 }
 
@@ -1378,7 +1337,7 @@ async function drawOnboarding($: $, ui: UI) {
   const draft = await read($, draftUsesAtom)
   const uses = await read($, usesAtom)
   const options: { id: keyof BraidUses; title: string; desc: string }[] = [
-    { id: 'switch', title: '用量用完，換帳號接著做', desc: '快到上限時提醒，一鍵用另一個帳號接著同一段對話。' },
+    { id: 'switch', title: '用量快用完，提醒我換帳號', desc: '快到上限時提醒，告訴你在桌面 app 換成哪個帳號；開了同步，對話會跟過去。' },
     { id: 'sync', title: '兩個帳號一起用', desc: '桌面 app 的兩個帳號自動同步對話，換過去就能接著做。' },
     { id: 'policy', title: '新頁歸對帳號', desc: '依資料夾決定新頁（artifact）用哪個帳號發布；對話照常，不受影響。' },
   ]
@@ -1435,12 +1394,11 @@ async function drawAccounts($: $, ui: UI, width: number) {
   const tz = await read($, tzAtom)
   const now = await $.clock.now()
   const barWidth = Math.max(8, Math.min(24, width - 34))
-  // 沒有憑證、但和這個對話的帳號一起自動同步：在桌面 app 換過去就能接著做
+  // 和這個對話的帳號一起自動同步：在桌面 app 換過去就能接著做
   const uses = await read($, usesAtom)
   const sy = await read($, syncAtom)
   const syncedWith = (id: string) => !!uses?.sync && sy.on && !!current && sy.pair.includes(current) && sy.pair.includes(id)
   const sw = await read($, switchAtom)
-  const cliLogin = await read($, cliLoginAtom)
   const { Svg } = ui
 
   const block = (a: BraidAccount, isCurrent: boolean) => {
@@ -1466,22 +1424,20 @@ async function drawAccounts($: $, ui: UI, width: number) {
         </Box>
       ) : (
         <Box key={`acts-${a.id}`} flexDirection="row" gap={1} flexWrap="wrap">
-          {!isCurrent && canHandoff(a, cliLogin) && <Button key={`go-${a.id}`} label="用它接著這段對話" variant="primary" onPress={() => handoff($, a.id)} />}
           <Button key={`edit-${a.id}`} label="改名稱與顏色" dimColor onPress={() => update($, editingAtom, () => `edit:${a.id}`)} />
           {!isCurrent && <Button key={`forget-${a.id}`} label="移除" dimColor onPress={() => update($, editingAtom, () => `forget:${a.id}`)} />}
         </Box>
       )
     const five = effectivePct(usage?.fiveHour ?? null, now)
     const seven = effectivePct(usage?.sevenDay ?? null, now)
+    // 換帳號一律是使用者自己在桌面 app 換：同步中的說對話會跟過去，沒在 app 登入過的說要先登入
     const note = isCurrent
       ? null
-      : a.credential
-        ? { tone: 'good' as const, text: `可以一鍵接手（憑證存在${CREDENTIAL_TEXT[a.credential]}）` }
-        : a.id === cliLogin
-          ? { tone: 'good' as const, text: '可以一鍵接手（Claude Code 自己登入的帳號）' }
-        : syncedWith(a.id)
-          ? { tone: 'sync' as const, text: '在桌面 app 換成它就能接著做，對話會自動同步' }
-          : { tone: 'none' as const, text: 'braid 沒有它的登入憑證，只能在桌面 app 手動換' }
+      : syncedWith(a.id)
+        ? { tone: 'sync' as const, text: '在桌面 app 換成它就能接著做，對話會自動同步' }
+        : a.source === 'desktop'
+          ? { tone: 'good' as const, text: '在桌面 app 換成它就能用' }
+          : { tone: 'none' as const, text: '還沒在桌面 app 登入過：先在桌面 app 登入它，才能換過去' }
     if (Svg) {
       const windows: Window[] = []
       const win = (label: string, w: BraidUsage['fiveHour']) => {
@@ -1548,7 +1504,7 @@ async function drawAccounts($: $, ui: UI, width: number) {
   const others = orderedIds(accounts, []).filter(id => id !== current).map(id => accounts[id] as BraidAccount)
   return (
     <Box flexDirection="column" gap={1}>
-      {pageHead(ui, 'acc-head', '帳號', '這台電腦認得的帳號與各自的用量；有憑證的帳號可以一鍵接著這段對話。')}
+      {pageHead(ui, 'acc-head', '帳號', '這台電腦認得的帳號與各自的用量。換帳號在桌面 app 自己換；開了同步，對話會跟過去。')}
       {sectionHead(ui, 'acc-cur-head', '目前使用')}
       {cur ? block(cur, true) : <Text dimColor>認不出這個對話用的是哪個帳號。</Text>}
       {sectionHead(ui, 'acc-other-head', '其他帳號')}
@@ -1612,7 +1568,7 @@ async function drawAdd($: $, ui: UI) {
     return (
       <Box key="add-form" flexDirection="column" borderStyle="round" paddingX={1}>
         <Text color="warning">{`這組憑證屬於目前帳號「${cur?.label ?? ''}」的組織${orgName ? `（${orgName}）` : ''}。`}</Text>
-        <Text>你在這個組織只有一個帳號的話，它就是目前這個帳號，用它接著做不會多出用量。多半是瀏覽器剛好登著目前的帳號：到瀏覽器登出（或開無痕視窗）再新增一次。</Text>
+        <Text>你在這個組織只有一個帳號的話，它就是目前這個帳號，換成它不會多出用量。多半是瀏覽器剛好登著目前的帳號：到瀏覽器登出（或開無痕視窗）再新增一次。</Text>
         <Box flexDirection="row" gap={1} flexWrap="wrap">
           <Button key="add-discard" label="不要了，刪掉這組憑證" variant="primary" onPress={() => discardAdd($)} />
           <Button key="add-save" label="確定是同組織的另一個帳號，加入" dimColor onPress={() => finishAdd($)} />
@@ -1719,13 +1675,13 @@ async function drawSwitch($: $, ui: UI) {
   const platform = await read($, platformAtom)
   const now = await $.clock.now()
   const order = orderedIds(accounts, sw.order)
-  const why = new Map(current ? candidates(accounts, current, sw, await read($, cliLoginAtom), now).map(c => [c.account.id, c.why]) : [])
+  const why = new Map(current ? candidates(accounts, current, sw, now).map(c => [c.account.id, c.why]) : [])
   const { Svg } = ui
   const cur = current ? accounts[current] : undefined
   const liveNow = (await read($, liveAtom)) ?? cur?.usage ?? null
   return (
     <Box flexDirection="column" gap={1}>
-      {pageHead(ui, 'sw-head', '切換', '快用完時提醒你，一鍵換帳號接著做。')}
+      {pageHead(ui, 'sw-head', '切換', '快用完時提醒你，在桌面 app 換成下一個帳號。')}
       {Svg && cur ? (
         <Box key="sw-hero" borderStyle="round" paddingX={1} paddingY={1}>
           {(() => {
@@ -1739,7 +1695,7 @@ async function drawSwitch($: $, ui: UI) {
               account: { label: cur.label, color: cur.color },
               windows,
               thresholds: sw.on ? [sw.fiveHour, sw.sevenDay] : [null, null],
-              next: nextUp ? { label: nextUp.label, color: nextUp.color, note: '可以接手' } : null,
+              next: nextUp ? { label: nextUp.label, color: nextUp.color, note: '可以換過去' } : null,
             })
             return <Svg source={hero.source} alt={hero.alt} />
           })()}
@@ -1770,8 +1726,8 @@ async function drawSwitch($: $, ui: UI) {
         value={sw.sevenDay === null ? 'off' : String(sw.sevenDay)}
         onSelect={v => putSwitch($, s => ({ ...s, sevenDay: v === 'off' ? null : Number(v) }))}
       />
-      {sectionHead(ui, 'sw-order-head', '接手順序', '由上往下找第一個能接手的。')}
-      {order.length < 2 && <Text dimColor>要兩個以上的帳號才換得過去，到「帳號」頁新增。</Text>}
+      {sectionHead(ui, 'sw-order-head', '換帳號的順序', '提醒時建議由上往下第一個能換的。')}
+      {order.length < 2 && <Text dimColor>要兩個以上的帳號才換得過去：在桌面 app 登入另一個帳號，braid 就會認得它。</Text>}
       {order.map((id, i) => {
         const a = accounts[id] as BraidAccount
         const note = id === current ? '這個對話在用' : WHY_TEXT[why.get(id) ?? 'ok']
@@ -1807,7 +1763,6 @@ async function drawSwitch($: $, ui: UI) {
           </Box>
         )
       })}
-      {platform !== 'other' && fine(ui, '在桌面 app 按「接著做」，會開一個終端機視窗用另一個帳號接著。')}
     </Box>
   )
 }
@@ -2278,12 +2233,11 @@ export const register: Register = on => {
     const tz = await localTz($, platform)
     await update($, tzAtom, () => tz)
     await loadStore($)
-    // CLI 自己 /login 的帳號（~/.claude.json）：braid 沒有它的憑證，也能用它在新視窗接著做
+    // CLI 自己 /login 的帳號（~/.claude.json）：加進帳號清單（換帳號由使用者自己在桌面 app 或終端機做）
     const login = await cliLoginSeen($)
     // 已經認得的帳號不動（同一個帳號也是桌面 app 的帳號時，來源要留「桌面」）；沒見過的才加進清單
     const knownAccounts = await read($, accountsAtom)
     if (login && !knownAccounts[login.id]) await putAccount($, upsertSeen(knownAccounts, login, await $.clock.now()))
-    await update($, cliLoginAtom, () => login?.id ?? null)
     const uses = await read($, usesAtom)
     // 排著的頁也重讀：這個資料夾有頁在等歸屬時，輸入框上方才問得到
     if (uses?.policy) $.clock.after(1, () => refreshPages($))
@@ -2349,21 +2303,13 @@ export const register: Register = on => {
     }
   })
 
-  // 交給另一個帳號接著做之後，在這裡再送訊息要先確認一次：兩邊各做各的，最後會分岔
-  on('prompt.submit', async ($, e, next) => {
-    const handed = await read($, handoffAtom)
-    if (!handed || handed.confirmed || e.text.trimStart().startsWith('/')) return next(e)
-    await update($, handoffAtom, v => (v ? { ...v, confirmed: true } : v))
-    return { drop: `這段對話已經交給「${handed.label}」在新視窗接著做（那邊是複製出來的新對話）。確定要在這裡繼續，就再送一次。` }
-  })
-
   // ── 發布新頁前比對歸屬（開了「歸屬」才管）。判斷出錯時寧可不發布：頁面歸錯帳號事後不能轉移 ──
   on('tool.call', { tool: 'Artifact' }, async ($, e, next) => {
     if (!(await read($, usesAtom))?.policy) return next(e)
     return (await guardArtifact($, e as unknown as Record<string, unknown>, next as never)) as never
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'braid 判斷這張頁該歸哪個帳號時出錯，先不發布。請打開 /braid →「歸屬」看看，或在「用法」關掉「歸屬」。' }))
 
-  // ── 輸入框上方：交給另一個帳號之後的提醒、用量快到門檻時提示換帳號 ──
+  // ── 輸入框上方：用量快到門檻時提醒換帳號、新頁的歸屬、排著的頁、從其他帳號搬過來 ──
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
@@ -2372,43 +2318,26 @@ export const register: Register = on => {
     const current = await read($, currentAtom)
 
     // 變數不能叫 h：JSX 編譯成全域的 h(...)，同名的區域變數會把它蓋掉
-    const handed = await read($, handoffAtom)
-    if (handed && !handed.noticed) {
-      return (
-        <Box flexDirection="row" gap={1} alignItems="center">
-          <Text color="success" bold>
-            braid
-          </Text>
-          <Text wrap="truncate">{`已在新視窗用「${handed.label}」接著做（複製出來的新對話）。在這裡再送訊息會先問你。`}</Text>
-          <Button key="handoff-ok" label="知道了" role="dismiss" onPress={() => update($, handoffAtom, v => (v ? { ...v, noticed: true } : v))} />
-        </Box>
-      )
-    }
-
     const now = await $.clock.now()
     const cur = current ? accounts[current] : undefined
-    const cliLogin = await read($, cliLoginAtom)
     const sy = await read($, syncAtom)
     const m = await read($, mirrorAtom)
     // 桌面 app 的這個帳號有在自動同步：對話已經複製到另一個帳號，在 app 換過去就能接著做
     const syncedTo = uses?.sync && sy.on && m && m.active === current && m.to && !m.problem ? m.to : null
 
-    // 用量快用完：換帳號接著做。不看歸屬——歸屬只管新頁歸誰，對話往哪個帳號走由切換與同步決定
-    const band = uses?.switch ? bandFor(accounts, current, await read($, liveAtom), await read($, switchAtom), cliLogin, now, await read($, snoozeAtom)) : null
+    // 用量快用完：提醒在桌面 app 換成哪個帳號（braid 不替你換）。不看歸屬：歸屬只管新頁歸誰
+    const band = uses?.switch ? bandFor(accounts, current, await read($, liveAtom), await read($, switchAtom), now, await read($, snoozeAtom)) : null
     if (band && cur) {
       const reset = fmtReset(band.resetsAt, now, await read($, tzAtom))
       const head = band.kind === 'out' ? `${cur.label} ${WINDOW_NAMES[band.window]}用量用完了` : `${cur.label} ${WINDOW_NAMES[band.window]}用量 ${band.pct}%`
-      const best = band.best
       const synced = syncedTo ? mirrorName(accounts, syncedTo, m?.toOrg ?? null) : null
-      const detail = best
-        ? synced
-          ? `「${best.label}」可以在新視窗接著這段對話；或在桌面 app 換成「${synced}」，對話都已同步過去。`
-          : `「${best.label}」可以接手：在新視窗接著這段對話。`
-        : synced
-          ? `在桌面 app 換成「${synced}」就能接著做，對話都已同步過去。`
-          : band.manual
-            ? `可以在桌面 app 換成「${band.manual.label}」；在 braid 開啟同步，對話就會自動跟過去。`
-            : '沒有其他帳號可以接手；在 braid 面板可以新增。'
+      const detail = synced
+        ? `在桌面 app 換成「${synced}」就能接著做，對話都已同步過去。`
+        : band.next
+          ? `可以在桌面 app 換成「${band.next.label}」${uses?.sync ? '' : '；在 braid 開啟同步，對話就會自動跟過去'}。`
+          : band.elsewhere
+            ? `「${band.elsewhere.label}」還沒在桌面 app 登入過：先在桌面 app 登入它，就能換過去。`
+            : '沒有其他帳號可以換：在桌面 app 登入另一個帳號，braid 就會認得它。'
       return (
         <Box flexDirection="column">
           <Text wrap="wrap">
@@ -2419,11 +2348,7 @@ export const register: Register = on => {
             {reset ? `，${reset} 重置` : ''}。<Text dimColor>{detail}</Text>
           </Text>
           <Box flexDirection="row" gap={1}>
-            {best ? (
-              <Button key="band-handoff" label={`用「${best.label}」接著做`} variant="primary" onPress={() => handoff($, best.id)} />
-            ) : (
-              <Button key="band-open" label="打開 braid" onPress={() => openPane($, 'switch')} />
-            )}
+            {!synced && <Button key="band-open" label="打開 braid" dimColor onPress={() => openPane($, uses?.sync ? 'sync' : 'switch')} />}
             <Button key="band-snooze" label={reset ? `${reset} 前別再提醒` : '先別提醒'} role="dismiss" onPress={() => snooze($, band.snoozeKey)} />
           </Box>
         </Box>

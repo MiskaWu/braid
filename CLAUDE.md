@@ -6,7 +6,7 @@ Claude 的多帳號工具。名稱取「辮子」：每個帳號是一股線，�
 | 用法 | 方向 | 時機 | 範圍 | 狀態 |
 |---|---|---|---|---|
 | 遷移（migrate） | 單向 | 手動一次 | 勾選的資料夾 | 0.8.0 起是一次性的動作、不是「用法」：帳號頁「從其他帳號搬過來」、第一次遇到時輸入框上方問一次、`/braid migrate` |
-| 用量切換（switch） | 跟著使用者走 | 到用量門檻時 | 全部資料夾（不看歸屬） | 0.2.0：提示＋一鍵用另一個帳號在新視窗接著做 |
+| 用量切換（switch） | 跟著使用者走 | 到用量門檻時 | 全部資料夾（不看歸屬） | 0.10.0 起只提醒：告訴使用者在桌面 app 換成哪個帳號，braid 不替他換、不開視窗接著做 |
 | 同步（sync） | app 登入的帳號 → 同一對的另一個（換帳號後方向跟著反過來） | 自動：約每分鐘、到用量門檻時馬上一次 | 全部或挑的資料夾 | 0.3.0：側欄紀錄由 mod 自己寫（`hooks/mirror.ts`）；環境要結束 app，交給遷移工具 |
 
 三種用法共用一份帳號清單（`$.store` 的 `account:<id>`）與同一個遷移工具；寫入桌面 app 資料的規則只在 `mod/tool/spec.json`。
@@ -28,7 +28,7 @@ mod/                              plugin 本體（從 marketplace 安裝時只�
   hooks/register.tsx              指令、面板各頁、輸入框上方的提示、交接後的防呆；所有 $ 呼叫都在這個檔
   hooks/model.ts                  純邏輯：帳號、用量、門檻、換帳號規則、同步範圍（不碰 $）
   hooks/launch.ts                 遷移工具的參數與開視窗的方式（純函式）
-  hooks/terminal.ts               帳號腳本（接著做、新增帳號）開新視窗的方式、去哪裡找 claude（純函式）
+  hooks/terminal.ts               帳號腳本（新增帳號）開新視窗的方式、去哪裡找 claude（純函式）
   hooks/desktop.ts                讀桌面 app 的側欄資料與備份（收一組讀檔函式，不收 $）
   hooks/mirror.ts                 自動同步的核心：把側欄紀錄複製到沒登入的帳號（收一組讀寫檔函式，不收 $）
   hooks/visual.ts                 桌面版面板的圖（頁首、帳號卡、用量條、切換總覽與名次列、同步卡、歸屬總覽、用法插圖）：給資料回 SVG 字串的純函式
@@ -38,9 +38,9 @@ mod/                              plugin 本體（從 marketplace 安裝時只�
   tests/                          claude plugin test：model.test.ts（純邏輯）、braid.test.tsx（終端機與桌面兩種畫面）
   tool/spec.json                  兩個平台共用的遷移規則
   tool/windows/                   migrate.ps1（主流程）、LevelDbLite.cs、migrate.cmd（雙擊）；
-                                  secret.ps1（認證管理員）、resume.ps1（接著做）、add-account.ps1（新增帳號）
+                                  secret.ps1（認證管理員）、add-account.ps1（新增帳號）
   tool/macos/                     core.js（與平台無關的主流程）、migrate.js（JXA 介面層）、migrate.command（雙擊）
-  tool/cli/                       macOS、Linux、WSL 的帳號腳本：secret.sh、resume.sh、add-account.sh、open-linux.sh、open-wsl.sh
+  tool/cli/                       macOS、Linux、WSL 的帳號腳本：secret.sh、add-account.sh、org.sh、open-linux.sh、open-wsl.sh
   tool/launch-from-wsl.sh         WSL 裡的 session 開 Windows 的遷移視窗用
 tests/                            工具的測試（Node＋classic-level 造資料與驗證）
 ```
@@ -114,11 +114,14 @@ tests/                            工具的測試（Node＋classic-level 造資�
   範圍只由 `BraidSync` 的 `all`／`folders` 決定：自動同步用 `mirrorTarget`、帶環境的按鈕用 `syncRequest`（`-Projects all -Presets all` 或 `-Presets folders`）。
 - **規則只寫在 `spec.json`**：要拿掉哪些欄位、認得哪些版本，兩個平台的工具與 mod 的自動同步都讀它。
   自動同步更新已有的紀錄時，`dropKeys`、`nullKeys`、`replaceFromTarget` 留目標帳號自己的值（它們綁帳號）。
-- **登入憑證不經過 mod 與模型**：新增帳號、接著做都在新開的視窗裡由 `tool/cli`、`tool/windows` 的腳本取用；
+- **登入憑證不經過 mod 與模型**：新增帳號在新開的視窗裡由 `tool/cli`、`tool/windows` 的腳本取用；
   結果檔只寫成功與否和存在哪裡。mod 只知道憑證 id（`tok-xxxxxxxx`）。
-- **接著做用 `--fork-session`**：複製一份新的對話，原本的不動，兩個行程不會寫同一份紀錄。
-  憑證在 macOS／Linux／WSL 經由 `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` 交出去（Claude Code 讀完會刪變數，
-  管道也讀空，對話裡執行的指令拿不到）；Windows 沒有這個機制，只能放那個視窗的 `CLAUDE_CODE_OAUTH_TOKEN`。
+- **braid 不替使用者換帳號、不開視窗「接著做」**（2026-10-22 拍板，0.10.0）：換帳號一律是使用者自己在桌面 app 換，
+  braid 只做同步（換過去對話已經在）與提醒（用量快用完時說換成哪個帳號）。以前的「接著做」用 braid 存的一年期憑證
+  開終端機視窗跑 `claude --resume --fork-session`，要找到本機的 claude：各人裝在哪不一定，同事在 VS Code 插件裡按下去，
+  開出來的視窗出錯就關掉。所以整條拿掉（`handoff`、`resume.sh`／`resume.ps1`、交接後的防呆），不要加回來。
+  換帳號的候選（`candidates`）改看「在桌面 app 登入過沒有」（`source === 'desktop'`），不看有沒有憑證：
+  braid 新增的、只在終端機 `/login` 的帳號標成 `elsewhere`，提示說先在桌面 app 登入它。新增帳號照舊保留。
 - **新增帳號用組織判斷是誰**：一年期憑證（setup-token）打 `/api/oauth/profile` 會被拒（403 permission_error，
   2026-10-17 用真的憑證驗過；假憑證是 401，只用假的測不出來）。改由 `org.sh`／`org.ps1` 用憑證打公開的
   `GET /v1/models?limit=1`（不算用量、不用指定模型），讀回應標頭 `anthropic-organization-id`；只查得到組織。
@@ -168,8 +171,8 @@ tests/                            工具的測試（Node＋classic-level 造資�
   新頁攔截掛 Artifact 的 `tool.call`，判斷出錯時寧可不發布（`.catch` 回 deny）：頁面歸錯帳號事後不能轉移。
   braid 自己替使用者發布排隊的頁時用 `publishingNow` 放行。待發布清單用檔案（`~/.claude/artifact-sources/index.json`），
   因為發布用終端機是另一個 `CLAUDE_CONFIG_DIR`，讀不到這邊的 `$.store`。官方只保證 `/login` 的對話能發布，
-  braid 用一年期憑證開的視窗（`BRAID_ACCOUNT`）不給「發布」。CLI 自己 `/login` 的帳號（`~/.claude.json`）
-  沒有 braid 的憑證也能「接著做」：腳本收到憑證 id「-」就不帶憑證直接開 claude。
+  braid 用一年期憑證開的視窗（`BRAID_ACCOUNT`，0.10.0 起不再開，留著給舊視窗）不給「發布」。
+  CLI 自己 `/login` 的帳號（`~/.claude.json`）照樣加進帳號清單。
 - **遷移是一次性的動作，不是用法**（2026-10-20 拍板，0.8.0）：它本質是「換帳號那一刻做一次」，做完分頁就閒置，
   所以「用法」裡拿掉了（舊版存的 `uses.migrate` 不再讀）。入口改成三個：帳號頁最後的「從其他帳號搬過來」（一直都在）、
   輸入框上方問一次、`/braid migrate`。「還有幾個沒搬過來」由 `model.ts` 的 `migrateSources` 算：目標（`BraidDesktop.active`，
@@ -192,7 +195,7 @@ tests/                            工具的測試（Node＋classic-level 造資�
   設計稿先在暫存資料夾用產生器輸出拼 462px 寬的假面板、Playwright 深淺色截圖看過再接進來。
 - **用量顯示**：狀態列（`$.ui.status`）只能放文字，寫 5 小時與 7 天；桌面版另外在輸入框下方那行（`PromptHint`）
   先拿 `next(e)` 畫好的 app 提示，再在旁邊接 `usageStrip` 的 SVG 量表，不蓋掉 app 自己的提示。
-- **找 claude 只有一個地方**：新增帳號、接著做、面板內更新都經 `register.tsx` 的 `findClaude`（找的順序在 `terminal.ts`
+- **找 claude 只有一個地方**：新增帳號、面板內更新都經 `register.tsx` 的 `findClaude`（找的順序在 `terminal.ts`
   的 `claudeLookup`：跑這個對話的那支、PATH、常見安裝位置、桌面 app 自帶的、新版先），交給視窗的一律是完整路徑。
   只靠 `CLAUDE_CODE_EXECPATH` 不夠：2026-10-19 有人在只裝桌面 app 的 Windows 上，面板拿不到這個變數、交了裸的 `claude`，
   按了 Enter 才看到「無法辨識 'claude' 詞彙」。WSL 開的視窗是 `wsl.exe -e bash`、不讀 `.bashrc`，裸名稱也常找不到。
@@ -200,7 +203,8 @@ tests/                            工具的測試（Node＋classic-level 造資�
   WSL 在 `~/.claude/remote/ccd-cli/<版本>`）。npm 安裝時 `CLAUDE_CODE_EXECPATH` 是 node，不拿來用。
   都找不到就不開視窗，面板給官方安裝指令（`claudeInstall`）；腳本開頭也再確認一次，不見了就寫結果檔 `no-claude`。
 - **更新**：官方是 `/plugin` 裡打開 marketplace 的自動更新（第三方預設關，`marketplace.json` 不能替使用者開）。
-  braid 另外自己查 GitHub 上 `mod/.claude-plugin/plugin.json` 的版本，按鈕照官方兩步更新後用
+  braid 另外自己查 GitHub 上 `mod/.claude-plugin/plugin.json` 的版本，有新版時面板也說「可以在 /plugin 更新、再 /reload-plugins」；
+  按鈕照官方兩步更新後用
   `$.command.run({ command: 'reload-plugins' })` 重新載入。改 repo 位置或 marketplace 名稱要改 `register.tsx` 的 `LATEST_URL`、`MARKETPLACE`。
 - **JSX 檔裡不能有叫 `h` 的變數**：JSX 編譯成全域的 `h(...)`，同名的區域變數會把它蓋掉，hook 直接被跳過。
 - **測試套件裡沒有東西墊底**：`session.start`、`session.measure`、`prompt.submit`、`command.register`、

@@ -115,8 +115,6 @@ export type BraidAdd =
 
 export type BraidAddForm = { label: string; email: string; org: string }
 
-/** 這個對話已經交給另一個帳號接著做；confirmed＝使用者已確認仍要在這裡繼續。 */
-export type BraidHandoff = { account: string; label: string; confirmed: boolean; noticed: boolean }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -135,14 +133,11 @@ declare module 'claude-code' {
       addForm: BraidAddForm
       editing: string | null
       notice: string | null
-      handoff: BraidHandoff | null
       snooze: string | null
       mirror: BraidMirror | null
       keep: BraidKeep
       update: BraidUpdate | null
       policy: BraidPolicy
-      /** CLI 自己 /login 的帳號（~/.claude.json）：braid 沒有它的憑證也能用它接著做 */
-      cliLogin: string | null
       /** 要按第二次才算的按鈕（例如待發布的頁「就用這個帳號發布」） */
       confirming: string | null
       /** 頁面清單（~/.claude/artifact-sources/index.json）讀進來的樣子 */

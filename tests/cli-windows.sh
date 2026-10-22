@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # 測 mod/tool/windows 的帳號腳本：在 WSL 裡叫 Windows 的 powershell.exe 跑。
 #   secret.ps1：真的寫進「認證管理員」再讀回、刪掉（用測試專用的名稱，跑完一定刪）
-#   resume.ps1：用假的 claude.cmd 頂替，驗參數、工作資料夾（中文）、憑證只在那個視窗的環境變數
 #   add-account.ps1：用假的 claude.cmd 頂替 setup-token，從標準輸入貼憑證；找不到 claude 時先講，不收憑證
 set -uo pipefail
 cd "$(dirname "$0")"
@@ -11,7 +10,7 @@ TOKEN='sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghij-0123456789'
 ID="braid-test-$$"
 WINTEMP=$(wslpath -u "$(cd /mnt/c && cmd.exe /c 'echo %TEMP%' | tr -d '\r')")
 W="$WINTEMP/braid-cli-test-$$"
-mkdir -p "$W/中文 資料夾"
+mkdir -p "$W"
 SECRET=$(wslpath -w ../mod/tool/windows/secret.ps1)
 # 每次都限時：腳本卡在等輸入時不要整個測試掛住
 ps() { (cd /mnt/c && timeout 60 powershell.exe -NoProfile -ExecutionPolicy Bypass "$@") | tr -d '\r'; }
@@ -25,42 +24,6 @@ out=$(printf '%s\n' "$TOKEN" | ps -File "$SECRET" set "$ID") && [ "$out" = credm
 [ "$(ps -File "$SECRET" get "$ID")" = "$TOKEN" ] && ok "讀回同一個憑證" || ng "讀回來不一樣"
 printf 'not-a-token' | ps -File "$SECRET" set "$ID-bad" >/dev/null 2>&1; [ ${PIPESTATUS[1]} = 2 ] || true
 ps -File "$SECRET" get "$ID-bad" >/dev/null 2>&1 && ng "存了不像憑證的東西" || ok "不像憑證的不存"
-
-echo "######## resume.ps1"
-# 假的 claude：記下參數、工作資料夾、環境變數裡的憑證與不該帶過來的變數
-cat > "$W/claude.cmd" <<'EOF'
-@echo off
-> "%~dp0out.txt" echo args=%*
->> "%~dp0out.txt" echo cwd=%CD%
->> "%~dp0out.txt" echo token=%CLAUDE_CODE_OAUTH_TOKEN%
->> "%~dp0out.txt" echo account=%BRAID_ACCOUNT%
->> "%~dp0out.txt" echo leftover=%CLAUDECODE%%BRAID_SESSION%%BRAID_CREDENTIAL%
-EOF
-sed -i 's/$/\r/' "$W/claude.cmd"
-BRAID_ACCOUNT=acct-1 BRAID_CREDENTIAL="$ID" BRAID_SESSION=sess-1 BRAID_CWD="$(wslpath -w "$W/中文 資料夾")" BRAID_CLAUDE="$(wslpath -w "$W/claude.cmd")" BRAID_LABEL='公司 2' CLAUDECODE=1 \
-  WSLENV="BRAID_ACCOUNT:BRAID_CREDENTIAL:BRAID_SESSION:BRAID_CWD:BRAID_CLAUDE:BRAID_LABEL:CLAUDECODE${WSLENV:+:$WSLENV}" \
-  ps -File "$(wslpath -w ../mod/tool/windows/resume.ps1)" </dev/null >/dev/null 2>&1
-out=$(iconv -f cp950 -t utf-8 "$W/out.txt" 2>/dev/null || cat "$W/out.txt")
-out=$(printf '%s' "$out" | tr -d '\r')
-echo "$out" | grep -qx "args=--resume sess-1 --fork-session" && ok "用 --resume 加 --fork-session 接著同一段對話" || ng "參數不對：$out"
-echo "$out" | grep -q "^cwd=.*braid-cli-test-$$\\\\中文 資料夾$" && ok "中文、空白的工作資料夾原樣送到" || ng "資料夾不對：$out"
-echo "$out" | grep -qx "token=$TOKEN" && ok "憑證從認證管理員取出，放進那個視窗的 claude" || ng "憑證沒送到：$out"
-echo "$out" | grep -qx "account=acct-1" && ok "新的對話知道自己是哪個帳號" || ng "帳號 id 不對：$out"
-echo "$out" | grep -qx "leftover=" && ok "上一個對話與 braid 自己的參數變數都清掉了" || ng "還帶著變數：$out"
-rm -f "$W/out.txt"
-BRAID_ACCOUNT=acct-login BRAID_CREDENTIAL=- BRAID_SESSION=sess-2 BRAID_CWD="$(wslpath -w "$W/中文 資料夾")" BRAID_CLAUDE="$(wslpath -w "$W/claude.cmd")" BRAID_LABEL='公司' CLAUDE_CODE_OAUTH_TOKEN=stale \
-  WSLENV="BRAID_ACCOUNT:BRAID_CREDENTIAL:BRAID_SESSION:BRAID_CWD:BRAID_CLAUDE:BRAID_LABEL:CLAUDE_CODE_OAUTH_TOKEN${WSLENV:+:$WSLENV}" \
-  ps -File "$(wslpath -w ../mod/tool/windows/resume.ps1)" </dev/null >/dev/null 2>&1
-out=$(iconv -f cp950 -t utf-8 "$W/out.txt" 2>/dev/null || cat "$W/out.txt")
-out=$(printf '%s' "$out" | tr -d '\r')
-echo "$out" | grep -qx "args=--resume sess-2 --fork-session" && echo "$out" | grep -qx "token=" && echo "$out" | grep -qx "account=acct-login" \
-  && ok "憑證 id 是 -：不帶憑證，用 Claude Code 自己登入的帳號接著做" || ng "用本機登入接著做不對：$out"
-rm -f "$W/out.txt"
-out=$(BRAID_ACCOUNT=acct-login BRAID_CREDENTIAL=- BRAID_SESSION=sess-2 BRAID_CWD="$(wslpath -w "$W/中文 資料夾")" BRAID_CLAUDE="$(wslpath -w "$W/no-such-claude.cmd")" BRAID_LABEL='公司' \
-  WSLENV="BRAID_ACCOUNT:BRAID_CREDENTIAL:BRAID_SESSION:BRAID_CWD:BRAID_CLAUDE:BRAID_LABEL${WSLENV:+:$WSLENV}" \
-  ps -File "$(wslpath -w ../mod/tool/windows/resume.ps1)" </dev/null 2>&1)
-echo "$out" | grep -q '找不到 Claude Code 的命令列程式：.*no-such-claude\.cmd。回到 braid 面板再按一次' && [ ! -e "$W/out.txt" ] \
-  && ok "找不到 claude：說回面板再按一次，不啟動任何東西" || ng "找不到 claude 時的處理不對：$out"
 
 echo "######## add-account.ps1"
 cat > "$W/claude-setup.cmd" <<'EOF'

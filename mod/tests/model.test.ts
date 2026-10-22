@@ -186,30 +186,35 @@ describe('換帳號的規則', () => {
     expect(orderedIds(ACCOUNTS, ['gone'])).toEqual(['work', 'work2', 'home'])
   })
 
-  test('哪個帳號都可以（不看歸屬）；沒有憑證的、也快用完的說明原因；CLI 自己登入的帳號沒有憑證也能接手', async () => {
+  test('能換過去＝在桌面 app 登入過（不看憑證、不看歸屬）；還沒在 app 登入過的、也快用完的說明原因', async () => {
     const busy = { ...work2, usage: { fiveHour: { pct: 95, resetsAt: iso(NOW + H) }, sevenDay: null, at: NOW } }
-    const list = candidates({ work, work2: busy, home, desk: account('desk', { lastSeen: -1 }), login: account('login', { lastSeen: -2 }) }, 'work', DEFAULT_SWITCH, 'login', NOW)
+    const list = candidates(
+      { work, work2: busy, home, tok: account('tok', { source: 'token', credential: 'file', credentialId: 'tok', lastSeen: -1 }), login: account('login', { source: 'cli', lastSeen: -2 }) },
+      'work',
+      DEFAULT_SWITCH,
+      NOW,
+    )
     expect(list.map(c => [c.account.id, c.why])).toEqual([
       ['work2', 'busy'],
       ['home', 'ok'],
-      ['desk', 'no-credential'],
-      ['login', 'ok'],
+      ['tok', 'elsewhere'], // braid 新增的：有憑證也要先在桌面 app 登入
+      ['login', 'elsewhere'], // 只在終端機 /login 的
     ])
   })
 })
 
 describe('輸入框上方的提示', () => {
   const live = (five: number, seven = 10) => ({ fiveHour: { pct: five, resetsAt: iso(NOW + 2 * H) }, sevenDay: { pct: seven, resetsAt: iso(NOW + 96 * H) }, at: NOW })
-  const at = (pct: number, seven?: number, snooze: string | null = null, sw: BraidSwitch = DEFAULT_SWITCH) => bandFor(ACCOUNTS, 'work', live(pct, seven), sw, null, NOW, snooze)
+  const at = (pct: number, seven?: number, snooze: string | null = null, sw: BraidSwitch = DEFAULT_SWITCH) => bandFor(ACCOUNTS, 'work', live(pct, seven), sw, NOW, snooze)
 
   test('沒到門檻不出現；關掉也不出現', async () => {
     expect(at(89)).toBe(null)
     expect(at(95, 10, null, { ...DEFAULT_SWITCH, on: false })).toBe(null)
   })
 
-  test('到門檻：快用完；同組織有憑證的帳號可以一鍵接手', async () => {
+  test('到門檻：快用完；建議順序裡第一個在桌面 app 登入過的帳號', async () => {
     const band = at(92)
-    expect([band?.kind, band?.window, band?.pct, band?.best?.id]).toEqual(['warn', 'five_hour', 92, 'work2'])
+    expect([band?.kind, band?.window, band?.pct, band?.next?.id]).toEqual(['warn', 'five_hour', 92, 'work2'])
   })
 
   test('7 天也看；用完優先於快用完', async () => {
@@ -224,14 +229,14 @@ describe('輸入框上方的提示', () => {
     expect(at(100, 10, warn?.snoozeKey ?? null)?.kind).toBe('out')
   })
 
-  test('沒有可以一鍵接手的：給可以在桌面 app 手動換的帳號', async () => {
-    const band = bandFor({ work, desk: account('desk', { orgId: 'org-w' }) }, 'work', live(92), DEFAULT_SWITCH, null, NOW, null)
-    expect([band?.best, band?.manual?.id]).toEqual([null, 'desk'])
+  test('沒有能換的：給還沒在桌面 app 登入過的帳號（先登入它就能換）', async () => {
+    const band = bandFor({ work, tok: account('tok', { source: 'token', credential: 'file', credentialId: 'tok' }) }, 'work', live(92), DEFAULT_SWITCH, NOW, null)
+    expect([band?.next, band?.elsewhere?.id]).toEqual([null, 'tok'])
   })
 
-  test('只剩個人帳號能接：照樣是「一鍵接手」——歸屬只管新頁，不管對話往哪個帳號走', async () => {
-    const band = bandFor({ work, home }, 'work', live(100), DEFAULT_SWITCH, null, NOW, null)
-    expect(band?.best?.id).toBe('home')
+  test('只剩個人帳號能換：照樣建議它——歸屬只管新頁，不管對話往哪個帳號走', async () => {
+    const band = bandFor({ work, home }, 'work', live(100), DEFAULT_SWITCH, NOW, null)
+    expect(band?.next?.id).toBe('home')
   })
 })
 
@@ -345,43 +350,41 @@ describe('遷移工具的參數', () => {
   })
 })
 
-describe('開新視窗跑帳號腳本', () => {
-  const resume = { kind: 'resume' as const, account: 'acct-1', credentialId: 'tok-1', session: 's-1', cwd: "/w/it's here", claude: '/opt/claude', label: '個人' }
+describe('開新視窗跑帳號腳本（新增帳號）', () => {
+  const add = { kind: 'add' as const, credentialId: 'tok-1', result: "/tmp/it's here.json", claude: '/opt/claude' }
 
   test('一次性的小腳本：先刪自己，參數用單引號寫死（單引號本身也跳脫）', async () => {
-    expect(wrapperText('/r', resume)).toBe(
-      "#!/bin/bash\nrm -f -- \"$0\"\nexec bash '/r/tool/cli/resume.sh' 'tok-1' 's-1' '/w/it'\\''s here' '/opt/claude' '個人' 'acct-1'\n",
-    )
+    expect(wrapperText('/r', add)).toBe("#!/bin/bash\nrm -f -- \"$0\"\nexec bash '/r/tool/cli/add-account.sh' 'tok-1' '/tmp/it'\\''s here.json' '/opt/claude'\n")
   })
 
   test('WSL：寫小腳本，交給 open-wsl.sh 開 Windows 視窗', async () => {
-    expect(planTerminal('wsl', '/r', resume, '/tmp/')).toEqual({
-      steps: [{ write: { path: '/tmp/braid-resume-tok-1.sh', text: wrapperText('/r', resume) } }, { run: ['bash', '/r/tool/cli/open-wsl.sh', '/tmp/braid-resume-tok-1.sh'] }],
+    expect(planTerminal('wsl', '/r', add, '/tmp/')).toEqual({
+      steps: [{ write: { path: '/tmp/braid-add-tok-1.sh', text: wrapperText('/r', add) } }, { run: ['bash', '/r/tool/cli/open-wsl.sh', '/tmp/braid-add-tok-1.sh'] }],
       manual: null,
     })
   })
 
   test('Linux：開不了視窗時給一行指令', async () => {
-    const plan = planTerminal('other', '/r', { kind: 'add', credentialId: 'tok-2', result: '/tmp/r.json', claude: 'claude' }, '/tmp')
+    const plan = planTerminal('other', '/r', { ...add, credentialId: 'tok-2' }, '/tmp')
     expect('steps' in plan && plan.manual).toBe("bash '/tmp/braid-add-tok-2.sh'")
   })
 
   test('macOS：.command 檔，加執行權限再用 Terminal 開', async () => {
-    const plan = planTerminal('mac', '/r', resume, '/var/T/')
-    expect('steps' in plan && plan.steps.slice(1)).toEqual([{ run: ['chmod', '+x', '/var/T/braid-resume-tok-1.command'] }, { run: ['open', '-a', 'Terminal', '/var/T/braid-resume-tok-1.command'] }])
+    const plan = planTerminal('mac', '/r', add, '/var/T/')
+    expect('steps' in plan && plan.steps.slice(1)).toEqual([{ run: ['chmod', '+x', '/var/T/braid-add-tok-1.command'] }, { run: ['open', '-a', 'Terminal', '/var/T/braid-add-tok-1.command'] }])
   })
 
-  test('Windows：參數放環境變數（中文不經過命令列），開 PowerShell 視窗跑 resume.ps1', async () => {
-    const plan = planTerminal('windows', 'C:/plug', { ...resume, cwd: 'C:\\w\\中文' }, 'C:\\T')
+  test('Windows：參數放環境變數（中文不經過命令列），開 PowerShell 視窗跑 add-account.ps1', async () => {
+    const plan = planTerminal('windows', 'C:/plug', { ...add, result: 'C:\\T\\中文.json' }, 'C:\\T')
     expect('steps' in plan && plan.steps).toEqual([
       {
         run: [
           'powershell.exe',
           '-NoProfile',
           '-Command',
-          "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"C:\\plug\\tool\\windows\\resume.ps1\"'",
+          "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"C:\\plug\\tool\\windows\\add-account.ps1\"'",
         ],
-        env: { BRAID_ACCOUNT: 'acct-1', BRAID_CREDENTIAL: 'tok-1', BRAID_SESSION: 's-1', BRAID_CWD: 'C:\\w\\中文', BRAID_CLAUDE: '/opt/claude', BRAID_LABEL: '個人' },
+        env: { BRAID_ACCOUNT: 'tok-1', BRAID_RESULT: 'C:\\T\\中文.json', BRAID_CLAUDE: '/opt/claude' },
       },
     ])
   })
@@ -828,7 +831,7 @@ describe('桌面版的圖', () => {
       ],
       staleness: null,
       thresholds: [90, 95],
-      note: { tone: 'good', text: '可以一鍵接手' },
+      note: { tone: 'good', text: '在桌面 app 換成它就能用' },
       empty: '還沒有用量紀錄',
       ...over,
     })
@@ -974,8 +977,8 @@ describe('桌面版的圖（第二批）', () => {
   test('頁首、切換總覽、名次列、歸屬總覽：名稱照字面畫（跳脫）、說明文字完整、大小在上限內', async () => {
     const parts = [
       header({ account: { label: bad, color: '#2a78d6' }, windows: [{ label: '5 小時', pct: 27, reset: null }, { label: '7 天', pct: 100, reset: null }], thresholds: [90, 95] }),
-      switchHero({ account: { label: bad, color: '#2a78d6' }, windows: [{ label: '5 小時', pct: 92, reset: null }], thresholds: [90], next: { label: bad, color: '#eb6834', note: '可以接手' } }),
-      rankRow({ rank: 2, label: bad, color: '#eb6834', status: { tone: 'good', text: '可以接手' } }),
+      switchHero({ account: { label: bad, color: '#2a78d6' }, windows: [{ label: '5 小時', pct: 92, reset: null }], thresholds: [90], next: { label: bad, color: '#eb6834', note: '可以換過去' } }),
+      rankRow({ rank: 2, label: bad, color: '#eb6834', status: { tone: 'good', text: '可以換過去' } }),
       ownerHero({ project: bad, owner: { label: bad, color: '#2a78d6' }, me: { label: '個人', color: '#e87ba4' }, state: 'mismatch' }),
     ]
     for (const p of parts) {
@@ -986,11 +989,11 @@ describe('桌面版的圖（第二批）', () => {
     }
     expect(parts[0]?.alt).toBe('braid；目前：A&B <x>；5 小時 27%，7 天 100%')
     expect(parts[0]?.source).toContain('fill="#d03b3b"') // 7 天用完：危險色
-    expect(parts[1]?.alt).toMatch(/5 小時 92%（90% 提醒）；下一個接手：A&B <x>/)
-    expect(parts[2]?.alt).toBe('2. A&B <x>：可以接手')
+    expect(parts[1]?.alt).toMatch(/5 小時 92%（90% 提醒）；下一個可以換的：A&B <x>/)
+    expect(parts[2]?.alt).toBe('2. A&B <x>：可以換過去')
     expect(parts[3]?.alt).toBe('A&B <x> → A&B <x>；新頁先排著，等歸屬帳號發布（這個對話是「個人」）')
     expect(ownerHero({ project: 'p', owner: null, me: { label: '個人', color: '#e87ba4' }, state: 'unset' }).alt).toBe('p → 還沒設定；這個對話是「個人」')
-    expect(switchHero({ account: { label: 'a', color: '#2a78d6' }, windows: [], thresholds: [], next: null }).alt).toMatch(/下一個接手：沒有/)
+    expect(switchHero({ account: { label: 'a', color: '#2a78d6' }, windows: [], thresholds: [], next: null }).alt).toMatch(/下一個可以換的：沒有/)
   })
 
   test('備份的兩格統計：筆數、大小、留多久都在說明文字裡', async () => {

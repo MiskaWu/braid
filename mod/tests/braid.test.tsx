@@ -300,7 +300,7 @@ describe('第一次打開：選用法', () => {
     expect(await ui.find({ key: 'tab-switch' })).toBeDefined()
     expect(await ui.find({ key: 'tab-migrate' })).toBeUndefined()
     expect(await ui.find({ key: 'tab-sync' })).toBeUndefined()
-    expect(await shows(ui, /接手順序/)).toBe(true) // 選了用量切換，直接到切換頁
+    expect(await shows(ui, /換帳號的順序/)).toBe(true) // 選了用量切換，直接到切換頁
     await ui.unmount()
   })
 })
@@ -320,33 +320,25 @@ describe('帳號與用量', () => {
       expect(await seen(ui, /16:00 重置/)).toBe(true)
       expect(await seen(ui, /這個對話/)).toBe(true)
       expect(await seen(ui, /5 小時 12%.*2 小時前的數字/)).toBe(true)
-      expect(await seen(ui, /braid 沒有它的登入憑證/)).toBe(true)
+      expect(await seen(ui, /在桌面 app 換成它就能用/)).toBe(true)
       // 桌面版畫成圖（頁首＋兩張帳號卡）、終端機是文字
       expect((await ui.findAll({ type: 'Svg' })).length).toBe(surface === 'desktop' ? 3 : 0)
       await ui.unmount()
     }
   })
 
-  test('隨時都能換：有憑證的帳號卡片上可以直接用它接著這段對話；沒憑證的沒有這顆按鈕', async ($, on) => {
+  test('換帳號都是自己在桌面 app 換：帳號卡上沒有「接著做」，braid 新增的帳號說要先在桌面 app 登入；不開任何視窗', async ($, on) => {
     const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL, 'account:tok-00000002': WORK2 } })
     await $.session.start(START)
-    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await ui.find({ key: `go-${P}` })).toBeUndefined()
-    await ui.press({ key: 'go-tok-00000002' })
-    expect(w.runs.at(-1)?.argv.slice(1)).toEqual([expect.stringMatching(/\/tool\/cli\/open-wsl\.sh$/), '/tmp/braid-resume-tok-00000002.sh'])
-    expect(w.files['/tmp/braid-resume-tok-00000002.sh']).toContain("'sess-1' '/w/server' '/opt/claude' '公司 2'")
-    await ui.unmount()
-  })
-
-  test('哪裡都找不到 claude：不開視窗，提示並複製安裝指令', async ($, on) => {
-    const w = world(on, { store: { uses: USES_ALL, 'account:tok-00000002': WORK2 }, env: { CLAUDE_CODE_EXECPATH: '', PATH: '/usr/bin' } })
-    await $.session.start(START)
-    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    await ui.press({ key: 'go-tok-00000002' })
-    expect(w.runs.some(r => /open-wsl\.sh$/.test(r.argv[1] ?? ''))).toBe(false)
-    expect(w.toasts.at(-1)).toBe('braid：這台電腦找不到 Claude Code 的命令列程式（claude），沒辦法開新視窗接著做。請在終端機執行下面這行安裝：curl -fsSL https://claude.ai/install.sh | bash（已複製）')
-    expect(w.copies.at(-1)).toBe('curl -fsSL https://claude.ai/install.sh | bash')
-    await ui.unmount()
+    for (const surface of SURFACES) {
+      const ui = await $.ui.mount({ ...PANE, surface })
+      expect(await ui.find({ key: `go-${P}` })).toBeUndefined()
+      expect(await ui.find({ key: 'go-tok-00000002' })).toBeUndefined()
+      expect(await seen(ui, /在桌面 app 換成它就能用/)).toBe(true)
+      expect(await seen(ui, /還沒在桌面 app 登入過：先在桌面 app 登入它，才能換過去/)).toBe(true)
+      await ui.unmount()
+    }
+    expect(w.runs.some(r => /open-(wsl|linux)\.sh$/.test(r.argv[1] ?? ''))).toBe(false)
   })
 
   test('先用 braid 新增過憑證的帳號，之後在桌面 app 換成它：併成一筆，名稱、顏色、憑證、切換順序都接過去', async ($, on) => {
@@ -363,7 +355,6 @@ describe('帳號與用量', () => {
     expect(w.runs.some(r => r.argv.join(' ').includes('secret.sh delete'))).toBe(false) // 憑證還要用，不刪
     await $.command.run(RUN('帳號'))
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-    expect((await ui.findAll({ key: 'go-tok-00000007' })).length).toBe(0) // 不會對自己「用它接著做」
     expect(await seen(ui, /MiskaWu/)).toBe(true)
     await ui.unmount()
   })
@@ -396,46 +387,42 @@ describe('帳號與用量', () => {
 })
 
 describe('用量快用完：輸入框上方的提示', () => {
-  test('公司資料夾：同組織、有憑證的帳號可以一鍵接手；按了開新視窗用它接著同一段對話', async ($, on) => {
+  test('快用完：提醒在桌面 app 換成順序裡第一個能換的帳號（braid 新增、沒在 app 登入過的不算）；沒有會開視窗的按鈕', async ($, on) => {
     const w = world(on, { store: { uses: USES_ALL, [`account:${P}`]: PERSONAL, 'account:tok-00000002': WORK2 } })
     await $.session.start(START)
     await $.session.measure(measure(92) as never)
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ ...BAND, surface })
       expect(await shows(ui, /公司 5 小時用量 92%，16:00 重置/)).toBe(true)
-      expect((await ui.find({ key: 'band-handoff' }))?.props.label).toBe('用「公司 2」接著做')
+      expect(await shows(ui, /可以在桌面 app 換成「個人」。/)).toBe(true)
+      expect(await ui.find({ key: 'band-handoff' })).toBeUndefined()
       await ui.unmount()
     }
     const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-    await ui.press({ key: 'band-handoff' })
-    const wrapper = '/tmp/braid-resume-tok-00000002.sh'
-    const root = (w.runs.at(-1)?.argv[1] ?? '').replace('/tool/cli/open-wsl.sh', '')
-    expect(root).toMatch(/^\//)
-    // 憑證 id、對話、資料夾、claude、名稱、帳號 id 都寫死在一次性的小腳本裡；憑證本身不在
-    expect(w.files[wrapper]).toBe(
-      `#!/bin/bash\nrm -f -- "$0"\nexec bash '${root}/tool/cli/resume.sh' 'tok-00000002' 'sess-1' '/w/server' '/opt/claude' '公司 2' 'tok-00000002'\n`,
-    )
-    expect(w.runs.at(-1)?.argv.slice(2)).toEqual([wrapper])
-    // 提示換成「已交給另一個帳號」；在這裡再送訊息要先確認一次
-    expect(await shows(ui, /已在新視窗用「公司 2」接著做/)).toBe(true)
+    await ui.press({ key: 'band-open' })
+    expect(w.opened).toContain('braid')
     await ui.unmount()
-    const first = await $.prompt.submit({ text: '繼續', wait: false } as never)
-    expect('drop' in first && first.drop).toMatch(/已經交給「公司 2」/)
-    const slash = await $.prompt.submit({ text: '/braid', wait: false } as never)
-    expect('drop' in slash).toBe(false)
+    expect(w.runs.some(r => /open-(wsl|linux)\.sh$/.test(r.argv[1] ?? ''))).toBe(false)
+    const sent = await $.prompt.submit({ text: '繼續', wait: false } as never)
+    expect('drop' in sent).toBe(false) // 沒有「交給另一個帳號」的防呆了
   })
 
-  test('歸屬不管換帳號：資料夾歸公司，有憑證的個人帳號照樣一鍵接手，不另外確認', async ($, on) => {
-    const home = { ...PERSONAL, credential: 'keychain', credentialId: 'tok-00000001' }
-    const w = world(on, { store: { uses: USES_ALL, policy: { rules: [{ folder: '/w', owner: W }] }, [`account:${P}`]: home } })
+  test('沒有在桌面 app 登入過的其他帳號：說先在桌面 app 登入它；沒開同步時提一句開同步', async ($, on) => {
+    world(on, { store: { uses: { switch: true, sync: false, policy: false }, 'account:tok-00000002': WORK2 } })
+    await $.session.start(START)
+    await $.session.measure(measure(95) as never)
+    const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    expect(await shows(ui, /「公司 2」還沒在桌面 app 登入過：先在桌面 app 登入它，就能換過去。/)).toBe(true)
+    await ui.unmount()
+  })
+
+  test('歸屬不管換帳號：資料夾歸公司，照樣建議換成個人帳號，不另外警告', async ($, on) => {
+    world(on, { store: { uses: { switch: true, sync: false, policy: true }, policy: { rules: [{ folder: '/w', owner: W }] }, [`account:${P}`]: PERSONAL } })
     await $.session.start(START)
     await $.session.measure(measure(95) as never)
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-    expect((await ui.find({ key: 'band-handoff' }))?.props.label).toBe('用「個人」接著做')
+    expect(await shows(ui, /可以在桌面 app 換成「個人」；在 braid 開啟同步，對話就會自動跟過去。/)).toBe(true)
     expect(await shows(ui, /公司程式碼會經由/)).toBe(false)
-    await ui.press({ key: 'band-handoff' })
-    expect(w.runs.at(-1)?.argv.join(' ')).toContain('open-wsl.sh')
-    expect(w.files['/tmp/braid-resume-tok-00000001.sh']).toContain("'tok-00000001'")
     await ui.unmount()
   })
 
@@ -685,7 +672,7 @@ describe('切換設定', () => {
       const ui = await $.ui.mount({ ...PANE, surface })
       expect(await ui.find({ key: 'sw-scope' })).toBeUndefined()
       expect(await ui.find({ key: 'sw-to-policy' })).toBeUndefined()
-      expect(await seen(ui, /可以接手/)).toBe(true)
+      expect(await seen(ui, /可以換過去/)).toBe(true)
       await ui.unmount()
     }
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })

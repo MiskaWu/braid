@@ -156,13 +156,13 @@ export type CardData = {
   staleness: string | null
   /** 門檻（5 小時、7 天各一）；不提醒是 null */
   thresholds: (number | null)[]
-  /** 最下面一行：可以怎麼接手 */
+  /** 最下面一行：怎麼換過去（在桌面 app 換、對話會不會跟過去） */
   note: { tone: 'good' | 'sync' | 'none'; text: string } | null
   /** 沒有用量時寫什麼 */
   empty: string
 }
 
-/** 帳號卡：頭像、名稱與標籤、信箱、兩條用量、怎麼接手。外框與按鈕由面板的 Box 畫。 */
+/** 帳號卡：頭像、名稱與標籤、信箱、兩條用量、怎麼換過去。外框與按鈕由面板的 Box 畫。 */
 export function accountCard(d: CardData, w = 420): { source: string; alt: string; height: number } {
   let y = 0
   let body = avatar(20, 20, 20, d.color, d.label)
@@ -391,7 +391,7 @@ export function header(d: { account: { label: string; color: string } | null; wi
 }
 
 /**
- * 切換頁的總覽：目前帳號兩條用量與提醒門檻（標出幾 % 提醒），右邊是「下一個接手」。
+ * 切換頁的總覽：目前帳號兩條用量與提醒門檻（標出幾 % 提醒），右邊是「下一個可以換的」。
  */
 export function switchHero(d: {
   account: { label: string; color: string }
@@ -421,23 +421,23 @@ export function switchHero(d: {
     }
     y = by + 32
   })
-  // 右邊：下一個接手
+  // 右邊：下一個可以換的
   const rx = colW + 28
   body += `<line x1="${rx - 14}" y1="4" x2="${rx - 14}" y2="${y - 6}" class="hair" stroke-width="1"/>`
-  body += txt(rx, 14, 't3', 11, '下一個接手')
+  body += txt(rx, 14, 't3', 11, '下一個可以換的')
   if (d.next) {
     body += avatar(rx + 16, 44, 16, d.next.color, d.next.label)
     body += txt(rx + 40, 42, 't1', 13, fit(d.next.label, 13, w - rx - 40), 'font-weight="600"')
     body += txt(rx + 40, 58, 't3', 11, fit(d.next.note, 11, w - rx - 40))
   } else {
-    body += txt(rx, 46, 't3', 12, '還沒有可以接手的帳號')
+    body += txt(rx, 46, 't3', 12, '還沒有可以換的帳號')
   }
   const height = Math.ceil(y)
-  const alt = `${d.account.label}：${d.windows.map((win, i) => `${win.label} ${win.pct ?? '—'}%（${d.thresholds[i] ?? '不'}% 提醒）`).join('，')}；下一個接手：${d.next ? d.next.label : '沒有'}`
+  const alt = `${d.account.label}：${d.windows.map((win, i) => `${win.label} ${win.pct ?? '—'}%（${d.thresholds[i] ?? '不'}% 提醒）`).join('，')}；下一個可以換的：${d.next ? d.next.label : '沒有'}`
   return { source: svg(w, height, body), alt, height }
 }
 
-/** 名次列：圓圈裡的名次、頭像、名稱、狀態標籤（可以接手／要確認／沒有憑證／也快用完）。 */
+/** 名次列：圓圈裡的名次、頭像、名稱、狀態標籤（可以換過去／還沒在桌面 app 登入過／也快用完）。 */
 export function rankRow(d: { rank: number; label: string; color: string; status: { tone: 'good' | 'warn' | 'muted' | 'current'; text: string } }, w = 330): { source: string; alt: string; height: number } {
   const h = 28
   let body = `<circle cx="10" cy="14" r="9" class="panel"/>` + txt(10, 18, 't2 num', 11, String(d.rank), 'text-anchor="middle" font-weight="600"')

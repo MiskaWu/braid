@@ -349,10 +349,12 @@ export function orderedIds(accounts: Record<string, BraidAccount>, order: readon
 }
 
 /**
- * 能不能接手：ok；braid 沒有憑證、也不是 CLI 自己登入的帳號（no-credential，只能在桌面 app 換）；也快用完（busy）。
- * 不看歸屬表：歸屬只管新頁歸誰，對話往哪個帳號走由切換與同步決定（2026-10-20 拍板：同步優先）。
+ * 能不能換過去：ok＝在桌面 app 登入過（使用者自己在 app 換）；elsewhere＝還沒在桌面 app 登入過（braid 新增的、
+ * 或只在終端機 /login 的），要先在 app 登入它；busy＝也快用完。
+ * braid 不替使用者換帳號、不開視窗接著做（2026-10-22 拍板：各人本機的 claude 裝在哪不一定，VS Code 插件裡開出去的視窗出錯就關掉）。
+ * 不看歸屬表：歸屬只管新頁歸誰，對話往哪個帳號走由使用者換帳號與同步決定。
  */
-export type Why = 'ok' | 'no-credential' | 'busy'
+export type Why = 'ok' | 'elsewhere' | 'busy'
 
 export type Candidate = { account: BraidAccount; why: Why }
 
@@ -364,25 +366,14 @@ export function isBusy(usage: BraidUsage | null, sw: BraidSwitch, now: number): 
   return (five !== null && five >= sw.fiveHour) || (sw.sevenDay !== null && seven !== null && seven >= sw.sevenDay)
 }
 
-/** 能在新視窗接著做：braid 有它的憑證，或它就是 CLI 自己 /login 的帳號（不帶憑證直接開）。 */
-export function canHandoff(a: BraidAccount, cliLogin: string | null): boolean {
-  return a.credential !== null || (cliLogin !== null && a.id === cliLogin)
-}
-
-/** 其他帳號依順序，各自能不能接手、不能的話為什麼。 */
-export function candidates(
-  accounts: Record<string, BraidAccount>,
-  currentId: string,
-  sw: BraidSwitch,
-  cliLogin: string | null,
-  now: number,
-): Candidate[] {
+/** 其他帳號依順序，各自能不能換過去、不能的話為什麼。 */
+export function candidates(accounts: Record<string, BraidAccount>, currentId: string, sw: BraidSwitch, now: number): Candidate[] {
   return orderedIds(accounts, sw.order)
     .filter(id => id !== currentId)
     .map(id => {
       const account = accounts[id] as BraidAccount
       let why: Why = 'ok'
-      if (!canHandoff(account, cliLogin)) why = 'no-credential'
+      if (account.source !== 'desktop') why = 'elsewhere'
       else if (isBusy(account.usage, sw, now)) why = 'busy'
       return { account, why }
     })
@@ -395,10 +386,10 @@ export type Band = {
   resetsAt: string | null
   /** 「先別提醒」記這個；快用完時按掉的，用完時還會再出現一次 */
   snoozeKey: string
-  /** 可以一鍵接著做的帳號 */
-  best: BraidAccount | null
-  /** 沒有 braid 的憑證、但可以在桌面 app 手動換過去的帳號 */
-  manual: BraidAccount | null
+  /** 建議在桌面 app 換成的帳號：順序裡第一個能換的 */
+  next: BraidAccount | null
+  /** 沒有能換的時候，還沒在桌面 app 登入過的帳號（先在 app 登入它就能換） */
+  elsewhere: BraidAccount | null
 }
 
 /** 輸入框上方要不要出現提示、說什麼。 */
@@ -407,7 +398,6 @@ export function bandFor(
   currentId: string | null,
   live: BraidUsage | null,
   sw: BraidSwitch,
-  cliLogin: string | null,
   now: number,
   snooze: string | null,
 ): Band | null {
@@ -422,12 +412,12 @@ export function bandFor(
   if (!hit) return null
   const snoozeKey = `${currentId}|${hit.window}|${hit.resetsAt ?? ''}|${hit.kind}`
   if (snooze === snoozeKey) return null
-  const list = candidates(accounts, currentId, sw, cliLogin, now)
+  const list = candidates(accounts, currentId, sw, now)
   return {
     ...hit,
     snoozeKey,
-    best: list.find(c => c.why === 'ok')?.account ?? null,
-    manual: list.find(c => c.why === 'no-credential')?.account ?? null,
+    next: list.find(c => c.why === 'ok')?.account ?? null,
+    elsewhere: list.find(c => c.why === 'elsewhere')?.account ?? null,
   }
 }
 
