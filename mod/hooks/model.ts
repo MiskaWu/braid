@@ -5,7 +5,9 @@ import type {
   BraidKeep,
   BraidMirror,
   BraidMirrorProblem,
+  BraidPlatform,
   BraidProfile,
+  BraidSignIn,
   BraidSwitch,
   BraidSync,
   BraidUsage,
@@ -175,6 +177,32 @@ export function normalizeAccount(x: unknown): BraidAccount | null {
 
 /** 一個對話看到的自己：桌面 app 給的環境變數、CLI 自己登入的資料、或 braid 開的視窗帶的帳號 id。 */
 export type Seen = { id: string; email: string | null; orgId: string | null; orgName: string | null; source: BraidAccount['source'] }
+
+/**
+ * Claude Code 自己的登入存在哪個 .claude.json：有 CLAUDE_CONFIG_DIR 就在那裡，否則家目錄。
+ * Windows 的家目錄看 USERPROFILE（Claude Code 用的 os.homedir() 也是），不看 HOME：
+ * 有些 Windows 會設 HOME（例如 Git 的設定），指到別處時 braid 會讀錯檔、認不出帳號（2026-10-22，同事在 VS Code 遇到）。
+ */
+export function claudeJsonAt(platform: BraidPlatform, env: { configDir?: string; home?: string; userProfile?: string }): string | null {
+  const sep = platform === 'windows' ? '\\' : '/'
+  const home = platform === 'windows' ? env.userProfile || env.home : env.home || env.userProfile
+  const dir = env.configDir || home
+  return dir ? `${dir.replace(/[\\/]+$/, '')}${sep}.claude.json` : null
+}
+
+/**
+ * 這個對話的帳號是怎麼認出來的：token＝braid 用一年期憑證開的視窗（BRAID_ACCOUNT）；desktop＝桌面 app 開的對話
+ * （app 把帳號放在 CLAUDE_CODE_ACCOUNT_UUID）；cli＝VS Code 插件或終端機，讀 Claude Code 自己的登入（file）；
+ * none＝都沒有（why：找不到家目錄、讀不到檔、檔裡沒有登入資料）。
+ */
+export type SignIn = BraidSignIn
+
+/** 換帳號的方法：桌面 app 的對話在 app 換；VS Code 插件與終端機用 /login（對話紀錄不分帳號，換過去這段對話不用搬）。 */
+export type SwitchBy = 'desktop' | 'login'
+
+export function switchByOf(signIn: SignIn | null): SwitchBy {
+  return signIn?.by === 'desktop' ? 'desktop' : 'login'
+}
 
 /** CLI 自己登入的帳號，存在 ~/.claude.json 的 oauthAccount。 */
 export function seenFromClaudeJson(text: string): Seen | null {
@@ -366,14 +394,14 @@ export function isBusy(usage: BraidUsage | null, sw: BraidSwitch, now: number): 
   return (five !== null && five >= sw.fiveHour) || (sw.sevenDay !== null && seven !== null && seven >= sw.sevenDay)
 }
 
-/** 其他帳號依順序，各自能不能換過去、不能的話為什麼。 */
-export function candidates(accounts: Record<string, BraidAccount>, currentId: string, sw: BraidSwitch, now: number): Candidate[] {
+/** 其他帳號依順序，各自能不能換過去、不能的話為什麼。by＝login（VS Code、終端機用 /login 換）時，任何帳號都能登入，不分在不在桌面 app 登入過。 */
+export function candidates(accounts: Record<string, BraidAccount>, currentId: string, sw: BraidSwitch, now: number, by: SwitchBy = 'desktop'): Candidate[] {
   return orderedIds(accounts, sw.order)
     .filter(id => id !== currentId)
     .map(id => {
       const account = accounts[id] as BraidAccount
       let why: Why = 'ok'
-      if (account.source !== 'desktop') why = 'elsewhere'
+      if (by === 'desktop' && account.source !== 'desktop') why = 'elsewhere'
       else if (isBusy(account.usage, sw, now)) why = 'busy'
       return { account, why }
     })
@@ -400,6 +428,7 @@ export function bandFor(
   sw: BraidSwitch,
   now: number,
   snooze: string | null,
+  by: SwitchBy = 'desktop',
 ): Band | null {
   if (!sw.on || !currentId || !live || !accounts[currentId]) return null
   const five = effectivePct(live.fiveHour, now)
@@ -412,7 +441,7 @@ export function bandFor(
   if (!hit) return null
   const snoozeKey = `${currentId}|${hit.window}|${hit.resetsAt ?? ''}|${hit.kind}`
   if (snooze === snoozeKey) return null
-  const list = candidates(accounts, currentId, sw, now)
+  const list = candidates(accounts, currentId, sw, now, by)
   return {
     ...hit,
     snoozeKey,
@@ -501,6 +530,64 @@ export function migrateSources(profiles: readonly BraidProfile[], target: string
     .map(p => ({ account: p.account, org: p.org, lastActivity: p.lastActivity, pending: (p.names ?? []).filter(n => !have.has(n) && !gone.has(recordId(n))).length }))
     .filter(s => s.pending > 0)
     .sort((a, b) => b.lastActivity - a.lastActivity)
+}
+
+// ── /braid 診斷：出問題時貼給幫忙的人看 ──
+
+/** 信箱只留第一個字與網域（貼出去給人看也不洩漏全名）。 */
+export function maskEmail(email: string | null): string | null {
+  if (!email) return null
+  const at = email.indexOf('@')
+  return at > 0 ? `${email[0]}***${email.slice(at)}` : '***'
+}
+
+export type Diagnosis = {
+  version: string | null
+  platform: BraidPlatform
+  entrypoint: string | null
+  signIn: SignIn | null
+  account: { label: string; id: string; email: string | null } | null
+  env: { home: string | null; userProfile: string | null; configDir: string | null }
+  desktop: { dir: string; active: string | null } | null
+  accounts: string[]
+  uses: string[]
+  sync: string | null
+  claude: string | null
+}
+
+const PLATFORM_TEXT: Record<BraidPlatform, string> = { wsl: 'WSL', windows: 'Windows 本機', mac: 'macOS', other: 'Linux 或其他（沒有桌面 app）' }
+
+/** 診斷的每一行：給人讀，不含任何憑證；帳號只列 id 開頭、信箱遮掉。 */
+export function diagnosisLines(d: Diagnosis): string[] {
+  const none = '（沒有）'
+  const how = !d.signIn
+    ? '還沒判斷（對話剛開始）'
+    : d.signIn.by === 'desktop'
+      ? '桌面 app 開的對話：app 給的環境變數 CLAUDE_CODE_ACCOUNT_UUID'
+      : d.signIn.by === 'token'
+        ? 'braid 用一年期憑證開的視窗（BRAID_ACCOUNT）'
+        : d.signIn.by === 'cli'
+          ? `Claude Code 自己的登入：${d.signIn.file}`
+          : d.signIn.why === 'no-file'
+            ? '找不到家目錄，不知道去哪裡讀 .claude.json'
+            : d.signIn.why === 'unreadable'
+              ? `讀不到 ${d.signIn.file}（沒有這個檔，或沒有權限）`
+              : `${d.signIn.file} 裡沒有登入資料（oauthAccount）：在這裡用 /login 登入過才有；用 API key 的認不出帳號`
+  const who = d.account ? `「${d.account.label}」（${short(d.account.id)}${d.account.email ? `，${maskEmail(d.account.email)}` : ''}）` : '認不出來'
+  const by = switchByOf(d.signIn) === 'desktop' ? '在桌面 app 換' : '用 /login 換（VS Code 插件、終端機；這段對話不用搬）'
+  return [
+    `braid 診斷${d.version ? `（${d.version}）` : ''}`,
+    `平台：${PLATFORM_TEXT[d.platform]}${d.entrypoint ? `；Claude Code 從 ${d.entrypoint} 啟動` : ''}`,
+    `這個對話的帳號：${who}`,
+    `  怎麼認的：${how}`,
+    `  換帳號：${by}`,
+    `家目錄：USERPROFILE=${d.env.userProfile ?? none}；HOME=${d.env.home ?? none}；CLAUDE_CONFIG_DIR=${d.env.configDir ?? none}`,
+    `桌面 app：${d.desktop ? `${d.desktop.dir}，現在登入 ${d.desktop.active ? short(d.desktop.active) : '讀不到'}` : '這台電腦找不到'}`,
+    `braid 認得的帳號：${d.accounts.length > 0 ? `${d.accounts.length} 個（${d.accounts.join('、')}）` : '沒有'}`,
+    `用法：${d.uses.length > 0 ? d.uses.join('、') : '還沒選'}`,
+    ...(d.sync ? [`同步：${d.sync}`] : []),
+    `claude 執行檔（新增帳號、更新用）：${d.claude ?? '找不到'}`,
+  ]
 }
 
 /** 帳號 id 的短寫，給沒有信箱可顯示的帳號用。 */

@@ -56,6 +56,11 @@ tests/                            工具的測試（Node＋classic-level 造資�
   zustand JSON `{state:{presets,placeDefaults,startedPlaces,…},version:4}`。`ccd-session-presets.json`
   只是副本：app 每次啟動用 Local Storage 覆寫它，只改副本會被蓋回（2026-10-16 實測）。
 - **目前帳號**：`<app 資料>/config.json` 的 `lastKnownAccountUuid`。
+- **每個地方是一套各自的 Claude Code**（2026-10-22 查證）：桌面 app 的對話用 app 自帶的 claude、帳號是 app 登入的
+  （app 放在環境變數 `CLAUDE_CODE_ACCOUNT_UUID`），側欄分帳號；VS Code 插件（Windows 本機）用插件自帶的
+  `%USERPROFILE%\.vscode\extensions\anthropic.claude-code-<版本>-win32-x64\resources\native-binary\claude.exe`，
+  帳號是 Windows 這邊 Claude Code 自己的登入（`%USERPROFILE%\.claude.json`，插件**不給**帳號的環境變數），對話紀錄不分帳號；
+  WSL 裡的 CLI 又是另一份 `~/.claude.json`。開發機上 Windows 與 WSL 那兩份就登入不同帳號。
 - `<app 資料>`：Windows `%APPDATA%\Claude`，macOS `~/Library/Application Support/Claude`。
 
 ## 驗證
@@ -195,6 +200,15 @@ tests/                            工具的測試（Node＋classic-level 造資�
   設計稿先在暫存資料夾用產生器輸出拼 462px 寬的假面板、Playwright 深淺色截圖看過再接進來。
 - **用量顯示**：狀態列（`$.ui.status`）只能放文字，寫 5 小時與 7 天；桌面版另外在輸入框下方那行（`PromptHint`）
   先拿 `next(e)` 畫好的 app 提示，再在旁邊接 `usageStrip` 的 SVG 量表，不蓋掉 app 自己的提示。
+- **認帳號與換帳號的說法看對話在哪裡跑**（0.11.0）：`seenNow` 依序看 `BRAID_ACCOUNT`、桌面 app 的 `CLAUDE_CODE_ACCOUNT_UUID`、
+  Claude Code 自己的 `.claude.json`，把**怎麼認的**記成 `signIn`（`model.ts` 的 `SignIn`）。`.claude.json` 在哪由 `claudeJsonAt` 決定：
+  `CLAUDE_CONFIG_DIR` 優先，Windows 的家目錄看 `USERPROFILE`（Claude Code 的 `os.homedir()` 也是），不看 `HOME`——
+  有些 Windows 設了 `HOME` 指到別處，舊版因此讀錯檔、認不出帳號（同事在 VS Code 遇到）。換帳號的說法由 `switchByOf(signIn)` 決定：
+  桌面 app 的對話「在桌面 app 換」；其他（VS Code、終端機）「用 /login 換，這段對話不用搬」，候選不分在不在桌面 app 登入過，
+  同步頁只說明不需要同步、不在那裡設定（那邊的帳號是插件的登入，拿來配對會配錯），也不問「從其他帳號搬過來」。
+  出問題時請使用者跑 `/braid 診斷`：列出平台、帳號怎麼認的、讀了哪個檔、家目錄與 `CLAUDE_CONFIG_DIR`、桌面 app 現在登入誰；
+  信箱遮掉、帳號只列 id 開頭，不含憑證。測試跑在 Linux 上，引擎把 Windows 路徑當成相對路徑接在 mod 資料夾後面，
+  測試世界的 `fs.read`／`fs.exists` 會還原成 `C:\…` 再查。
 - **找 claude 只有一個地方**：新增帳號、面板內更新都經 `register.tsx` 的 `findClaude`（找的順序在 `terminal.ts`
   的 `claudeLookup`：跑這個對話的那支、PATH、常見安裝位置、桌面 app 自帶的、新版先），交給視窗的一律是完整路徑。
   只靠 `CLAUDE_CODE_EXECPATH` 不夠：2026-10-19 有人在只裝桌面 app 的 Windows 上，面板拿不到這個變數、交了裸的 `claude`，

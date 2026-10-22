@@ -184,8 +184,10 @@ function world(on: On, opts: Opts = {}) {
     if (argv[0] === 'wslpath') return out(`/mnt/c/${(argv[2] ?? '').slice(3).replace(/\\/g, '/')}\n`)
     return out('')
   })
+  // 測試跑在 Linux 上，引擎把 Windows 路徑（C:\\…）當成相對路徑、接在 mod 資料夾後面：還原成原本的寫法再查
+  const real = (path: string) => (/[A-Za-z]:\\/.test(path) ? path.slice(path.search(/[A-Za-z]:\\/)) : path)
   on('fs.read', ($, e) => {
-    const text = e.path.endsWith('/tool/spec.json') ? SPEC : e.path.endsWith('/.claude-plugin/plugin.json') ? JSON.stringify({ name: 'braid', version: '0.3.4' }) : files[e.path]
+    const text = e.path.endsWith('/tool/spec.json') ? SPEC : e.path.endsWith('/.claude-plugin/plugin.json') ? JSON.stringify({ name: 'braid', version: '0.3.4' }) : files[real(e.path)]
     if (text === undefined) throw new Error(`ENOENT ${e.path}`)
     return { value: text }
   })
@@ -195,7 +197,7 @@ function world(on: On, opts: Opts = {}) {
     opts.onWrite?.(e.path, files)
     return { value: undefined }
   })
-  on('fs.exists', ($, e) => ({ value: e.path in files || e.path in dirs }))
+  on('fs.exists', ($, e) => ({ value: real(e.path) in files || real(e.path) in dirs }))
   // 目錄：上面列的，加上檔案表裡在它底下的檔（含寫進去的）與子資料夾
   on('fs.list', ($, e) => {
     const listed = new Map((dirs[e.path] ?? []).map(d => [d.name, d]))
@@ -383,6 +385,82 @@ describe('帳號與用量', () => {
     expect(await w.store.get('account:tok-00000002')).toBeUndefined()
     expect(w.runs.some(r => r.argv.join(' ').endsWith('/tool/cli/secret.sh delete tok-00000002'))).toBe(true)
     await ui.unmount()
+  })
+})
+
+describe('VS Code 插件（Windows 本機）：帳號是 Claude Code 自己的登入，用 /login 換', () => {
+  // 插件不給帳號的環境變數；有些 Windows 設了 HOME 指到別處，Claude Code 自己用的是 USERPROFILE
+  const VSCODE = {
+    WSL_DISTRO_NAME: '',
+    OS: 'Windows_NT',
+    CLAUDE_CODE_ACCOUNT_UUID: '',
+    CLAUDE_CODE_USER_EMAIL: '',
+    CLAUDE_CODE_ORGANIZATION_UUID: '',
+    CLAUDE_CODE_ENTRYPOINT: 'claude-vscode',
+    HOME: 'H:\\',
+    USERPROFILE: 'C:\\Users\\u',
+    APPDATA: 'C:\\Users\\u\\AppData\\Roaming',
+  }
+  const LOGIN = { 'C:\\Users\\u\\.claude.json': JSON.stringify({ oauthAccount: { accountUuid: W, emailAddress: 'me@corp.example', organizationUuid: OW } }) }
+
+  test('HOME 指到別處也照 USERPROFILE 找到登入、認出帳號；帳號頁說是哪裡的登入，其他帳號說用 /login 換', async ($, on) => {
+    const w = world(on, { env: VSCODE, files: LOGIN, store: { uses: USES_ALL, [`account:${P}`]: PERSONAL } })
+    await $.session.start(START)
+    expect((w.store.get(`account:${W}`) as { source: string }).source).toBe('cli')
+    for (const surface of SURFACES) {
+      const ui = await $.ui.mount({ ...PANE, surface })
+      expect(await shows(ui, /這個對話用的是 Claude Code 自己的登入（C:\\Users\\u\\\.claude\.json）。/)).toBe(true)
+      expect(await seen(ui, /用 \/login 換成它就能用，這段對話不用搬/)).toBe(true)
+      expect(await seen(ui, /在桌面 app 換成它/)).toBe(false)
+      await ui.unmount()
+    }
+  })
+
+  test('用量快用完：說用 /login 換成下一個帳號、這段對話不用搬，不提桌面 app 與同步；同步頁說不需要同步', async ($, on) => {
+    const w = world(on, { env: VSCODE, files: LOGIN, store: { uses: USES_ALL, sync: SYNC_ON, [`account:${P}`]: PERSONAL } })
+    await $.session.start(START)
+    await $.session.measure(measure(92) as never)
+    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    expect(await shows(band, /用 \/login 換成「個人」就能接著做，這段對話不用搬。/)).toBe(true)
+    expect(await shows(band, /桌面 app/)).toBe(false)
+    await band.unmount()
+    await $.command.run(RUN('同步'))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await shows(ui, /這個對話在 VS Code 或終端機：對話紀錄本來就不分帳號/)).toBe(true)
+    expect(await ui.find({ key: 'sy-partner' })).toBeUndefined() // 不在這裡設定同步：這裡的帳號是插件的登入，會配錯對
+    await ui.unmount()
+    void w
+  })
+
+  test('.claude.json 裡沒有登入資料：認不出帳號，帳號頁說要先 /login；/braid 診斷 說出原因，不含憑證', async ($, on) => {
+    world(on, { env: VSCODE, store: { uses: USES_ALL }, files: { 'C:\\Users\\u\\.claude.json': JSON.stringify({ primaryApiKey: 'sk-ant-api03-SECRET' }) } })
+    await $.session.start(START)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await shows(ui, /認不出這個對話用的是哪個帳號。打 \/braid 診斷 可以看是哪裡認不出來。/)).toBe(true)
+    expect(await shows(ui, /C:\\Users\\u\\\.claude\.json 裡沒有登入資料：在這裡用 \/login 登入過，braid 才認得出來。/)).toBe(true)
+    await ui.unmount()
+    const { text } = await $.command.run(RUN('診斷'))
+    expect(text).toMatch(/^braid 診斷（0\.3\.4）\n平台：Windows 本機；Claude Code 從 claude-vscode 啟動\n這個對話的帳號：認不出來\n/)
+    expect(text).toMatch(/怎麼認的：C:\\Users\\u\\\.claude\.json 裡沒有登入資料/)
+    expect(text).toMatch(/家目錄：USERPROFILE=C:\\Users\\u；HOME=H:\\；CLAUDE_CONFIG_DIR=（沒有）/)
+    expect(text).not.toMatch(/sk-ant/)
+  })
+})
+
+describe('/braid 診斷', () => {
+  test('桌面 app 的對話：說是 app 給的環境變數、在桌面 app 換；列出桌面 app 現在登入誰與同步；信箱遮掉', async ($, on) => {
+    world(on, { store: { uses: USES_ALL, sync: SYNC_ON, [`account:${P}`]: PERSONAL } })
+    await $.session.start(START)
+    const { text } = await $.command.run(RUN('診斷'))
+    const lines = (text ?? '').split('\n')
+    expect(lines[1]).toBe('平台：WSL')
+    expect(lines[2]).toBe('這個對話的帳號：「公司」（aaaaaaaa…，m***@corp.example）')
+    expect(lines[3]).toBe('  怎麼認的：桌面 app 開的對話：app 給的環境變數 CLAUDE_CODE_ACCOUNT_UUID')
+    expect(lines[4]).toBe('  換帳號：在桌面 app 換')
+    expect(text).toMatch(/桌面 app：\/mnt\/c\/Users\/u\/AppData\/Roaming\/Claude，現在登入 aaaaaaaa…/)
+    expect(text).toMatch(/同步：開，公司 ↔ 個人/)
+    expect(text).not.toMatch(/me@corp\.example/)
+    expect((await $.command.run(RUN('diagnose'))).text).toBe(text)
   })
 })
 

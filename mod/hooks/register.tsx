@@ -12,6 +12,7 @@ import { atom, read, update } from 'claude-code'
 import type { ElementTable, EngineInterface, Register } from 'claude-code'
 
 import type {
+  BraidSignIn,
   BraidAccount,
   BraidAdd,
   BraidCredential,
@@ -48,6 +49,8 @@ import {
   fmtBytes,
   fmtReset,
   meter,
+  claudeJsonAt,
+  diagnosisLines,
   migrateSources,
   mirrorTarget,
   nameOf,
@@ -71,6 +74,7 @@ import {
   seenFromClaudeJson,
   SEVEN_DAY_CHOICES,
   syncRequest,
+  switchByOf,
   syncRows,
   sameEmail,
   upsertSeen,
@@ -114,13 +118,14 @@ const newOwnerAtom = atom({ plugin: 'braid', key: 'newOwner' } as const, null)
 const skipAskAtom = atom({ plugin: 'braid', key: 'skipAsk' } as const, null)
 const skipWaitingAtom = atom({ plugin: 'braid', key: 'skipWaiting' } as const, false)
 const viaTokenAtom = atom({ plugin: 'braid', key: 'viaToken' } as const, false)
+const signInAtom = atom({ plugin: 'braid', key: 'signIn' } as const, null)
 const helpAtom = atom({ plugin: 'braid', key: 'help' } as const, null)
 const migrateAskedAtom = atom({ plugin: 'braid', key: 'migrateAsked' } as const, [])
 const tzAtom = atom({ plugin: 'braid', key: 'tz' } as const, 0)
 
 // ── 指令 ────────────────────────────────────────────────────
 
-type ActionName = 'migrate' | 'accounts' | 'switch' | 'sync' | 'policy'
+type ActionName = 'migrate' | 'accounts' | 'switch' | 'sync' | 'policy' | 'diagnose'
 type Action = { name: ActionName; aliases: readonly string[]; usage: string; summary: string }
 
 const ACTIONS: readonly Action[] = [
@@ -128,6 +133,12 @@ const ACTIONS: readonly Action[] = [
   { name: 'switch', aliases: ['切換'], usage: 'switch', summary: '打開面板的切換頁：用量快用完時提醒你換哪個帳號' },
   { name: 'sync', aliases: ['同步'], usage: 'sync', summary: '打開面板的同步頁：桌面 app 的兩個帳號自動同步對話，額度用完換過去就能接著做' },
   { name: 'policy', aliases: ['歸屬'], usage: 'policy', summary: '打開面板的歸屬頁：資料夾歸哪個帳號、待發布的頁' },
+  {
+    name: 'diagnose',
+    aliases: ['診斷'],
+    usage: '診斷',
+    summary: '列出這個對話在哪裡跑、帳號是怎麼認出來的、讀了哪些檔：出問題時把結果貼給幫你的人（不含任何憑證）',
+  },
   {
     name: 'migrate',
     aliases: ['遷移'],
@@ -220,22 +231,47 @@ async function localTz($: $, platform: BraidPlatform): Promise<number> {
 }
 
 /** 這個對話用的是哪個帳號：braid 開的視窗、桌面 app 給的環境變數、CLI 自己的登入，依序看。 */
-async function seenNow($: $): Promise<Seen | null> {
+async function seenNow($: $, platform: BraidPlatform): Promise<{ seen: Seen | null; signIn: BraidSignIn }> {
   const braid = await $.env.get('BRAID_ACCOUNT')
-  if (braid) return { id: braid, email: null, orgId: null, orgName: null, source: 'token' }
+  if (braid) return { seen: { id: braid, email: null, orgId: null, orgName: null, source: 'token' }, signIn: { by: 'token', file: null } }
   const uuid = await $.env.get('CLAUDE_CODE_ACCOUNT_UUID')
   if (uuid) {
     return {
-      id: uuid,
-      email: (await $.env.get('CLAUDE_CODE_USER_EMAIL')) ?? null,
-      orgId: (await $.env.get('CLAUDE_CODE_ORGANIZATION_UUID')) ?? null,
-      orgName: null,
-      source: 'desktop',
+      seen: {
+        id: uuid,
+        email: (await $.env.get('CLAUDE_CODE_USER_EMAIL')) ?? null,
+        orgId: (await $.env.get('CLAUDE_CODE_ORGANIZATION_UUID')) ?? null,
+        orgName: null,
+        source: 'desktop',
+      },
+      signIn: { by: 'desktop', file: null },
     }
   }
-  const dir = await $.env.get('CLAUDE_CONFIG_DIR')
-  const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
-  const file = dir ? `${dir}/.claude.json` : home ? `${home}/.claude.json` : null
+  // VS Code 插件與終端機：插件不給帳號的環境變數，只能讀 Claude Code 自己的登入
+  const file = await claudeJsonFile($, platform)
+  if (!file) return { seen: null, signIn: { by: 'none', file: null, why: 'no-file' } }
+  let text: string
+  try {
+    text = await $.fs.read(file)
+  } catch {
+    return { seen: null, signIn: { by: 'none', file, why: 'unreadable' } }
+  }
+  const seen = seenFromClaudeJson(text)
+  return seen ? { seen, signIn: { by: 'cli', file } } : { seen: null, signIn: { by: 'none', file, why: 'no-login' } }
+}
+
+/** Claude Code 自己的登入存在哪個 .claude.json（規則在 model.ts 的 claudeJsonAt：Windows 看 USERPROFILE）。 */
+async function claudeJsonFile($: $, platform: BraidPlatform): Promise<string | null> {
+  return claudeJsonAt(platform, {
+    configDir: await $.env.get('CLAUDE_CONFIG_DIR'),
+    home: await $.env.get('HOME'),
+    userProfile: await $.env.get('USERPROFILE'),
+  })
+}
+
+/** CLI 自己 /login 的帳號：讀 .claude.json（CLAUDE_CONFIG_DIR 或家目錄底下的）。 */
+async function cliLoginSeen($: $, platform: BraidPlatform): Promise<Seen | null> {
+  const file = await claudeJsonFile($, platform)
   if (!file) return null
   try {
     return seenFromClaudeJson(await $.fs.read(file))
@@ -244,17 +280,50 @@ async function seenNow($: $): Promise<Seen | null> {
   }
 }
 
-/** CLI 自己 /login 的帳號：讀 ~/.claude.json（或 CLAUDE_CONFIG_DIR 底下的）。 */
-async function cliLoginSeen($: $): Promise<Seen | null> {
-  const dir = await $.env.get('CLAUDE_CONFIG_DIR')
-  const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
-  const file = dir ? `${dir}/.claude.json` : home ? `${home}/.claude.json` : null
-  if (!file) return null
+/** /braid 診斷：這個對話在哪裡跑、帳號怎麼認出來的、讀了哪些檔。不含任何憑證，信箱遮掉。 */
+async function diagnose($: $): Promise<string> {
+  const platform = (await read($, platformAtom)) ?? (await detectPlatform($))
+  const accounts = await read($, accountsAtom)
+  const current = await read($, currentAtom)
+  const cur = current ? accounts[current] : undefined
+  let version: string | null = null
   try {
-    return seenFromClaudeJson(await $.fs.read(file))
+    version = versionIn(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))
   } catch {
-    return null
+    version = null
   }
+  const paths = platform === 'other' ? null : await desktopPaths(desktopIo($), await desktopEnv($), platform)
+  let active: string | null = null
+  if (paths) {
+    try {
+      const v: unknown = (JSON.parse(await $.fs.read(`${paths.appData}${platform === 'windows' ? '\\' : '/'}config.json`)) as Record<string, unknown>).lastKnownAccountUuid
+      active = typeof v === 'string' && v ? v : null
+    } catch {
+      active = null
+    }
+  }
+  const uses = await read($, usesAtom)
+  const sy = await read($, syncAtom)
+  const m = await read($, mirrorAtom)
+  const names = { switch: '切換', sync: '同步', policy: '歸屬' } as const
+  const label = (id: string) => accounts[id]?.label ?? `帳號 ${id.slice(0, 8)}…`
+  const sync =
+    uses?.sync && sy.pair.length === 2
+      ? `${sy.on ? '開' : '關'}，${label(sy.pair[0] as string)} ↔ ${label(sy.pair[1] as string)}${m ? `；上次 ${m.problem ? `沒同步成（${m.problem}）` : `新增 ${m.created}、更新 ${m.updated}、刪除 ${m.deleted}`}` : ''}`
+      : null
+  return diagnosisLines({
+    version,
+    platform,
+    entrypoint: (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) ?? null,
+    signIn: await read($, signInAtom),
+    account: cur ? { label: cur.label, id: cur.id, email: cur.email } : null,
+    env: { home: (await $.env.get('HOME')) ?? null, userProfile: (await $.env.get('USERPROFILE')) ?? null, configDir: (await $.env.get('CLAUDE_CONFIG_DIR')) ?? null },
+    desktop: paths ? { dir: paths.appData, active } : null,
+    accounts: Object.values(accounts).map(a => a.label),
+    uses: uses ? (Object.keys(names) as (keyof typeof names)[]).filter(k => uses[k]).map(k => names[k]) : [],
+    sync,
+    claude: await findClaude($, platform),
+  }).join('\n')
 }
 
 // ── 存取：設定與帳號存在 $.store（跨對話），同時寫進 $.state 讓畫面重畫 ──
@@ -1136,6 +1205,7 @@ async function waitingHere($: $, cur: BraidAccount): Promise<{ id: string; title
 async function migrateNudge($: $, current: string): Promise<{ name: string; pending: number; more: number } | null> {
   const desktop = await read($, desktopAtom)
   if (!desktop || desktop.error || desktop.active !== current) return null
+  if ((await read($, signInAtom))?.by !== 'desktop') return null // 搬的是桌面 app 的側欄，VS Code 與終端機的對話本來就不分帳號
   if ((await read($, migrateAskedAtom)).includes(current)) return null
   const uses = await read($, usesAtom)
   const sy = await read($, syncAtom)
@@ -1399,6 +1469,8 @@ async function drawAccounts($: $, ui: UI, width: number) {
   const sy = await read($, syncAtom)
   const syncedWith = (id: string) => !!uses?.sync && sy.on && !!current && sy.pair.includes(current) && sy.pair.includes(id)
   const sw = await read($, switchAtom)
+  const signIn = await read($, signInAtom)
+  const by = switchByOf(signIn)
   const { Svg } = ui
 
   const block = (a: BraidAccount, isCurrent: boolean) => {
@@ -1433,7 +1505,9 @@ async function drawAccounts($: $, ui: UI, width: number) {
     // 換帳號一律是使用者自己在桌面 app 換：同步中的說對話會跟過去，沒在 app 登入過的說要先登入
     const note = isCurrent
       ? null
-      : syncedWith(a.id)
+      : by === 'login'
+        ? { tone: 'good' as const, text: '用 /login 換成它就能用，這段對話不用搬' }
+        : syncedWith(a.id)
         ? { tone: 'sync' as const, text: '在桌面 app 換成它就能接著做，對話會自動同步' }
         : a.source === 'desktop'
           ? { tone: 'good' as const, text: '在桌面 app 換成它就能用' }
@@ -1504,9 +1578,17 @@ async function drawAccounts($: $, ui: UI, width: number) {
   const others = orderedIds(accounts, []).filter(id => id !== current).map(id => accounts[id] as BraidAccount)
   return (
     <Box flexDirection="column" gap={1}>
-      {pageHead(ui, 'acc-head', '帳號', '這台電腦認得的帳號與各自的用量。換帳號在桌面 app 自己換；開了同步，對話會跟過去。')}
+      {pageHead(
+        ui,
+        'acc-head',
+        '帳號',
+        by === 'login'
+          ? '這台電腦認得的帳號與各自的用量。這個對話在 VS Code 或終端機：用 /login 換帳號，這段對話不用搬。'
+          : '這台電腦認得的帳號與各自的用量。換帳號在桌面 app 自己換；開了同步，對話會跟過去。',
+      )}
       {sectionHead(ui, 'acc-cur-head', '目前使用')}
-      {cur ? block(cur, true) : <Text dimColor>認不出這個對話用的是哪個帳號。</Text>}
+      {cur ? block(cur, true) : <Text dimColor>認不出這個對話用的是哪個帳號。打 /braid 診斷 可以看是哪裡認不出來。</Text>}
+      {signInText(signIn) && fine(ui, signInText(signIn) as string, 'acc-signin')}
       {sectionHead(ui, 'acc-other-head', '其他帳號')}
       {others.length === 0 && <Text dimColor>還沒有其他帳號。在桌面 app 用別的帳號開過對話、或按下面的按鈕新增，就會出現在這裡。</Text>}
       {others.map(a => block(a, false))}
@@ -1514,6 +1596,17 @@ async function drawAccounts($: $, ui: UI, width: number) {
       {await drawMigrateHere($, ui)}
     </Box>
   )
+}
+
+/** 帳號頁「目前使用」下面那一行：這個對話的帳號是從哪裡來的。 */
+function signInText(signIn: BraidSignIn | null): string | null {
+  if (!signIn) return null
+  if (signIn.by === 'desktop') return '這個對話用的是桌面 app 登入的帳號。'
+  if (signIn.by === 'token') return '這個視窗是 braid 用一年期憑證開的。'
+  if (signIn.by === 'cli') return `這個對話用的是 Claude Code 自己的登入（${signIn.file}）。`
+  if (signIn.why === 'no-login') return `${signIn.file} 裡沒有登入資料：在這裡用 /login 登入過，braid 才認得出來。`
+  if (signIn.why === 'unreadable') return `讀不到 ${signIn.file}。`
+  return null
 }
 
 async function drawAdd($: $, ui: UI) {
@@ -1675,13 +1768,20 @@ async function drawSwitch($: $, ui: UI) {
   const platform = await read($, platformAtom)
   const now = await $.clock.now()
   const order = orderedIds(accounts, sw.order)
-  const why = new Map(current ? candidates(accounts, current, sw, now).map(c => [c.account.id, c.why]) : [])
+  const why = new Map(current ? candidates(accounts, current, sw, now, switchByOf(await read($, signInAtom))).map(c => [c.account.id, c.why]) : [])
   const { Svg } = ui
   const cur = current ? accounts[current] : undefined
   const liveNow = (await read($, liveAtom)) ?? cur?.usage ?? null
   return (
     <Box flexDirection="column" gap={1}>
-      {pageHead(ui, 'sw-head', '切換', '快用完時提醒你，在桌面 app 換成下一個帳號。')}
+      {pageHead(
+        ui,
+        'sw-head',
+        '切換',
+        switchByOf(await read($, signInAtom)) === 'login'
+          ? '快用完時提醒你換成下一個帳號：在這裡用 /login 換，這段對話不用搬。'
+          : '快用完時提醒你，在桌面 app 換成下一個帳號。',
+      )}
       {Svg && cur ? (
         <Box key="sw-hero" borderStyle="round" paddingX={1} paddingY={1}>
           {(() => {
@@ -1779,6 +1879,17 @@ async function drawSync($: $, ui: UI) {
   const sy = await read($, syncAtom)
   const accounts = await read($, accountsAtom)
   const current = await read($, currentAtom)
+  if (switchByOf(await read($, signInAtom)) === 'login') {
+    // 同步搬的是桌面 app 的側欄；這個對話的帳號是 VS Code 或終端機自己的登入，拿它來設定同步會配錯對
+    return (
+      <Box flexDirection="column" gap={1}>
+        {pageHead(ui, 'sy-head', '同步', '同步是給桌面 app 的側欄用的。')}
+        {fine(ui, '這個對話在 VS Code 或終端機：對話紀錄本來就不分帳號，用 /login 換帳號後這段對話還在，不需要同步。')}
+        {fine(ui, '要設定桌面 app 兩個帳號的同步，請在桌面 app 的對話裡打開 braid。')}
+        {drawMirrorStatus($, ui, sy, accounts, await read($, mirrorAtom), await $.clock.now())}
+      </Box>
+    )
+  }
   const partner = partnerOf(sy, current)
   const known = [...new Set([...desktop.profiles.map(p => p.account), ...Object.values(accounts).filter(a => a.source === 'desktop').map(a => a.id)])].filter(id => id !== current)
   const rows = current && partner ? syncRows(desktop.profiles, current, partner, sy.folders) : []
@@ -2216,7 +2327,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'braid',
       description: 'Claude 帳號工具：打開面板管理帳號、用量切換、同步；migrate＝桌面 app 換帳號後把舊對話搬過來',
-      argumentHint: '[帳號|切換|同步|migrate [試跑]]',
+      argumentHint: '[帳號|切換|同步|診斷|migrate [試跑]]',
     })
     // $.state 在外掛更新、重新載入後還留著上一版寫的值。從磁碟讀來的暫存一律丟掉重讀，
     // 不然新版讀到舊版的形狀（例如 0.3.1 的桌面資料沒有 trash）畫面就壞了（0.3.2 更新後面板空白）
@@ -2234,15 +2345,16 @@ export const register: Register = on => {
     await update($, tzAtom, () => tz)
     await loadStore($)
     // CLI 自己 /login 的帳號（~/.claude.json）：加進帳號清單（換帳號由使用者自己在桌面 app 或終端機做）
-    const login = await cliLoginSeen($)
+    const login = await cliLoginSeen($, platform)
     // 已經認得的帳號不動（同一個帳號也是桌面 app 的帳號時，來源要留「桌面」）；沒見過的才加進清單
     const knownAccounts = await read($, accountsAtom)
     if (login && !knownAccounts[login.id]) await putAccount($, upsertSeen(knownAccounts, login, await $.clock.now()))
     const uses = await read($, usesAtom)
     // 排著的頁也重讀：這個資料夾有頁在等歸屬時，輸入框上方才問得到
     if (uses?.policy) $.clock.after(1, () => refreshPages($))
-    const seen = await seenNow($)
+    const { seen, signIn } = await seenNow($, platform)
     await update($, viaTokenAtom, () => seen?.source === 'token')
+    await update($, signInAtom, () => signIn)
     if (seen) {
       const accounts = await read($, accountsAtom)
       // 先前用 braid 新增憑證的同一個帳號（tok-…，信箱相同）：併成一筆，憑證掛到認出來的帳號上
@@ -2294,6 +2406,8 @@ export const register: Register = on => {
     switch (action.name) {
       case 'migrate':
         return { text: await migrate($, rest) }
+      case 'diagnose':
+        return { text: await diagnose($) }
       case 'accounts':
       case 'switch':
       case 'sync':
@@ -2326,12 +2440,15 @@ export const register: Register = on => {
     const syncedTo = uses?.sync && sy.on && m && m.active === current && m.to && !m.problem ? m.to : null
 
     // 用量快用完：提醒在桌面 app 換成哪個帳號（braid 不替你換）。不看歸屬：歸屬只管新頁歸誰
-    const band = uses?.switch ? bandFor(accounts, current, await read($, liveAtom), await read($, switchAtom), now, await read($, snoozeAtom)) : null
+    const by = switchByOf(await read($, signInAtom))
+    const band = uses?.switch ? bandFor(accounts, current, await read($, liveAtom), await read($, switchAtom), now, await read($, snoozeAtom), by) : null
     if (band && cur) {
       const reset = fmtReset(band.resetsAt, now, await read($, tzAtom))
       const head = band.kind === 'out' ? `${cur.label} ${WINDOW_NAMES[band.window]}用量用完了` : `${cur.label} ${WINDOW_NAMES[band.window]}用量 ${band.pct}%`
-      const synced = syncedTo ? mirrorName(accounts, syncedTo, m?.toOrg ?? null) : null
-      const detail = synced
+      const synced = by === 'desktop' && syncedTo ? mirrorName(accounts, syncedTo, m?.toOrg ?? null) : null
+      const detail = by === 'login'
+        ? `${band.next ? `用 /login 換成「${band.next.label}」` : '用 /login 換成另一個帳號'}就能接著做，這段對話不用搬。`
+        : synced
         ? `在桌面 app 換成「${synced}」就能接著做，對話都已同步過去。`
         : band.next
           ? `可以在桌面 app 換成「${band.next.label}」${uses?.sync ? '' : '；在 braid 開啟同步，對話就會自動跟過去'}。`

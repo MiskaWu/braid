@@ -25,8 +25,12 @@ import {
   normalizeMirror,
   normalizeSwitch,
   normalizeSync,
+  claudeJsonAt,
+  diagnosisLines,
+  maskEmail,
   migrateSources,
   normalizeUses,
+  switchByOf,
   orderedIds,
   isOrgId,
   parseTz,
@@ -200,6 +204,61 @@ describe('換帳號的規則', () => {
       ['tok', 'elsewhere'], // braid 新增的：有憑證也要先在桌面 app 登入
       ['login', 'elsewhere'], // 只在終端機 /login 的
     ])
+  })
+})
+
+describe('這個對話的帳號從哪裡認', () => {
+  test('.claude.json 在哪：CLAUDE_CONFIG_DIR 優先；Windows 看 USERPROFILE、不看 HOME（HOME 指到別處也不會讀錯）', async () => {
+    expect(claudeJsonAt('windows', { home: 'H:\\', userProfile: 'C:\\Users\\u' })).toBe('C:\\Users\\u\\.claude.json')
+    expect(claudeJsonAt('windows', { home: 'H:\\' })).toBe('H:\\.claude.json') // 沒有 USERPROFILE 才退回 HOME
+    expect(claudeJsonAt('windows', { configDir: 'D:\\cc\\', userProfile: 'C:\\Users\\u' })).toBe('D:\\cc\\.claude.json')
+    expect(claudeJsonAt('wsl', { home: '/home/u', userProfile: 'C:\\Users\\u' })).toBe('/home/u/.claude.json')
+    expect(claudeJsonAt('mac', {})).toBe(null)
+  })
+
+  test('換帳號的方法：桌面 app 開的對話在 app 換，其他（VS Code、終端機、braid 視窗、認不出來）用 /login', async () => {
+    expect(switchByOf({ by: 'desktop', file: null })).toBe('desktop')
+    expect(switchByOf({ by: 'cli', file: '/h/.claude.json' })).toBe('login')
+    expect(switchByOf({ by: 'none', file: null, why: 'no-file' })).toBe('login')
+    expect(switchByOf(null)).toBe('login')
+  })
+
+  test('用 /login 換的時候：braid 新增的、只在終端機登入的帳號也能換（不分在不在桌面 app 登入過）', async () => {
+    const tok = account('tok', { source: 'token', credential: 'file', credentialId: 'tok' })
+    expect(candidates({ work, tok }, 'work', DEFAULT_SWITCH, NOW, 'desktop').map(c => c.why)).toEqual(['elsewhere'])
+    expect(candidates({ work, tok }, 'work', DEFAULT_SWITCH, NOW, 'login').map(c => c.why)).toEqual(['ok'])
+  })
+
+  test('診斷：說清楚怎麼認的、去哪裡讀；信箱遮掉、帳號只列 id 開頭', async () => {
+    const base = {
+      version: '0.11.0',
+      platform: 'windows' as const,
+      entrypoint: 'claude-vscode',
+      account: { label: '公司', id: 'aaaaaaaa-1111', email: 'miska@corp.example' },
+      env: { home: 'H:\\', userProfile: 'C:\\Users\\u', configDir: null },
+      desktop: { dir: 'C:\\Users\\u\\AppData\\Roaming\\Claude', active: 'bbbbbbbb-2222' },
+      accounts: ['公司', '個人'],
+      uses: ['切換', '同步'],
+      sync: null,
+      claude: 'C:\\x\\claude.exe',
+    }
+    const lines = diagnosisLines({ ...base, signIn: { by: 'cli', file: 'C:\\Users\\u\\.claude.json' } })
+    expect(lines).toEqual([
+      'braid 診斷（0.11.0）',
+      '平台：Windows 本機；Claude Code 從 claude-vscode 啟動',
+      '這個對話的帳號：「公司」（aaaaaaaa…，m***@corp.example）',
+      '  怎麼認的：Claude Code 自己的登入：C:\\Users\\u\\.claude.json',
+      '  換帳號：用 /login 換（VS Code 插件、終端機；這段對話不用搬）',
+      '家目錄：USERPROFILE=C:\\Users\\u；HOME=H:\\；CLAUDE_CONFIG_DIR=（沒有）',
+      '桌面 app：C:\\Users\\u\\AppData\\Roaming\\Claude，現在登入 bbbbbbbb…',
+      'braid 認得的帳號：2 個（公司、個人）',
+      '用法：切換、同步',
+      'claude 執行檔（新增帳號、更新用）：C:\\x\\claude.exe',
+    ])
+    const none = diagnosisLines({ ...base, account: null, signIn: { by: 'none', file: 'C:\\Users\\u\\.claude.json', why: 'no-login' } })
+    expect(none[2]).toBe('這個對話的帳號：認不出來')
+    expect(none[3]).toMatch(/裡沒有登入資料（oauthAccount）：在這裡用 \/login 登入過才有/)
+    expect([maskEmail('a@b.c'), maskEmail(null), maskEmail('nope')]).toEqual(['a***@b.c', null, '***'])
   })
 })
 

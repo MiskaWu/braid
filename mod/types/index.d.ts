@@ -84,6 +84,13 @@ export type BraidUpdate = {
 /** 備份留多久：同步刪掉的對話備份留幾天、遷移工具的整份備份留最新幾份；null＝一直留著。 */
 export type BraidKeep = { deletedDays: number | null; toolCopies: number | null }
 
+/** 這個對話的帳號是怎麼認出來的（見 model.ts 的 SignIn）。 */
+export type BraidSignIn =
+  | { by: 'token'; file: null }
+  | { by: 'desktop'; file: null }
+  | { by: 'cli'; file: string }
+  | { by: 'none'; file: string | null; why: 'no-file' | 'unreadable' | 'no-login' }
+
 export type BraidTab = 'accounts' | 'switch' | 'sync' | 'policy'
 
 export type BraidPlatform = 'wsl' | 'windows' | 'mac' | 'other'
@@ -150,6 +157,8 @@ declare module 'claude-code' {
       help: string | null
       /** 這個對話是 braid 用一年期憑證開的（官方只保證 /login 的對話能發布頁面） */
       viaToken: boolean
+      /** 這個對話的帳號是怎麼認出來的：決定換帳號的說法（桌面 app 換，或 /login）與 /braid 診斷 */
+      signIn: BraidSignIn | null
       /** 這個對話裡按過「之後再說」的「有新頁等這個帳號發布」 */
       skipWaiting: boolean
       /** 這個對話裡按過「之後再說」的專案（不再問歸屬） */
