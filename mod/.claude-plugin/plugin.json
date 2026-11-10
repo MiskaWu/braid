@@ -1,6 +1,6 @@
 {
   "name": "braid",
-  "version": "0.11.1",
+  "version": "0.11.2",
   "description": "Claude 的多帳號工具：面板管理這台電腦的帳號與用量、用量快用完時提醒換哪個帳號、桌面 app 換帳號後同步或遷移對話與環境（/braid）。",
   "author": {
     "name": "MiskaWu",

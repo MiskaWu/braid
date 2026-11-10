@@ -200,6 +200,14 @@ function world(on: On, opts: Opts = {}) {
     return { value: undefined }
   })
   on('fs.exists', ($, e) => ({ value: real(e.path) in files || real(e.path) in dirs }))
+  // 快速檢查看的是修改時間與大小：模擬 app 改檔時要一起改 mtimes，只改內容、長度又一樣就看不出變化（和真的一樣）
+  on('fs.stat', ($, e) => {
+    const p = real(e.path)
+    const text = files[p]
+    if (text !== undefined) return { value: { kind: 'file' as const, size: text.length, mtimeMs: mtimes[p] ?? NOW, isLink: false } }
+    if (p in dirs) return { value: { kind: 'dir' as const, size: 0, mtimeMs: NOW, isLink: false } }
+    throw new Error(`ENOENT ${e.path}`)
+  })
   // 目錄：上面列的，加上檔案表裡在它底下的檔（含寫進去的）與子資料夾
   on('fs.list', ($, e) => {
     const listed = new Map((dirs[e.path] ?? []).map(d => [d.name, d]))
@@ -942,6 +950,56 @@ describe('同步', () => {
     expect(await seen(ui, /上次同步 剛剛：刪除 1/)).toBe(true)
     expect(await seen(ui, /同步刪掉的對話：1 筆/)).toBe(true) // 備份統計數得到剛存的那筆
     await ui.unmount()
+  })
+
+  // 2026-11-09 實測：在舊帳號封存一則，16 秒後就登出換帳號；同步一分鐘才一次，那則在新帳號沒封存。
+  // 換過去之後新帳號是作用中、不能再寫，所以這兩條都要在「下一次一分鐘」之前就帶過去，不能等計時器。
+  test('封存後幾秒就換帳號：app 改寫封存清單的當下就同步，不等一分鐘', async ($, on) => {
+    const here = `${SESS}/${W}/${OW}`
+    const target = `${SESS}/${P}/${OP}`
+    const w = world(on, { store: { uses: USES_ALL, sync: SYNC_ON }, files: { [`${here}/local_x.json`]: rec('x', { title: 'X' }) } })
+    await $.session.start(START)
+    await w.clock.advance(3_000)
+    expect(JSON.parse(w.files[`${target}/local_x.json`] ?? '{}').isArchived).toBeUndefined()
+    await w.clock.advance(7_000)
+    // app 封存 x：紀錄與封存清單一起改
+    w.files[`${here}/local_x.json`] = rec('x', { title: 'X', isArchived: true })
+    w.mtimes[`${here}/local_x.json`] = NOW + 10_000
+    w.files[`${here}/archived-sessions.idx`] = JSON.stringify({ v: 1, archived: ['local_x'] })
+    w.mtimes[`${here}/archived-sessions.idx`] = NOW + 10_000
+    await w.clock.advance(2_000)
+    expect(JSON.parse(w.files[`${target}/local_x.json`] ?? '{}').isArchived).toBe(true)
+    expect(JSON.parse(w.files[`${target}/archived-sessions.idx`] ?? 'null')).toEqual({ v: 1, archived: ['local_x'] })
+    // 沒有再變：不會每兩秒同步一次
+    const at = w.store.get('mirrorAt')
+    await w.clock.advance(10_000)
+    expect(w.store.get('mirrorAt')).toBe(at)
+  })
+
+  test('刪掉一則就登出換帳號：登出時 app 改寫 config.json（登入帳號還沒換），那一刻就把刪除帶過去', async ($, on) => {
+    const here = `${SESS}/${W}/${OW}`
+    const target = `${SESS}/${P}/${OP}`
+    const w = world(on, { store: { uses: USES_ALL, sync: SYNC_ON }, files: { [`${here}/local_y.json`]: rec('y', { title: 'Y' }) } })
+    await $.session.start(START)
+    await w.clock.advance(3_000)
+    expect(w.files[`${target}/local_y.json`]).toBeDefined()
+    await w.clock.advance(7_000)
+    // app 刪 y：拿掉紀錄、留刪除紀錄；y 沒封存過，封存清單不會動
+    delete w.files[`${here}/local_y.json`]
+    w.files[`${here}/deleted_y`] = String(NOW + 10_000)
+    w.mtimes[`${here}/deleted_y`] = NOW + 10_000
+    await w.clock.advance(1_000)
+    // 登出：config.json 改寫了，記的登入帳號還是 W
+    w.mtimes[`${APP}/config.json`] = NOW + 11_000
+    await w.clock.advance(2_000)
+    expect(w.files[`${target}/local_y.json`]).toBeUndefined()
+    expect(w.files[`${target}/deleted_y`]).toBe(String(NOW + 10_000))
+    // 登入 P：之後方向反過來，y 也不會被帶回去
+    w.files[`${APP}/config.json`] = JSON.stringify({ lastKnownAccountUuid: P })
+    w.mtimes[`${APP}/config.json`] = NOW + 30_000
+    await w.clock.advance(20_000)
+    expect(w.store.get('mirror')).toMatchObject({ active: P, to: W })
+    expect(w.files[`${here}/local_y.json`]).toBeUndefined()
   })
 
   test('刪不掉：狀態說同步失敗，刪除紀錄不留', async ($, on) => {

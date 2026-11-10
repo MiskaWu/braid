@@ -531,21 +531,71 @@ async function ensureDesktop($: $, force = false): Promise<void> {
 
 // 每個對話各有一個計時器；跨對話用 $.store 的 mirrorAt 節流，同時開好幾個對話也大約一分鐘一次
 let mirrorTimer: { cancel: () => void } | null = null
+let probeTimer: { cancel: () => void } | null = null
 let mirroring = false
 // 桌面 app 的資料夾：WSL 裡要問 cmd.exe，不必每分鐘問一次
 let pathsCache: DesktopPaths | null = null
 const MIRROR_EVERY_MS = 60_000
+/**
+ * 快速檢查的間隔：只看兩個檔的修改時間與大小，一次幾毫秒（整個側欄資料夾列一次在 /mnt/c 上要 1～2 秒）。
+ * 為什麼要有：只靠每分鐘一次，換帳號前最後一分鐘的封存、刪除來不及帶過去，換過去之後那個帳號是作用中、不能再寫，
+ * 那幾則就一直留在側欄（2026-11-09 實測：封存後 16 秒登出換帳號，那則在新帳號沒封存）。
+ */
+const PROBE_EVERY_MS = 2_000
 
-/** 多久內同步過就不再做：計時器一分鐘一次；用量快用完時至少隔 10 秒；按「現在同步」不等。 */
-const MIRROR_GAP: Record<'tick' | 'urgent' | 'now', number> = { tick: MIRROR_EVERY_MS - 5_000, urgent: 10_000, now: 0 }
+type MirrorMode = 'tick' | 'event' | 'urgent' | 'now'
+/** 多久內同步過就不再做：計時器一分鐘一次；檔案變了至少隔 2 秒（app 一次會連寫好幾下）；用量快用完時至少隔 10 秒；按「現在同步」不等。 */
+const MIRROR_GAP: Record<MirrorMode, number> = { tick: MIRROR_EVERY_MS - 5_000, event: PROBE_EVERY_MS, urgent: 10_000, now: 0 }
 
-/** 自動同步一次，結果記在 $.store（面板與提示看它）。沒開同步、這台沒有桌面 app 就什麼都不做。 */
-async function runMirror($: $, mode: 'tick' | 'urgent' | 'now'): Promise<void> {
-  if (mirroring) return
+/** 開了同步、而且這台有桌面 app：自動同步與快速檢查都先問這個。 */
+async function mirrorOn($: $): Promise<boolean> {
   const uses = await read($, usesAtom)
   const sy = await read($, syncAtom)
   const platform = await read($, platformAtom)
-  if (!uses?.sync || !sy.on || sy.pair.length !== 2 || !platform || platform === 'other') return
+  return !!uses?.sync && sy.on && sy.pair.length === 2 && !!platform && platform !== 'other'
+}
+
+/** 一個檔現在的樣子（修改時間:大小）；不存在或讀不到是 'none'。 */
+async function fileLook($: $, path: string): Promise<string> {
+  try {
+    const s = await $.fs.stat(path)
+    return `${s.mtimeMs}:${s.size}`
+  } catch {
+    return 'none'
+  }
+}
+
+/** $.store 的 mirrorProbe：路徑 → 上次同步開始時的樣子。認不得的形狀當成空的（等計時器那次重記）。 */
+function probeFrom(x: unknown): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (typeof x !== 'object' || x === null || Array.isArray(x)) return out
+  for (const [path, look] of Object.entries(x as Record<string, unknown>)) if (typeof look === 'string') out[path] = look
+  return out
+}
+
+/**
+ * 快速檢查：上次同步記下的檔（桌面 app 的 config.json、登入中帳號的封存清單）有一個變了，就馬上同步，不等計時器。
+ * - 封存清單：app 封存、取消封存時改寫它（內容沒變就不寫，所以刪除一則沒封存的對話不一定會動到它）。
+ * - config.json：app 換帳號是先登出再登入，登出那一刻就會改寫它，但裡面記的登入帳號要等新帳號登入才換；
+ *   所以這時同步，方向還是舊帳號 → 新帳號，最後一刻的封存、刪除都帶得過去。平常 app 也會改寫它（一小時幾十次），多同步幾次無妨。
+ * 記下的樣子放 $.store（跨對話共用），同一個變化只有先看到的那個對話去同步。
+ */
+async function probeMirror($: $): Promise<void> {
+  if (mirroring || !(await mirrorOn($))) return
+  const seen = probeFrom(await $.store.get('mirrorProbe'))
+  for (const [path, look] of Object.entries(seen)) {
+    if ((await fileLook($, path)) === look) continue
+    await runMirror($, 'event')
+    return
+  }
+}
+
+/** 自動同步一次，結果記在 $.store（面板與提示看它）。沒開同步、這台沒有桌面 app 就什麼都不做。 */
+async function runMirror($: $, mode: MirrorMode): Promise<void> {
+  if (mirroring) return
+  if (!(await mirrorOn($))) return
+  const platform = await read($, platformAtom)
+  if (!platform || platform === 'other') return
   const now = await $.clock.now()
   const last = await $.store.get('mirrorAt')
   if (typeof last === 'number' && now - last < MIRROR_GAP[mode]) return
@@ -582,6 +632,9 @@ async function mirrorOnce($: $, platform: BraidPlatform, now: number): Promise<B
   const sep = platform === 'windows' ? '\\' : '/'
   // 桌面 app 現在登入誰：app 換帳號當下就改 config.json 的這一欄
   const configPath = `${pathsCache.appData}${sep}config.json`
+  // 快速檢查要看的檔：先記樣子再讀內容，讀完之後才變的，下一次檢查就看得到（見 probeMirror）
+  const probe: Record<string, string> = { [configPath]: await fileLook($, configPath) }
+  await $.store.set('mirrorProbe', probe)
   const readActive = async (): Promise<string | null> => {
     try {
       const cfg: unknown = JSON.parse(await $.fs.read(configPath))
@@ -623,6 +676,8 @@ async function mirrorOnce($: $, platform: BraidPlatform, now: number): Promise<B
   const toOrg = await orgDirOf(io, root, sep, target.to, null, spec)
   if (!toOrg) return { ...base, active, to: target.to, problem: 'no-target' }
   if (!fromOrg) return { ...base, active, to: target.to, toOrg }
+  const archivedIndex = `${root}${sep}${active}${sep}${fromOrg}${sep}${spec.archivedIndex}`
+  await $.store.set('mirrorProbe', { ...probe, [archivedIndex]: await fileLook($, archivedIndex) })
   try {
     // 同步刪掉的側欄紀錄先原樣放這裡：braid-backups/sync-deleted/<帳號>/<組織>/local_<id>.json
     const bk = pathsCache.backups
@@ -2097,7 +2152,7 @@ async function drawSync($: $, ui: UI) {
         <Button key="sy-how-toggle" label={help === 'sync-how' ? '怎麼運作 ▾' : '怎麼運作 ▸'} plain dimColor onPress={() => update($, helpAtom, h => (h === 'sync-how' ? null : 'sync-how'))} />
         {help === 'sync-how' && (
           <Box flexDirection="column">
-            {fine(ui, '・桌面 app 開著時，大約每分鐘把現在登入的帳號的對話複製到另一個帳號；用量快用完時再馬上同步一次。', 'how-1')}
+            {fine(ui, '・桌面 app 開著時，大約每分鐘把現在登入的帳號的對話複製到另一個帳號；封存、登出換帳號、用量快用完時再馬上同步一次。', 'how-1')}
             {fine(ui, '・只寫沒登入的那個帳號：app 換帳號時才會重讀，所以不用結束 Claude。', 'how-2')}
             {fine(ui, '・刪除也跟著走；刪掉之後又在另一邊用過的不刪。被刪的那筆先存到備份。', 'how-3')}
             {fine(ui, '・對話內容本來就是電腦上同一個檔，兩邊看到的是同一份。', 'how-4')}
@@ -2499,6 +2554,9 @@ export const register: Register = on => {
       await runMirror($, 'tick')
       await runPrune($)
     })
+    // 封存、刪除、換帳號：檔一變就同步，不等上面的一分鐘（見 probeMirror）
+    probeTimer?.cancel()
+    probeTimer = $.clock.every(PROBE_EVERY_MS, () => probeMirror($))
     $.clock.after(5_000, () => checkUpdate($))
     try {
       await onUsage($, (await $.session.usage()).rateLimits)
